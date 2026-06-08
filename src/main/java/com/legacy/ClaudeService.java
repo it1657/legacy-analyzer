@@ -21,7 +21,7 @@ public class ClaudeService {
 
     public String analyzeCodeWithClaude(String sourceCode) {
         // 💡 안전장치: 만약 윈도우 환경 변수에 API 키가 없거나 기본 플레이스홀더 상태라면 가짜 연동 모드로 자동 전환
-        if (apiKey == null || apiKey.isEmpty() || apiKey.contains("CLAUDE_API_KEY")) {
+        if (apiKey == null || apiKey.isEmpty() || apiKey.contains("CLAUDE_API_KEY") || apiKey.contains("MOCK_KEY")) {
             return "/* =========================================\n"
                     + " * [AI 한글 주석 가상 시뮬레이션 완료]\n"
                     + " * 비즈니스 로직 기능 명세 및 아키텍처 가독성 패치 적용\n"
