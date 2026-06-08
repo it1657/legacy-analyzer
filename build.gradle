@@ -6,20 +6,28 @@ plugins {
 
 group = 'com.legacy'
 version = '0.0.1-SNAPSHOT'
-java { sourceCompatibility = '17' }
+
+java {
+    sourceCompatibility = '17'
+}
 
 repositories {
     mavenCentral()
 }
 
 dependencies {
+    // 1. 웹 & 타임리프 & 데이터 파싱 인프라
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
 
-    // 💡 가장 호환성이 높은 기본 롬복 설정방식으로 원복합니다.
+    // 2. 비동기 HTTP 호출용 WebClient 패키지
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+
+    // 3. 롬복(Lombok) 호환성 설정
     compileOnly 'org.projectlombok:lombok:1.18.30'
     annotationProcessor 'org.projectlombok:lombok:1.18.30'
-}
 
+    // 4. 최초 원본 스프링 기본 테스트 사양
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}

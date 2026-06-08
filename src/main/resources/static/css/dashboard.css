@@ -1,0 +1,72 @@
+@charset "UTF-8";
+
+/* ===================================================================
+   1. 전역 레이아웃 및 본문 컨테이너 명세 (좌우 강제 수평 일치)
+   =================================================================== */
+body { font-family: 'Segoe UI', sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; color: #333; }
+.container { max-width: 1650px; margin: 0 auto; }
+header { padding-bottom: 15px; margin-bottom: 25px; border-bottom: 2px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+h1 { margin: 0; font-size: 24px; color: #0d6efd; font-weight: bold; }
+
+/* 💡 [좌우 대칭 정밀 튜닝]: stretch 속성으로 좌우 흰색 카드의 외곽 바닥선 높이를 무조건 일치시킵니다. */
+.row { display: flex; gap: 20px; margin-bottom: 30px; align-items: stretch; }
+.col-left { flex: 4; display: flex; flex-direction: column; }
+.col-right { flex: 6; display: flex; flex-direction: column; }
+
+/* ===================================================================
+   2. 공통 카드 및 상단 제어 센터 컴포넌트
+   =================================================================== */
+/* 💡 [여백 버그 완전 해결 핵심 1]: 고정 높이를 전면 배제하여 유연한 팽창 레이아웃으로 변경 */
+.card { background: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border: 1px solid #e3e6f0; overflow: hidden; display: flex; flex-direction: column; margin-bottom: 25px; height: 100%; }
+.card-header { padding: 15px 20px; font-weight: bold; color: white; display: flex; justify-content: space-between; align-items: center; font-size: 16px; white-space: nowrap; }
+.bg-dark { background-color: #2e353d; }
+.bg-primary { background-color: #4e73df; }
+.bg-success { background-color: #1cc88a; }
+
+/* 💡 [여백 버그 완전 해결 핵심 2]: 부모 바디가 남은 영역을 끝까지 100% 팽창하도록 추종 속성 부여 */
+.card-body { padding: 20px; display: flex; flex-direction: column; flex: 1; box-sizing: border-box; }
+
+.form-control { width: 100%; padding: 11px; border: 1px solid #d1d3e2; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+.control-row { display: flex; gap: 15px; align-items: center; }
+.btn { background-color: #4e73df; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 15px; font-weight: bold; cursor: pointer; transition: background 0.2s; white-space: nowrap; }
+.btn:hover { background-color: #2e59d9; }
+.btn-success { background-color: #1cc88a; }
+.btn-success:hover { background-color: #17a673; }
+
+/* ===================================================================
+   3. 실시간 고속 서치 필터바 및 이중 분할 대시보드 구조
+   =================================================================== */
+/* 💡 [타이틀 깨짐 전면 차단]: 검색 창이 들어서는 너비를 최대 320px로 강제 제어하여 왼쪽 글자가 절대 잘리지 않도록 보호합니다. */
+.search-wrapper { display: flex; gap: 10px; width: 100%; max-width: 320px; position: relative; }
+.search-control { width: 100%; padding: 7px 14px; border: 2px solid #109363; border-radius: 20px; font-size: 13px; font-weight: 600; outline: none; box-sizing: border-box; background-color: #ffffff; }
+.search-control:focus { box-shadow: 0 0 8px rgba(255, 255, 255, 0.5); }
+
+.split-dashboard { display: flex; flex-direction: column; gap: 15px; height: 100%; box-sizing: border-box; flex: 1; }
+.sub-dashboard-title { font-size: 14px; font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+.dashboard-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; overflow-y: auto; padding: 8px; border: 1px solid #eaecf0; border-radius: 6px; background-color: #fafbfe; box-sizing: border-box; }
+
+/* 💡 오른쪽 서브 윈도우 그리드들의 물리적 배치 공간 매핑 (전체 450px 규격 최적화) */
+#waitGrid { height: 130px; border-left: 4px solid #e74a3b; }
+#completeGrid { flex: 1; min-height: 200px; border-left: 4px solid #1cc88a; }
+
+/* ===================================================================
+   4. 파일 미니 타일 카드 UI 및 실시간 통계 콘솔
+   =================================================================== */
+div.file-box { padding: 10px 12px; border-radius: 6px; font-size: 12px; font-family: 'Consolas', monospace; font-weight: 600; display: flex; align-items: center; justify-content: space-between; border: 1px solid #e3e6f0; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.02); transition: transform 0.15s; }
+div.file-box:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.05); }
+div.status-untracked { color: #5a5c69; }
+div.status-completed { color: #0f5132; background-color: #f0fdf4; border-color: #c3e6cb; }
+
+span.status-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; color: white; font-weight: bold; white-space: nowrap; }
+span.badge-red { background-color: #e74a3b; }
+span.badge-green { background-color: #1cc88a; }
+
+.stat-summary { display: flex; gap: 20px; margin-bottom: 15px; font-size: 14px; font-weight: bold; }
+.stat-item { background: #f8f9fc; padding: 10px 15px; border-radius: 6px; border: 1px solid #e3e6f0; }
+
+/* 💡 [여백 버그 완전 해결 핵심 3]: 검은색 콘솔창이 부모 크기를 따라 자동으로 늘어나 아래 여백 20px를 칼같이 동기화하도록 유연성 극대화 */
+.terminal-log { background-color: #1e1e1e; color: #a9b7c6; padding: 15px; border-radius: 6px; font-family: 'Consolas', monospace; font-size: 13px; flex: 1; overflow-y: auto; white-space: pre-wrap; margin-top: 5px; box-shadow: inset 0 2px 8px rgba(0,0,0,0.5); box-sizing: border-box; }
+
+.progress-container { display: none; width: 100%; background-color: #e9ecef; border-radius: 6px; overflow: hidden; margin-top: 15px; height: 16px; border: 1px solid #ced4da; }
+.progress-bar-animated { width: 100%; height: 100%; background: linear-gradient(45deg, #1cc88a 25%, #15a571 25%, #15a571 50%, #1cc88a 50%, #1cc88a 75%, #15a571 75%, #15a571); background-size: 40px 40px; animation: progress-bar-stripes 1s linear infinite; }
+@keyframes progress-bar-stripes { 0% { background-position: 40px 0; } 100% { background-position: 0 0; } }
