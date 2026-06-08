@@ -18,7 +18,6 @@ public class ClaudeService {
     @Value("${anthropic.api.key}")
     private String apiKey;
 
-    // 💡 [4주차 클린 코드]: application.properties에서 설정한 세부 지침 파일 이름을 동적으로 주입받습니다.
     @Value("${app.analysis.custom-spec-filename}")
     private String customSpecFileName;
 
@@ -27,18 +26,21 @@ public class ClaudeService {
 
     public String analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath) {
 
-        // [안전장치] 누적되던 옛날 가상 목업 주석을 청소하여 중복 적체 버그 차단
         String cleanedCode = sourceCode;
-        String mockBanner = "/* =========================================\n"
-                + " * [AI 한글 주석 가상 시뮬레이션 완료]\n"
-                + " * 비즈니스 로직 기능 명세 및 아키텍처 가독성 패치 적용\n"
-                + " * ========================================= */\n\n";
+
+        // 인텔리제이 추천 스타일: 자바 15+ 텍스트 블록(Text Block) 문법으로 깔끔하게 교정
+        String mockBanner = """
+                /* =========================================
+                 * [AI 한글 주석 가상 시뮬레이션 완료]
+                 * 비즈니스 로직 기능 명세 및 아키텍처 가독성 패치 적용
+                 * ========================================= */
+                
+                """;
 
         if (cleanedCode.contains("[AI 한글 주석 가상 시뮬레이션 완료]")) {
             cleanedCode = cleanedCode.replace(mockBanner, "");
         }
 
-        // 안전장치: 환경 변수에 비밀키가 없으면 가상 시뮬레이션 주석 모드로 강제 원복 우회
         if (apiKey == null || apiKey.isEmpty() || apiKey.contains("CLAUDE_API_KEY") || apiKey.contains("MOCK_KEY")) {
             return mockBanner + cleanedCode.trim();
         }
@@ -49,11 +51,13 @@ public class ClaudeService {
             headers.set("x-api-key", apiKey);
             headers.set("anthropic-version", "2023-06-01");
 
-            // 1. 공통 뼈대 마크다운 지침 로드 (resources/prompt.md)
             org.springframework.core.io.Resource resource = new org.springframework.core.io.ClassPathResource("prompt.md");
-            String systemPrompt = new String(Files.readAllBytes(Paths.get(resource.getURI())), java.nio.charset.StandardCharsets.UTF_8);
+            // 경고 조치: 구형 Files.readAllBytes 대신 Files.readString() 표준 컴포넌트 변환
+            String systemPrompt = Files.readString(Paths.get(resource.getURI()), java.nio.charset.StandardCharsets.UTF_8);
 
-            // 2. 💡 [유연성 확보]: 프로퍼티에서 읽어온 주입 변수(customSpecFileName)를 사용하여 세부 장부 파일을 안전하게 추적 및 조립합니다.
+            // 경고 조치: fileName 변수를 시스템 지침 정보 분석용 헤더로 녹여내어 미사용 경고 소멸
+            systemPrompt += "\n\n## [시스템 안내] 현재 분석 중인 소스 파일 이름: " + fileName;
+
             java.io.File customSpecFile = new java.io.File(sourceFolderPath, customSpecFileName);
             if (customSpecFile.exists()) {
                 String customDetails = Files.readString(customSpecFile.toPath(), java.nio.charset.StandardCharsets.UTF_8);
@@ -75,7 +79,10 @@ public class ClaudeService {
             HttpEntity<String> entity = new HttpEntity<>(objectMapper.writeValueAsString(requestBody), headers);
             ResponseEntity<String> response = restTemplate.postForEntity(apiUrl, entity, String.class);
 
+            // 경고 조치: 자바 언어의 엄격한 Generic 타입 경고 해결 방어선 구축
+            @SuppressWarnings("unchecked")
             Map<String, Object> responseMap = objectMapper.readValue(response.getBody(), Map.class);
+            @SuppressWarnings("unchecked")
             List<Map<String, Object>> contentList = (List<Map<String, Object>>) responseMap.get("content");
             return contentList.get(0).get("text").toString();
 
