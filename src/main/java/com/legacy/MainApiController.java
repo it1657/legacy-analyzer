@@ -1,6 +1,7 @@
 package com.legacy;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import java.io.File;
@@ -15,125 +16,185 @@ public class MainApiController {
     @Autowired
     private ClaudeService claudeService;
 
-    // 대용량 파일 기준 설정 (3주차 예외 처리 기준: 50KB = 약 50,000자)
-    // 실제 Claude API 연동 시 단일 파일 토큰 제한(Context Window) 예외를 막기 위한 임계치입니다.
-    private static final long MAX_FILE_SIZE_BYTES = 50 * 1024;
+    @Value("${app.analysis.max-file-size-bytes}")
+    private long maxFileSizeBytes;
 
     @GetMapping("/")
-    public String index() {
-        return "index";
-    }
+    public String index() { return "index"; }
 
-    // 1. 단일 코드 수동 분석 API
     @PostMapping("/api/analyze")
     @ResponseBody
     public AnalyzeDto.Response testAnalyze(@RequestBody AnalyzeDto.Request request) {
-        String result = claudeService.analyzeCodeWithClaude(request.getSourceCode());
+        // 단일 테스트 하위 호환 매핑용
+        String result = claudeService.analyzeCodeWithClaude(request.getSourceCode(), "direct_input.java", "C:\\project");
         return new AnalyzeDto.Response(result);
     }
 
-    // 2. [3주차 고도화] 로컬 폴더 배치 분석 및 표준 문서 일괄 조립 API
-    @PostMapping("/api/analyze-folder")
+    // 1단계: 지정 경로 내부 소스 전수 스캔 및 대시보드 동기화 현황판 갱신
+    @PostMapping("/api/dashboard-status")
     @ResponseBody
-    public Map<String, String> analyzeFolder(@RequestBody Map<String, String> request) {
-        Map<String, String> responseMap = new HashMap<>();
+    public Map<String, Object> getDashboardStatus(@RequestBody Map<String, String> request) {
+        Map<String, Object> resultData = new HashMap<>();
         String folderPathStr = request.get("folderPath");
         File folder = new File(folderPathStr);
 
         if (!folder.exists() || !folder.isDirectory()) {
-            responseMap.put("log", "❌ 존재하지 않거나 올바르지 않은 폴더 경로입니다.\n입력한 경로: " + folderPathStr);
-            return responseMap;
+            resultData.put("error", "올바르지 않은 원본 디렉터리 경로입니다.");
+            return resultData;
         }
 
         try {
-            // 하위의 분석 가능한 파일 전체 수집 (.java, .vue, .js)
+            // Enterprise 레거시 스펙 확장자(java, vue, js, jsx, ts, tsx, xfdl, xml) 완벽 검출 필터링
             List<Path> fileList = Files.walk(Paths.get(folderPathStr))
                     .filter(Files::isRegularFile)
-                    .filter(p -> p.toString().endsWith(".java") || p.toString().endsWith(".vue") || p.toString().endsWith(".js"))
+                    .filter(p -> p.toString().endsWith(".java") || p.toString().endsWith(".vue") ||
+                            p.toString().endsWith(".js") || p.toString().endsWith(".jsx") ||
+                            p.toString().endsWith(".ts") || p.toString().endsWith(".tsx") ||
+                            p.toString().endsWith(".xfdl") || p.toString().endsWith(".xml"))
                     .toList();
 
-            if (fileList.isEmpty()) {
-                responseMap.put("log", "🗀 해당 폴더 내에 분석 가능한 소스 코드 파일(.java, .vue, .js)이 없습니다.");
-                return responseMap;
+            List<Map<String, Object>> fileStatusList = new ArrayList<>();
+            int completeCount = 0;
+            int waitCount = 0;
+
+            String defaultOutputStr = folderPathStr.replace("test-code", "output-code");
+            File outputFolder = new File(defaultOutputStr);
+
+            for (Path path : fileList) {
+                Map<String, Object> fileMap = new HashMap<>();
+                String fileName = path.getFileName().toString();
+                boolean isCompleted = false;
+
+                File targetFile = new File(outputFolder, fileName);
+                if (targetFile.exists()) {
+                    String targetContent = Files.readString(targetFile.toPath());
+                    if (targetContent.contains("[AI 한글 주석 가상 시뮬레이션 완료]")) {
+                        isCompleted = true;
+                    }
+                }
+
+                fileMap.put("fileName", fileName);
+                fileMap.put("isCompleted", isCompleted);
+                fileStatusList.add(fileMap);
+
+                if (isCompleted) completeCount++;
+                else waitCount++;
             }
 
+            resultData.put("totalCount", fileList.size());
+            resultData.put("completeCount", completeCount);
+            resultData.put("waitCount", waitCount);
+            resultData.put("files", fileStatusList);
+            resultData.put("consoleLog", "[안내] 원본 레거시 디렉터리 스캔 완료.\n- 지정 출력 위치 [" + defaultOutputStr + "] 내부의 AI 한글 주석 [패치완료] 현황을 추적합니다.");
+
+            return resultData;
+        } catch (Exception e) {
+            resultData.put("error", e.getMessage());
+            return resultData;
+        }
+    }
+
+    // 2단계: 특정 지정 경로에 안전 복사 배포 및 Claude.md 마크다운 기술문서 일괄 인쇄 자동 발행
+    @PostMapping("/api/analyze-folder")
+    @ResponseBody
+    public Map<String, String> analyzeFolder(@RequestBody Map<String, String> request) {
+        Map<String, String> responseMap = new HashMap<>();
+        String sourcePathStr = request.get("sourcePath");
+        String outputPathStr = request.get("outputPath");
+
+        File sourceFolder = new File(sourcePathStr);
+        File outputFolder = new File(outputPathStr);
+
+        if (!sourceFolder.exists() || !sourceFolder.isDirectory()) {
+            responseMap.put("log", "[오류] 올바르지 않은 원본 소스 경로입니다.");
+            return responseMap;
+        }
+
+        if (!outputFolder.exists()) {
+            outputFolder.mkdirs();
+        }
+
+        try {
+            List<Path> fileList = Files.walk(Paths.get(sourcePathStr))
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.toString().endsWith(".java") || p.toString().endsWith(".vue") ||
+                            p.toString().endsWith(".js") || p.toString().endsWith(".jsx") ||
+                            p.toString().endsWith(".ts") || p.toString().endsWith(".tsx") ||
+                            p.toString().endsWith(".xfdl") || p.toString().endsWith(".xml"))
+                    .toList();
+
             StringBuilder processLog = new StringBuilder();
-            processLog.append("⚡ [3주차 배치 분석 및 문서화 프로세스 가동]\n");
-            processLog.append("▶ 분석 대상 폴더: ").append(folderPathStr).append("\n");
+            processLog.append("[시스템 로그] 지정 경로 안전 배포 및 문서화 프로세스 가동\n");
+            processLog.append("- 원본 레거시 대상: ").append(sourcePathStr).append("\n");
+            processLog.append("- 특정 지정 출력 위치: ").append(outputPathStr).append("\n");
             processLog.append("=========================================\n\n");
 
             int successCount = 0;
             int skipCount = 0;
-            List<String> analyzedModules = new ArrayList<>();
+            List<String> configList = new ArrayList<>();
 
-            // [3주차 미션] 파일 순회 및 대용량 토큰 예외 핸들링
             for (Path filePath : fileList) {
                 long fileSize = Files.size(filePath);
                 String fileName = filePath.getFileName().toString();
 
-                // ⚠️ 대용량 파일 예외 처리 규칙 작동
-                if (fileSize > MAX_FILE_SIZE_BYTES) {
-                    processLog.append("⚠ [용량 초과 패스] ").append(fileName)
-                            .append(" (").append(fileSize / 1024).append("KB) - 토큰 제한 방지를 위해 분석에서 제외됩니다.\n");
+                // 3주차 사양: application.properties 연동 대용량 패스 브레이커 작동
+                if (fileSize > maxFileSizeBytes) {
+                    processLog.append("[용량 초과 패스] ").append(fileName)
+                            .append(" (").append(fileSize / 1024).append("KB) - 분석에서 제외됩니다.\n");
                     skipCount++;
                     continue;
                 }
 
-                // 정상 범위 파일 읽기 및 주석 적용
                 String originalCode = Files.readString(filePath);
-                String commentedCode = claudeService.analyzeCodeWithClaude(originalCode);
-                Files.writeString(filePath, commentedCode);
+                // 💡 수정한 인자 전달 규칙 바인딩: 파일명과 소스 경로 주소를 함께 던져서 custom_spec.txt 추적을 연동합니다.
+                String commentedCode = claudeService.analyzeCodeWithClaude(originalCode, fileName, sourcePathStr);
 
-                processLog.append("✔ [분석/주석 완료] ").append(fileName).append("\n");
-                analyzedModules.add(fileName);
+                Path targetPath = Paths.get(outputPathStr, fileName);
+                Files.writeString(targetPath, commentedCode);
+
+                processLog.append("[안전 복사 및 주석 배포 완료] -> ").append(fileName).append("\n");
+                configList.add(fileName);
                 successCount++;
             }
 
-            // [3주차 미션] 실제 인수인계서 수준의 표준 README.md (Claude.md) 포맷 정교화 컴포넌트
+            // 정문화된 이모지 프리 표준 마크다운 조립 인쇄
             StringBuilder md = new StringBuilder();
-            md.append("# 📝 프로젝트 레거시 기술 명세서 (README)\n\n");
-            md.append("## 🔍 1. 시스템 개요 및 기획 의도\n");
-            md.append("- 본 시스템은 퇴사 및 인수인계 과정에서 발생하는 유지보수 공수를 단축하기 위해 생성되었습니다.\n");
-            md.append("- **분석 대상 루트 경로**: `").append(folderPathStr).append("`\n");
-            md.append("- **문서 자동 발행일**: 2026-06-08\n\n");
+            md.append("# 프로젝트 레거시 안전 배포 명세서 (README)\n\n");
+            md.append("## 1. 시스템 인프라 및 기획 사양\n");
+            md.append("- 본 문서는 Claude AI 아키텍처 스캔을 통해 안전하게 미러링된 결과물 명세서입니다.\n");
+            md.append("- 원본 레거시 소스 위치: `").append(sourcePathStr).append("`\n");
+            md.append("- 특정 지정 출력 위치: `").append(outputPathStr).append("`\n");
+            md.append("- 종합 관리 대시보드 버전: `v4.5 (지정 세부 지침 컴포넌트 통합 확장본)`\n\n");
 
-            md.append("## 🏗️ 2. 아키텍처 및 분석 모듈 현황\n");
-            md.append("본 프로젝트에서 AI 분석 및 가독성 주석 패치가 완료된 소스 파일 목록입니다.\n\n");
-            md.append("| 번호 | 파일명 | 상태 | 비고 |\n");
+            md.append("## 2. 안전 미러링 완료 모듈 현황\n");
+            md.append("원본 코드를 보존한 채, 독자적인 주석 결합 처리가 완수된 파일 색인 일람입니다.\n\n");
+            md.append("| 번호 | 모듈 파일명 | 배포 상태 | 가독성 조치 내역 |\n");
             md.append("| :--- | :--- | :--- | :--- |\n");
-
             int num = 1;
-            for (String mod : analyzedModules) {
-                md.append("| ").append(num++).append(" | `").append(mod).append("` | 🟢 완료 | 한글 주석 내장 |\n");
+            for (String mod : configList) {
+                md.append("| ").append(num++).append(" | `").append(mod).append("` | 완료 | 한글 주석 패치 완료 |\n");
             }
             if (skipCount > 0) {
-                md.append("| - | 대용량 파일들 | 🟡 제외 | 토큰 보호 제한 적용됨 |\n");
+                md.append("| - | 대용량 소스군 | 제외 | 토큰 제한 보호 우회 적용 |\n");
             }
             md.append("\n");
 
-            md.append("## ⚙️ 3. 환경 변수 및 가동 인프라 사양\n");
-            md.append("시스템이 의존하고 있는 외부 API 사양과 백엔드 포트 가동 명세입니다.\n");
-            md.append("- **가동 포트**: `8081`\n");
-            md.append("- **AI 아키텍처 모델**: `Claude 3.5 Sonnet`\n");
-            md.append("- **필수 주입 환경변수**: `CLAUDE_API_KEY` (윈도우/리눅스 시스템 탑재 필요)\n\n");
+            md.append("## 3. 후임자 인수인계 특이사항 가이드\n");
+            md.append("1. 인프라 무결성: 원본 코드는 단 1%도 변형되지 않았으므로 이관 및 반영 시 위험 부담이 전혀 없습니다.\n");
+            md.append("2. 유지보수 수행: 후임 업무 가동 시 본 출력 경로(`").append(outputPathStr).append("`) 내부의 한글 주석 패치 코드를 참조하여 구조를 즉각 독해하십시오.\n");
 
-            md.append("## 🚀 4. 후임자 인수인계 가이드\n");
-            md.append("1. **코드 레벨 분석**: 각 소스 파일 내부의 함수와 주요 비즈니스 로직에 가독성 높은 한글 주석이 삽입되어 있으므로 코드를 즉시 읽을 수 있습니다.\n");
-            md.append("2. **휴먼 에러 방지**: 레거시 코드를 수정할 때 예외 처리가 가이드라인에 맞춰 최적화되어 있으니 기존 로직 라인을 훼손하지 마십시오.\n");
+            Files.writeString(Paths.get(outputPathStr, "Claude.md"), md.toString());
 
-            // 최종 마크다운 파일로 인쇄 출력
-            Files.writeString(Paths.get(folderPathStr, "Claude.md"), md.toString());
-
-            // 모니터링 로그창 결과 조립
             processLog.append("\n=========================================\n");
-            processLog.append("📊 [최종 통계] 완료: ").append(successCount).append("개 / 예외제외: ").append(skipCount).append("개\n");
-            processLog.append("🎉 표준 인수인계 규격 마크다운 문서 'Claude.md' 파일이 완벽하게 자동 발행되었습니다!");
+            processLog.append("[일괄 배치 최종 통계] 완료: ").append(successCount).append("개 / 보류: ").append(skipCount).append("개\n");
+            processLog.append("[완료] 원본 소스는 100% 원형 보존되었습니다.\n");
+            processLog.append("[안내] 지정 출력 경로 내부와 대시보드 동기화 상태가 성공적으로 갱신되었습니다.");
 
             responseMap.put("log", processLog.toString());
             return responseMap;
 
         } catch (Exception e) {
-            responseMap.put("log", "❌ 프로세스 예외 처리 에러 발생:\n" + e.getMessage());
+            responseMap.put("log", "[오류] 지정 경로 복사 배포 중 예외 발생:\n" + e.getMessage());
             return responseMap;
         }
     }
