@@ -59,6 +59,11 @@
                             <div class="stat-item">🔴 미처리 파일: <span id="txtWait" style="color:#e74a3b;">0</span>개</div>
                         </div>
 
+                        <div class="stat-summary" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px; background-color: #f8f9fc; border: 1px dashed #e3e6f0; border-radius: 5px; padding: 8px;">
+                            <div class="stat-item" style="font-size: 13px;">총 소요 시간: <span id="txtTotalTime" style="color:#36b9cc; font-weight: bold;">0.00</span>초</div>
+                            <div class="stat-item" style="font-size: 13px;">평균 처리 속도: <span id="txtAvgSpeed" style="color:#f6c23e; font-weight: bold;">0.00</span>초/개</div>
+                        </div>
+
                         <!-- 💡 [구조 교정 핵심]: 우측 이중 분할과 똑같은 자식 wrapper 깊이를 주어, 검은색 창이 아래 바닥선까지 자동으로 영리하게 찢어지며 늘어나게 만듭니다 -->
                         <div class="split-dashboard" style="flex: 1; display: flex; flex-direction: column;">
                             <div style="flex: 1; display: flex; flex-direction: column; margin-top: 10px;">
@@ -99,7 +104,7 @@
                                 </div>
                                 <div id="waitGrid" class="dashboard-grid">
                                     <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 50px; font-size: 13px;">
-                                        경로 조회 시 미처리 소스가 이곳에 격리 표기됩니다.
+                                        경로 조회 시 미처리 소스가 이곳에 표기됩니다.
                                     </div>
                                 </div>
                             </div>
@@ -108,11 +113,11 @@
                             <div style="flex: 1; display: flex; flex-direction: column;">
                                 <div class="sub-dashboard-title" style="color: #1cc88a;">
                                     <span>🟢 주석 패치 완료 목록 (<span id="lblCompleteCnt">0</span>)</span>
-                                    <span style="font-size: 11px; font-weight: normal; color:#858796;">구조 유지 배포 완료 인프라</span>
+                                    <span style="font-size: 11px; font-weight: normal; color:#858796;">구조 유지 배포 완료</span>
                                 </div>
                                 <div id="completeGrid" class="dashboard-grid" style="flex: 1; min-height: 200px;">
                                     <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 80px; font-size: 13px;">
-                                        패치가 완료된 안전 파일 자산 목록입니다.
+                                        패치가 완료된 안전 파일 목록입니다.
                                     </div>
                                 </div>
                             </div>
@@ -121,266 +126,11 @@
                     </div>
                 </div>
             </div>
-
         </div> <!-- .row 마감 -->
     </div> <!-- .container 마감 -->
 
+    <div th:replace="~{fragments/modal :: confirmModal}"></div>
 
-
-    <script>
-        // 4,177개 전체 파일 데이터를 메모리에 전역 보관하는 캐시
-        let globalFilesCache = [];
-
-        // 💡 [최초 가동 및 무결성 제어]: 화면이 열리자마자 2단계 버튼을 클릭 못하게 강제 잠금 처리합니다.
-        window.onload = function() {
-            const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
-            if(step2Btn) {
-                step2Btn.disabled = true;
-                step2Btn.style.opacity = "0.5";
-                step2Btn.style.cursor = "not-allowed";
-            }
-        };
-
-        // 💡 1 단계: 파일 상태 조회 및 대시보드 상/하 분할 매핑 기술
-        async function loadDashboard() {
-            const path = document.getElementById('sourceFolderPath').value;
-            const outPath = document.getElementById('outputFolderPath').value;
-            const logConsole = document.getElementById('terminalLog');
-            const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
-
-            document.getElementById('uiSearchInput').value = ""; // 검색어 칸 초기화
-
-            if(!path.trim()) {
-                alert('원본 소스 경로를 지정해 주세요!');
-                return;
-            }
-
-            logConsole.textContent = "🔍 원본 디렉터리 구조 계층 조사 및 이중 격리 검증 중...";
-
-            try {
-                const response = await fetch('/api/dashboard-status', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ folderPath: path, outputPath: outPath })
-                });
-                const data = await response.json();
-
-                if(data.error) {
-                    logConsole.textContent = "❌ 오류: " + data.error;
-                    return;
-                }
-
-                logConsole.textContent = data.consoleLog;
-
-                // 백엔드가 준 데이터를 전역 캐시에 세팅하고 화면 분할 동적 렌더링을 호출합니다.
-                globalFilesCache = data.files && data.files.length > 0 ? data.files : [];
-                renderDividedGrid(globalFilesCache);
-
-                // 💡 [클릭 차단 해제 핵심]: 1단계 조회가 성공 완료되었으므로, 비로소 2단계 버튼 잠금을 풀어줍니다!
-                if(step2Btn) {
-                    step2Btn.disabled = false;
-                    step2Btn.style.opacity = "1";
-                    step2Btn.style.cursor = "pointer";
-                }
-
-            } catch (error) {
-                logConsole.textContent = "❌ 통신 오류: 백엔드 기동 서버 상태를 확인하세요. (" + error.message + ")";
-            }
-        }
-
-        // 필터링된 배열의 크기를 계산하여 전체 화면 카운트를 실시간 동기화하는 렌더러
-        function renderDividedGrid(filesArray) {
-            const waitGrid = document.getElementById('waitGrid');
-            const completeGrid = document.getElementById('completeGrid');
-            const outPath = document.getElementById('outputFolderPath').value;
-
-            waitGrid.innerHTML = "";
-            completeGrid.innerHTML = "";
-
-            let currentWaitCnt = 0;
-            let currentCompleteCnt = 0;
-
-            if(filesArray.length === 0) {
-                waitGrid.innerHTML = completeGrid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 30px;">검색 조건에 부합하는 소스가 없습니다.</div>`;
-                document.getElementById('txtTotal').textContent = "0";
-                document.getElementById('txtComplete').textContent = "0";
-                document.getElementById('txtWait').textContent = "0";
-                document.getElementById('lblWaitCnt').textContent = "0개";
-                document.getElementById('lblCompleteCnt').textContent = "0개";
-                return;
-            }
-
-            filesArray.forEach(file => {
-                const fileDiv = document.createElement('div');
-                fileDiv.className = `file-box ${file.isCompleted ? 'status-completed' : 'status-untracked'}`;
-                fileDiv.style.cursor = "pointer";
-
-                const nameSpan = document.createElement('span');
-                let cleanFileName = file.fileName ? file.fileName.replaceAll('#', '/').replaceAll('\\', '/') : "";
-                nameSpan.textContent = cleanFileName;
-                nameSpan.style.wordBreak = "break-all";
-                nameSpan.style.paddingRight = "10px";
-
-                const badgeSpan = document.createElement('span');
-                badgeSpan.className = `status-badge ${file.isCompleted ? 'badge-green' : 'badge-red'}`;
-                badgeSpan.textContent = file.isCompleted ? "패치완료" : "대기중";
-
-                fileDiv.appendChild(nameSpan);
-                fileDiv.appendChild(badgeSpan);
-
-                fileDiv.onclick = function() {
-                    const windowSeparator = outPath.endsWith('\\') || outPath.endsWith('/') ? "" : "\\";
-                    const absoluteWindowsPath = outPath + windowSeparator + file.fileName.replaceAll('/', '\\').replaceAll('#', '\\');
-
-                    navigator.clipboard.writeText(absoluteWindowsPath).then(() => {
-                        const logConsole = document.getElementById('terminalLog');
-                        logConsole.textContent = `📋 [경로 복사 완료] 윈도우 탐색기 주소창에 붙여넣기(Ctrl+V) 하세요:\n📍 경로 주소: ${absoluteWindowsPath}`;
-                        logConsole.scrollTop = logConsole.scrollHeight;
-                    }).catch(err => {
-                        console.error("경로 복사 실패: ", err);
-                    });
-                };
-
-                if (!file.isCompleted) {
-                    waitGrid.appendChild(fileDiv);
-                    currentWaitCnt++;
-                } else {
-                    completeGrid.appendChild(fileDiv);
-                    currentCompleteCnt++;
-                }
-            });
-
-            document.getElementById('txtTotal').textContent = filesArray.length;
-            document.getElementById('txtComplete').textContent = currentCompleteCnt;
-            document.getElementById('txtWait').textContent = currentWaitCnt;
-            document.getElementById('lblWaitCnt').textContent = currentWaitCnt + "개";
-            document.getElementById('lblCompleteCnt').textContent = currentCompleteCnt + "개";
-
-            if(currentWaitCnt === 0) waitGrid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #1cc88a; padding-top: 50px; font-weight: bold;">🎉 조건에 맞는 미처리 파일이 0개입니다.</div>`;
-            if(currentCompleteCnt === 0) completeGrid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 100px;">조건에 맞는 패치 완료 파일이 없습니다.</div>`;
-        }
-        // 브라우저 메모리 배열 내부에서 실시간 키워드 서칭
-        function filterFileList() {
-            const query = document.getElementById('uiSearchInput').value.toLowerCase().trim();
-
-            if(!query) {
-                renderDividedGrid(globalFilesCache);
-                return;
-            }
-
-            const filtered = globalFilesCache.filter(file => {
-                const cleanPath = file.fileName ? file.fileName.toLowerCase().replaceAll('#', '/').replaceAll('\\', '/') : "";
-                return cleanPath.includes(query);
-            });
-
-            renderDividedGrid(filtered);
-        }
-
-        // 2 단계: 비동기 가동 제어 버튼 락킹 및 문자열 플래그 전송 스크립트
-        async function runBatchAnalysis() {
-            const sourcePath = document.getElementById('sourceFolderPath').value;
-            const outputPath = document.getElementById('outputFolderPath').value;
-            const isForceChecked = document.getElementById('chkForceActive').checked;
-
-            const logConsole = document.getElementById('terminalLog');
-            const progressPanel = document.getElementById('progressPanel');
-
-            const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
-            const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
-
-            if(!sourcePath.trim() || !outputPath.trim()) {
-                alert('원본 경로와 출력 경로를 둘 다 입력해 주세요!');
-                return;
-            }
-
-            step1Btn.disabled = true;
-            step2Btn.disabled = true;
-            step1Btn.style.opacity = "0.5";
-            step2Btn.style.opacity = "0.5";
-
-            logConsole.textContent = "🚀 지정 경로 복사 및 주석 결합 배포 가동 중...\n완료 시 자동으로 대시보드가 분할 동기화 갱신됩니다.";
-            progressPanel.style.display = "block";
-
-            setTimeout(async () => {
-                try {
-                    const response = await fetch('/api/analyze-folder', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            sourcePath: sourcePath,
-                            outputPath: outputPath,
-                            forceActive: isForceChecked ? "true" : "false"
-                        })
-                    });
-                    const data = await response.json();
-                    progressPanel.style.display = "none";
-
-                    if(data.log) {
-                        logConsole.textContent = data.log;
-                        logConsole.scrollTop = logConsole.scrollHeight;
-                    }
-
-                    await loadDashboard();
-
-                } catch (error) {
-                    logConsole.textContent = "❌ 통신 오류: 프로세스 정지 (" + error.message + ")";
-                } finally {
-                    step1Btn.disabled = false;
-                    step2Btn.disabled = false;
-                    step1Btn.style.opacity = "1";
-                    step2Btn.style.opacity = "1";
-                    progressPanel.style.display = "none";
-                }
-            }, 50);
-        }
-
-        // 💡 [3주차 완전 리셋 마감]: 주소 입력칸과 제어 체크박스까지 무결성 태초 상태로 완전히 밀어버리는 완전 리셋 함수
-        function resetDashboard() {
-            // 1. 💡 [요구사항 반영]: 원본 소스 경로창, 결과 출력 경로창 입력값 100% 완전 삭제
-            document.getElementById('sourceFolderPath').value = "";
-            document.getElementById('outputFolderPath').value = "";
-
-            // 2. 💡 [요구사항 반영]: 강제 포함 선택 체크박스 체크 해제 리셋
-            document.getElementById('chkForceActive').checked = false;
-
-            // 3. 우측 실시간 검색 필터창 검색어 지우기
-            document.getElementById('uiSearchInput').value = "";
-
-            // 4. 좌측 콘솔창 텍스트 초기 가이드라인 원상복구 및 프로그레스 숨김
-            document.getElementById('terminalLog').textContent = "시스템 가동 대기 중... 먼저 [1단계: 파일 상태 조회]를 실행하십시오.";
-            document.getElementById('progressPanel').style.display = "none";
-
-            // 5. 상단 카운트보드 수치 대기 상태 주입
-            document.getElementById('txtTotal').textContent = "0";
-            document.getElementById('txtComplete').textContent = "0";
-            document.getElementById('txtWait').textContent = "0";
-            document.getElementById('lblWaitCnt').textContent = "0개";
-            document.getElementById('lblCompleteCnt').textContent = "0개";
-
-            // 6. 전역 메모리 캐시 배열 비우기
-            globalFilesCache = [];
-
-            // 7. 우측 대시보드 상/하단 이중 격리판 기본 대기 레이아웃으로 복원
-            document.getElementById('waitGrid').innerHTML = `
-            <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 50px; font-size: 13px;">
-                경로 조회 시 미처리 소스가 이곳에 격리 표기됩니다.
-            </div>`;
-
-            document.getElementById('completeGrid').innerHTML = `
-            <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 100px; font-size: 13px;">
-                패치가 완료된 안전 파일 자산 목록입니다.
-            </div>`;
-
-            // 8. 💡 [요구사항 반영]: 초기화되었으므로 안전을 위해 2단계 버튼을 다시 클릭 못하도록 재잠금 처리!
-            const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
-            if(step2Btn) {
-                step2Btn.disabled = true;
-                step2Btn.style.opacity = "0.5";
-                step2Btn.style.cursor = "not-allowed";
-            }
-
-            console.log("🧼 원본 경로 포함 대시보드 무결성 태초 상태 초기화 완료");
-        }
-    </script>
+    <script th:src="@{/js/dashboard.js}"></script>
 </body>
 </html>
