@@ -606,13 +606,35 @@ function cancelAnalysis() {
 
     if (!confirm('현재 분석을 취소하시겠습니까?')) return;
 
+    // EventSource 연결 종료
     if (currentEventSource) {
         currentEventSource.close();
         currentEventSource = null;
     }
 
+    // 분석 타이머 종료
+    if (analysisTimer) {
+        clearInterval(analysisTimer);
+        analysisTimer = null;
+    }
+
+    // 진행 큐 초기화
+    progressQueue = [];
+    isProcessingProgress = false;
+
     const logConsole = document.getElementById('terminalLog');
     logConsole.textContent += "\n[취소됨] 분석이 사용자에 의해 취소되었습니다.\n";
+
+    // 프로그래스 패널 및 오버레이 숨김
+    const analysisOverlay = document.getElementById('analysisOverlay');
+    if (analysisOverlay) {
+        analysisOverlay.style.display = "none";
+    }
+
+    const progressPanel = document.getElementById('progressPanel');
+    if (progressPanel) {
+        progressPanel.style.display = "none";
+    }
 
     clearSessionFromStorage();
     currentSessionId = null;
