@@ -333,7 +333,17 @@ async function runBatchAnalysis() {
     };
 
     currentEventSource.onerror = function(e) {
-        console.error("[프론트] EventSource 에러 또는 연결 종료, readyState:", currentEventSource.readyState, e);
+        // readyState가 CONNECTING(0)이면 자동 재연결 중 - 무시
+        if (currentEventSource.readyState === 0) {
+            console.log("[프론트] EventSource 자동 재연결 중...");
+            return;
+        }
+        // CLOSED(2)이면 정상 종료
+        if (currentEventSource.readyState === 2) {
+            console.log("[프론트] EventSource 정상 종료");
+            return;
+        }
+        console.error("[프론트] EventSource 에러, readyState:", currentEventSource.readyState, e);
     };
 
     currentEventSource.addEventListener("progress", function(e) {
