@@ -684,6 +684,7 @@ public class MainApiController {
         try {
             // JSON으로 직렬화
             String jsonData = objectMapper.writeValueAsString(data);
+            log.info("[SSE] 전송: name={}, jsonData 길이={}", name, jsonData.length());
 
             // SseEmitter로 전송 (올바른 SSE 형식)
             // event: name\ndata: json\n\n 형식
@@ -694,6 +695,7 @@ public class MainApiController {
                     .reconnectTime(3000L);
 
             emitter.send(event);
+            log.info("[SSE] {} 이벤트 전송 완료", name);
 
             try {
                 Thread.sleep(10);
