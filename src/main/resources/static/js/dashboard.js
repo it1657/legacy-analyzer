@@ -327,7 +327,17 @@ async function runBatchAnalysis() {
     const url = `/api/analyze-folder-stream?sourcePath=${encodeURIComponent(sourcePath)}&outputPath=${encodeURIComponent(outputPath)}&forceActive=${isForceChecked}&sessionId=${currentSessionId}&token=${encodeURIComponent(token || '')}`;
     currentEventSource = new EventSource(url);
 
+    // EventSource 연결 상태 모니터링
+    currentEventSource.onopen = function() {
+        console.log("[프론트] EventSource 연결됨, readyState:", currentEventSource.readyState);
+    };
+
+    currentEventSource.onerror = function(e) {
+        console.error("[프론트] EventSource 에러 또는 연결 종료, readyState:", currentEventSource.readyState, e);
+    };
+
     currentEventSource.addEventListener("progress", function(e) {
+        console.log("[프론트] progress 이벤트 수신");
         progressQueue.push({ raw: e.data });
         if (!isProcessingProgress) processNextProgress();
     });
@@ -336,6 +346,7 @@ async function runBatchAnalysis() {
     // 💡 [마무리 및 타이머 종료 구간]: 작업 완료 시 스탑워치 정지 및 카드판 피날레
     // ===================================================================
     currentEventSource.addEventListener("complete", function(e) {
+        console.log("[프론트] ✅ complete 이벤트 수신됨!", e);
         isAnalysisComplete = true;
         progressQueue = [];
         isProcessingProgress = false;
