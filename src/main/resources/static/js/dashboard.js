@@ -333,12 +333,20 @@ async function runBatchAnalysis() {
     });
 
     currentEventSource.addEventListener("error", function(e) {
-        if (e.eventPhase === EventSource.CLOSED || currentEventSource.readyState === EventSource.CLOSED) {
-            console.debug("[SSE] 연결 정상 종료");
-            // EventSource가 이미 종료된 경우 - 재연결 시도 방지
+        // 분석이 이미 완료되었으면 무시
+        if (isAnalysisComplete) {
+            console.debug("[SSE] 분석 완료 후 에러 무시");
             currentEventSource.close();
-        } else if (e.eventPhase === EventSource.CONNECTING) {
-            console.warn("[SSE] 재연결 시도 중...");
+            return;
+        }
+
+        // EventSource 연결 상태 확인
+        if (currentEventSource.readyState === EventSource.CLOSED) {
+            console.debug("[SSE] 연결 정상 종료");
+            currentEventSource.close();
+        } else {
+            console.error("[SSE] 연결 에러 발생");
+            currentEventSource.close();
         }
     });
 
