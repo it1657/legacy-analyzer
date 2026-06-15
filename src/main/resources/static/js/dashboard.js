@@ -41,6 +41,13 @@ window.onload = function() {
         step2Btn.style.cursor = "not-allowed";
     }
 
+    // 로그인 사용자 정보 표시
+    const username = localStorage.getItem('username');
+    const loginUserInfo = document.getElementById('loginUserInfo');
+    if (username && loginUserInfo) {
+        loginUserInfo.textContent = `👤 ${username}`;
+    }
+
     // 관리자 버튼 표시 여부 결정
     const roles = JSON.parse(localStorage.getItem('roles') || '[]');
     const adminDashboardBtn = document.getElementById('adminDashboardBtn');
