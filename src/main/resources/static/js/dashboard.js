@@ -334,11 +334,11 @@ async function runBatchAnalysis() {
 
     currentEventSource.addEventListener("error", function(e) {
         if (e.eventPhase === EventSource.CLOSED || currentEventSource.readyState === EventSource.CLOSED) {
-            log.debug("[SSE] 연결 정상 종료");
+            console.debug("[SSE] 연결 정상 종료");
             // EventSource가 이미 종료된 경우 - 재연결 시도 방지
             currentEventSource.close();
         } else if (e.eventPhase === EventSource.CONNECTING) {
-            log.warn("[SSE] 재연결 시도 중...");
+            console.warn("[SSE] 재연결 시도 중...");
         }
     });
 
