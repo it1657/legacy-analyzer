@@ -426,39 +426,6 @@ async function runBatchAnalysis() {
         currentEventSource = null;
         updateSessionControlPanel();
     });
-
-    currentEventSource.addEventListener("error", function(e) {
-        isAnalysisComplete = true;
-        progressQueue = [];
-        isProcessingProgress = false;
-
-        if (logConsole.textContent.includes("[프로세스 종료]")) {
-            if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
-            document.getElementById('analysisOverlay').style.display = "none";
-            progressPanel.style.display = "none";
-            renderDividedGrid(globalFilesCache);
-            const finalCompleted = liveSuccessCnt + liveAlreadyCnt;
-            if (document.getElementById('lblCompleteCnt')) document.getElementById('lblCompleteCnt').textContent = `${finalCompleted}개`;
-            if (document.getElementById('lblWaitCnt')) document.getElementById('lblWaitCnt').textContent = `${liveOversizeCnt}개`;
-            clearSessionFromStorage();
-            currentSessionId = null;
-            currentEventSource.close();
-            return;
-        }
-
-        // 에러 메시지 표시
-        document.getElementById('analysisOverlay').style.display = "none";
-        progressPanel.style.display = "none";
-        showError("분석 중 오류가 발생했습니다. 상태를 확인하고 다시 시도해주세요.");
-
-        if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
-        step1Btn.disabled = false; step2Btn.disabled = false;
-
-        clearSessionFromStorage();
-        currentSessionId = null;
-        updateSessionControlPanel();
-        currentEventSource.close();
-    });
 }
 
 function getEmptyMessageHtml(paddingTop, text) {
