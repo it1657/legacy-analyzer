@@ -665,6 +665,36 @@ function dismissError() {
     if (errorPanel) {
         errorPanel.style.display = 'none';
     }
+
+    // 분석 오버레이 숨기기
+    const analysisOverlay = document.getElementById('analysisOverlay');
+    if (analysisOverlay) {
+        analysisOverlay.style.display = 'none';
+    }
+
+    // 진행 패널 숨기기
+    const progressPanel = document.getElementById('progressPanel');
+    if (progressPanel) {
+        progressPanel.style.display = 'none';
+    }
+
+    // 타이머 정리
+    if (analysisTimer) {
+        clearInterval(analysisTimer);
+        analysisTimer = null;
+    }
+
+    // 버튼 활성화
+    const step1Btn = document.getElementById('step1Btn');
+    const step2Btn = document.getElementById('step2Btn');
+    if (step1Btn) step1Btn.disabled = false;
+    if (step2Btn) step2Btn.disabled = false;
+
+    // 세션 정리
+    clearSessionFromStorage();
+    currentSessionId = null;
+    currentEventSource = null;
+}
 }
 
 // 관리자 대시보드로 이동
