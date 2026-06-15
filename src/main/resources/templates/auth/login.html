@@ -153,7 +153,7 @@
 
             <div class="form-group">
                 <label for="password">비밀번호</label>
-                <input type="password" id="password" name="password" required placeholder="비밀번호를 입력하세요">
+                <input type="password" id="password" name="password" required placeholder="비밀번호를 입력하세요" onkeypress="if(event.key==='Enter') performLogin()">
             </div>
 
             <div class="loading" id="loading">
