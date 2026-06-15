@@ -269,8 +269,66 @@ public class MainApiController {
         }
     }
 
+    private void backupExistingOutput(SseEmitter emitter, Path finalProjectOutputPath) {
+        if (!Files.exists(finalProjectOutputPath)) {
+            return;
+        }
+
+        try {
+            // 기존 출력 경로에 파일이 있는지 확인
+            try (Stream<Path> stream = Files.walk(finalProjectOutputPath)) {
+                boolean hasFiles = stream.filter(Files::isRegularFile).findAny().isPresent();
+                if (!hasFiles) {
+                    return; // 파일이 없으면 백업 불필요
+                }
+            }
+
+            // 타임스탬프 기반 백업 폴더명 생성
+            String timestamp = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+                    .format(java.time.LocalDateTime.now());
+            Path parentPath = finalProjectOutputPath.getParent();
+            String backupFolderName = finalProjectOutputPath.getFileName() + "_backup_" + timestamp;
+            Path backupPath = parentPath.resolve(backupFolderName);
+
+            // 기존 출력 경로를 백업 폴더로 이동
+            Files.move(finalProjectOutputPath, backupPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+            Map<String, Object> backupLog = new HashMap<>();
+            backupLog.put("fileName", "SYSTEM");
+            backupLog.put("status", "PROCESSING");
+            backupLog.put("logMessage",
+                    "[시스템] 기존 분석 결과가 발견되어 백업되었습니다: " + backupPath + "\n");
+            backupLog.put("processedCount", 0);
+            backupLog.put("totalCount", 100);
+            sendSseEvent(emitter, "progress", backupLog);
+
+            log.info("[백업 완료] 기존 출력 경로가 백업되었습니다: {}", backupPath);
+        } catch (IOException e) {
+            log.error("[백업 실패] 기존 출력 경로 백업 중 오류 발생", e);
+            Map<String, Object> backupErrorLog = new HashMap<>();
+            backupErrorLog.put("fileName", "SYSTEM");
+            backupErrorLog.put("status", "PROCESSING");
+            backupErrorLog.put("logMessage",
+                    "[경고] 기존 분석 결과 백업 중 오류 발생: " + e.getMessage() + "\n");
+            backupErrorLog.put("processedCount", 0);
+            backupErrorLog.put("totalCount", 100);
+            try {
+                sendSseEvent(emitter, "progress", backupErrorLog);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     private void performCopy(SseEmitter emitter, Path sourceRootPath, Path finalProjectOutputPath)
             throws IOException {
+
+        // 기존 출력 경로 백업
+        backupExistingOutput(emitter, finalProjectOutputPath);
+
+        // 새로운 출력 폴더 생성
+        if (!Files.exists(finalProjectOutputPath)) {
+            Files.createDirectories(finalProjectOutputPath);
+        }
 
         Map<String, Object> copyInitLog = new HashMap<>();
         copyInitLog.put("fileName", "SYSTEM");
