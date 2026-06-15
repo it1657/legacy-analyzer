@@ -17,6 +17,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -709,7 +711,15 @@ public class MainApiController {
             @RequestParam String forceActive,
             @RequestParam(required = false) String sessionId,
             @RequestParam(required = false) String token,
-            Authentication authentication) {
+            Authentication authentication,
+            HttpServletResponse response) {
+
+        // SSE 응답 헤더 명시적 설정
+        response.setContentType("text/event-stream");
+        response.setCharacterEncoding("UTF-8");
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+        response.setHeader("X-Accel-Buffering", "no");
 
         // SSE 응답 생성 (early)
         SseEmitter emitter = new SseEmitter(1800000L);
