@@ -622,3 +622,30 @@ function dismissError() {
         errorPanel.style.display = 'none';
     }
 }
+
+// 관리자 대시보드로 이동
+function goToAdmin() {
+    const token = localStorage.getItem('token');
+    if (!token) {
+        alert('로그인 정보가 없습니다. 로그인 페이지로 이동합니다.');
+        window.location.href = '/auth/login';
+        return;
+    }
+
+    // 토큰의 역할 정보는 디코딩 불가능하므로 그냥 이동 시도
+    // 관리자가 아니면 서버에서 403 Forbidden을 반환할 것
+    window.location.href = '/admin/dashboard';
+}
+
+// 로그아웃
+function logout() {
+    if (!confirm('로그아웃하시겠습니까?')) {
+        return;
+    }
+
+    localStorage.removeItem('token');
+    localStorage.removeItem('username');
+    localStorage.removeItem('userId');
+
+    window.location.href = '/auth/login';
+}

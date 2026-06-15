@@ -12,8 +12,16 @@
 <body>
 <div class="container">
     <header>
-        <h1>☕ Code Analyzer & Dashboard <span style="font-size: 14px; color: #858796; font-weight: normal; margin-left: 10px;">v5.5 고속 검색판</span></h1>
-        <div class="author">작성자: <strong>정재훈</strong></div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h1>☕ Code Analyzer & Dashboard <span style="font-size: 14px; color: #858796; font-weight: normal; margin-left: 10px;">v5.5 고속 검색판</span></h1>
+                <div class="author">작성자: <strong>정재훈</strong></div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button type="button" onclick="goToAdmin()" class="btn" style="background-color: #667eea; color: white; padding: 8px 16px;">👨‍💼 관리자 대시보드</button>
+                <button type="button" onclick="logout()" class="btn" style="background-color: #e74a3b; color: white; padding: 8px 16px;">로그아웃</button>
+            </div>
+        </div>
     </header>
 
     <!-- 📁 지정 경로 자동화 제어 센터 -->

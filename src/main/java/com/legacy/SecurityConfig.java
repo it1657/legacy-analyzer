@@ -54,7 +54,7 @@ public class SecurityConfig {
             .requestMatchers("/", "/auth/login", "/h2-console/**").permitAll()
             .requestMatchers("/css/**", "/js/**", "/images/**").permitAll()
             // 관리자 엔드포인트
-            .requestMatchers("/api/admin/**").hasRole("ADMIN")
+            .requestMatchers("/admin/**", "/api/admin/**").hasRole("ADMIN")
             // 나머지는 인증 필요
             .anyRequest().authenticated()
         )

@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>관리자 대시보드 - 레거시 코드 분석기</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .navbar-title {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .navbar-user {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logout-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid white;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .logout-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .container {
+            display: flex;
+            min-height: calc(100vh - 60px);
+        }
+
+        .sidebar {
+            width: 250px;
+            background: white;
+            border-right: 1px solid #e0e0e0;
+            padding: 2rem 0;
+        }
+
+        .nav-item {
+            padding: 1rem 1.5rem;
+            color: #666;
+            cursor: pointer;
+            border-left: 4px solid transparent;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .nav-item:hover {
+            background-color: #f5f5f5;
+            color: #667eea;
+        }
+
+        .nav-item.active {
+            background-color: #f0f0ff;
+            color: #667eea;
+            border-left-color: #667eea;
+        }
+
+        .nav-icon {
+            font-size: 20px;
+        }
+
+        .main-content {
+            flex: 1;
+            padding: 2rem;
+        }
+
+        .page-header {
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .page-title {
+            font-size: 28px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            border-left: 4px solid #667eea;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .content-section {
+            display: none;
+        }
+
+        .content-section.active {
+            display: block;
+        }
+
+        .table-container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            overflow: hidden;
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .table thead {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .table th {
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .table td {
+            padding: 1rem;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .table tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.4rem 0.8rem;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .badge-active {
+            background-color: #e8f5e9;
+            color: #27ae60;
+        }
+
+        .badge-inactive {
+            background-color: #ffebee;
+            color: #e74c3c;
+        }
+
+        .btn-sm {
+            padding: 0.4rem 0.8rem;
+            font-size: 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 0.5rem;
+            transition: all 0.2s;
+        }
+
+        .btn-edit {
+            background-color: #3498db;
+            color: white;
+        }
+
+        .btn-delete {
+            background-color: #e74c3c;
+            color: white;
+        }
+
+        .btn-edit:hover {
+            background-color: #2980b9;
+        }
+
+        .btn-delete:hover {
+            background-color: #c0392b;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .modal-header {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .modal-footer {
+            display: flex;
+            gap: 1rem;
+            justify-content: flex-end;
+            margin-top: 2rem;
+        }
+
+        .btn-cancel {
+            background-color: #e0e0e0;
+            color: #333;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .btn-submit {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .alert {
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            display: none;
+        }
+
+        .alert.success {
+            background-color: #e8f5e9;
+            color: #27ae60;
+            display: block;
+        }
+
+        .alert.error {
+            background-color: #ffebee;
+            color: #e74c3c;
+            display: block;
+        }
+
+        .loading {
+            text-align: center;
+            color: #667eea;
+            padding: 2rem;
+        }
+
+        .spinner {
+            border: 4px solid #f0f0f0;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .no-data {
+            text-align: center;
+            color: #999;
+            padding: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- 네비게이션 바 -->
+    <div class="navbar">
+        <div class="navbar-title">☕ Code Analyzer - 관리자 대시보드</div>
+        <div class="navbar-user">
+            <span id="currentUser">로그인되지 않음</span>
+            <button class="logout-btn" onclick="logout()">로그아웃</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- 사이드바 -->
+        <div class="sidebar">
+            <div class="nav-item active" onclick="switchSection('dashboard', this)">
+                <span class="nav-icon">📊</span>
+                <span>대시보드</span>
+            </div>
+            <div class="nav-item" onclick="switchSection('users', this)">
+                <span class="nav-icon">👥</span>
+                <span>사용자 관리</span>
+            </div>
+            <div class="nav-item" onclick="switchSection('history', this)">
+                <span class="nav-icon">📜</span>
+                <span>분석 이력</span>
+            </div>
+        </div>
+
+        <!-- 메인 콘텐츠 -->
+        <div class="main-content">
+            <!-- 대시보드 섹션 -->
+            <div id="dashboard" class="content-section active">
+                <div class="page-header">
+                    <h1 class="page-title">대시보드</h1>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">전체 사용자</div>
+                        <div class="stat-value" id="totalUsers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">활성 사용자</div>
+                        <div class="stat-value" id="activeUsers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">총 분석 횟수</div>
+                        <div class="stat-value" id="totalAnalysis">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">성공한 분석</div>
+                        <div class="stat-value" id="successAnalysis">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 사용자 관리 섹션 -->
+            <div id="users" class="content-section">
+                <div class="page-header">
+                    <h1 class="page-title">사용자 관리</h1>
+                    <button class="btn-primary" onclick="openAddUserModal()">+ 새 사용자 추가</button>
+                </div>
+                <div id="usersAlert" class="alert"></div>
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>사용자명</th>
+                                <th>이메일</th>
+                                <th>역할</th>
+                                <th>상태</th>
+                                <th>가입일</th>
+                                <th>작업</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersList">
+                            <tr>
+                                <td colspan="6" class="no-data">사용자 정보를 로드 중입니다...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 분석 이력 섹션 -->
+            <div id="history" class="content-section">
+                <div class="page-header">
+                    <h1 class="page-title">분석 이력</h1>
+                </div>
+                <div id="historyAlert" class="alert"></div>
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>사용자</th>
+                                <th>분석 경로</th>
+                                <th>총 파일</th>
+                                <th>성공</th>
+                                <th>상태</th>
+                                <th>분석 시간</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyList">
+                            <tr>
+                                <td colspan="6" class="no-data">분석 이력을 로드 중입니다...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 사용자 추가/수정 모달 -->
+    <div id="userModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">새 사용자 추가</div>
+            <div id="modalAlert" class="alert"></div>
+            <form id="userForm" onsubmit="saveUser(event)">
+                <div class="form-group">
+                    <label for="username">사용자명</label>
+                    <input type="text" id="username" required placeholder="사용자명">
+                </div>
+                <div class="form-group">
+                    <label for="email">이메일</label>
+                    <input type="email" id="email" required placeholder="이메일">
+                </div>
+                <div class="form-group">
+                    <label for="password">비밀번호</label>
+                    <input type="password" id="password" required placeholder="비밀번호">
+                </div>
+                <div class="form-group">
+                    <label for="role">역할</label>
+                    <select id="role" required>
+                        <option value="USER">일반 사용자</option>
+                        <option value="ADMIN">관리자</option>
+                    </select>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-cancel" onclick="closeModal()">취소</button>
+                    <button type="submit" class="btn-submit">저장</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // 토큰 및 사용자 정보
+        let token = localStorage.getItem('token');
+        let currentUsername = localStorage.getItem('username');
+
+        // 페이지 로드
+        window.addEventListener('load', () => {
+            if (!token) {
+                window.location.href = '/auth/login';
+                return;
+            }
+            document.getElementById('currentUser').textContent = currentUsername;
+            loadDashboard();
+        });
+
+        // 섹션 전환
+        function switchSection(sectionId, element) {
+            // 모든 섹션 숨기기
+            document.querySelectorAll('.content-section').forEach(section => {
+                section.classList.remove('active');
+            });
+
+            // 모든 nav-item 비활성화
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.classList.remove('active');
+            });
+
+            // 선택한 섹션 표시
+            document.getElementById(sectionId).classList.add('active');
+            element.classList.add('active');
+
+            // 섹션별 데이터 로드
+            if (sectionId === 'users') {
+                loadUsers();
+            } else if (sectionId === 'history') {
+                loadAnalysisHistory();
+            }
+        }
+
+        // 대시보드 로드
+        function loadDashboard() {
+            // API 호출로 통계 데이터 가져오기
+            loadUsers().then(() => {
+                loadAnalysisHistory();
+            });
+        }
+
+        // 사용자 목록 로드
+        async function loadUsers() {
+            try {
+                const response = await fetch('/api/users', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('사용자 목록 로드 실패');
+                }
+
+                const users = await response.json();
+                renderUsers(users);
+
+                // 대시보드 통계 업데이트
+                const activeCount = users.filter(u => u.isActive).length;
+                document.getElementById('totalUsers').textContent = users.length;
+                document.getElementById('activeUsers').textContent = activeCount;
+            } catch (error) {
+                console.error('[사용자 로드 오류]', error);
+                showAlert('usersAlert', '사용자 목록을 로드할 수 없습니다.', 'error');
+            }
+        }
+
+        // 사용자 렌더링
+        function renderUsers(users) {
+            const tbody = document.getElementById('usersList');
+
+            if (users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">사용자가 없습니다.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = users.map(user => `
+                <tr>
+                    <td>${user.username}</td>
+                    <td>${user.email}</td>
+                    <td>${user.roles.join(', ')}</td>
+                    <td>
+                        <span class="badge ${user.isActive ? 'badge-active' : 'badge-inactive'}">
+                            ${user.isActive ? '활성' : '비활성'}
+                        </span>
+                    </td>
+                    <td>${new Date(user.createdAt).toLocaleDateString('ko-KR')}</td>
+                    <td>
+                        <button class="btn-sm btn-edit" onclick="toggleUserStatus(${user.id}, ${!user.isActive})">
+                            ${user.isActive ? '비활성화' : '활성화'}
+                        </button>
+                        <button class="btn-sm btn-delete" onclick="deleteUser(${user.id})">삭제</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // 분석 이력 로드
+        async function loadAnalysisHistory() {
+            try {
+                const response = await fetch('/api/admin/analysis-history', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('분석 이력 로드 실패');
+                }
+
+                const histories = await response.json();
+                renderAnalysisHistory(histories);
+
+                // 대시보드 통계 업데이트
+                if (histories.length > 0) {
+                    const totalAnalysis = histories.length;
+                    const successAnalysis = histories.filter(h => h.status === 'COMPLETED').length;
+                    document.getElementById('totalAnalysis').textContent = totalAnalysis;
+                    document.getElementById('successAnalysis').textContent = successAnalysis;
+                }
+            } catch (error) {
+                console.error('[분석 이력 로드 오류]', error);
+                showAlert('historyAlert', '분석 이력을 로드할 수 없습니다.', 'error');
+            }
+        }
+
+        // 분석 이력 렌더링
+        function renderAnalysisHistory(histories) {
+            const tbody = document.getElementById('historyList');
+
+            if (histories.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">분석 이력이 없습니다.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = histories.map(h => `
+                <tr>
+                    <td>사용자 ${h.userId}</td>
+                    <td>${h.sourcePath.substring(h.sourcePath.lastIndexOf('\\') + 1)}</td>
+                    <td>${h.totalFiles}</td>
+                    <td>${h.successCount}</td>
+                    <td><span class="badge badge-active">${h.status}</span></td>
+                    <td>${(h.processingTimeMs / 1000).toFixed(2)}초</td>
+                </tr>
+            `).join('');
+        }
+
+        // 사용자 추가 모달 열기
+        function openAddUserModal() {
+            document.getElementById('userForm').reset();
+            document.getElementById('userModal').classList.add('active');
+        }
+
+        // 모달 닫기
+        function closeModal() {
+            document.getElementById('userModal').classList.remove('active');
+            document.getElementById('modalAlert').className = 'alert';
+        }
+
+        // 사용자 저장
+        async function saveUser(e) {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const role = document.getElementById('role').value;
+
+            try {
+                const response = await fetch('/api/admin/users/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ username, email, password, role })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showAlert('modalAlert', '사용자가 성공적으로 추가되었습니다.', 'success');
+                    setTimeout(() => {
+                        closeModal();
+                        loadUsers();
+                    }, 1000);
+                } else {
+                    showAlert('modalAlert', data.message || '사용자 추가 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[사용자 저장 오류]', error);
+                showAlert('modalAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // 사용자 활성화/비활성화
+        async function toggleUserStatus(userId, isActive) {
+            if (!confirm(`사용자를 ${isActive ? '활성화' : '비활성화'}하시겠습니까?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/users/${userId}/activate`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ isActive })
+                });
+
+                if (response.ok) {
+                    loadUsers();
+                    showAlert('usersAlert', `사용자가 ${isActive ? '활성화' : '비활성화'}되었습니다.`, 'success');
+                } else {
+                    showAlert('usersAlert', '상태 변경 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[상태 변경 오류]', error);
+                showAlert('usersAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // 사용자 삭제
+        async function deleteUser(userId) {
+            if (!confirm('정말로 삭제하시겠습니까?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/users/${userId}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (response.ok) {
+                    loadUsers();
+                    showAlert('usersAlert', '사용자가 삭제되었습니다.', 'success');
+                } else {
+                    showAlert('usersAlert', '삭제 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[삭제 오류]', error);
+                showAlert('usersAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // 알림 표시
+        function showAlert(elementId, message, type) {
+            const alert = document.getElementById(elementId);
+            alert.textContent = message;
+            alert.className = `alert ${type}`;
+            if (type === 'success') {
+                setTimeout(() => {
+                    alert.className = 'alert';
+                }, 3000);
+            }
+        }
+
+        // 로그아웃
+        function logout() {
+            localStorage.removeItem('token');
+            localStorage.removeItem('username');
+            localStorage.removeItem('userId');
+            window.location.href = '/auth/login';
+        }
+    </script>
+</body>
+</html>

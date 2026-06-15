@@ -197,13 +197,19 @@
                     localStorage.setItem('token', data.token);
                     localStorage.setItem('username', data.username);
                     localStorage.setItem('userId', data.userId);
+                    if (data.roles) {
+                        localStorage.setItem('roles', JSON.stringify(data.roles));
+                    }
 
-                    successMsg.textContent = '로그인 성공! 메인 페이지로 이동합니다...';
+                    successMsg.textContent = '로그인 성공! 페이지로 이동합니다...';
                     successMsg.style.display = 'block';
 
-                    // 1초 후 메인 페이지로 리디렉트
+                    // 역할에 따라 이동 경로 결정
+                    const redirectUrl = data.roles && data.roles.includes('ADMIN') ? '/admin/dashboard' : '/';
+
+                    // 1초 후 해당 페이지로 리디렉트
                     setTimeout(() => {
-                        window.location.href = '/';
+                        window.location.href = redirectUrl;
                     }, 1000);
                 } else {
                     const error = await response.json();

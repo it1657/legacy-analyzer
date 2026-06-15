@@ -60,8 +60,12 @@ public class AuthController {
       User user = (User) authentication.getPrincipal();
       String token = jwtTokenProvider.generateToken(authentication);
 
-      log.info("[로그인 성공] username={}", authRequest.getUsername());
-      return ResponseEntity.ok(new AuthResponse(token, user.getId(), user.getUsername()));
+      java.util.List<String> roles = user.getRoles().stream()
+          .map(role -> role.getName())
+          .toList();
+
+      log.info("[로그인 성공] username={}, roles={}", authRequest.getUsername(), roles);
+      return ResponseEntity.ok(new AuthResponse(token, user.getId(), user.getUsername(), roles));
 
     } catch (Exception e) {
       log.error("[로그인 실패] username={}, reason={}", authRequest.getUsername(),

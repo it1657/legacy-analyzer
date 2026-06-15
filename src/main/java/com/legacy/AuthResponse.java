@@ -6,7 +6,15 @@ public class AuthResponse {
   private String type = "Bearer";
   private Long userId;
   private String username;
+  private java.util.List<String> roles;
   private String message;
+
+  public AuthResponse(String token, Long userId, String username, java.util.List<String> roles) {
+    this.token = token;
+    this.userId = userId;
+    this.username = username;
+    this.roles = roles;
+  }
 
   public AuthResponse(String token, Long userId, String username) {
     this.token = token;
@@ -56,5 +64,13 @@ public class AuthResponse {
 
   public void setMessage(String message) {
     this.message = message;
+  }
+
+  public java.util.List<String> getRoles() {
+    return roles;
+  }
+
+  public void setRoles(java.util.List<String> roles) {
+    this.roles = roles;
   }
 }
