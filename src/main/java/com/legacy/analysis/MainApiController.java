@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
+import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.File;
 import java.io.IOException;
@@ -508,19 +509,26 @@ public class MainApiController {
                     "- 용량 미처리 패스: " + skipCount + "개\n" +
                     "=========================================\n");
 
-            log.info("[SSE] complete 이벤트 전송 시도");
+            // 클라이언트가 명시적으로 종료를 감지하도록 completed 플래그 추가
+            finalData.put("completed", true);
+
+            log.info("[SSE] 분석 완료 신호 전송 (progress 이벤트)");
             try {
-                emitter.send(SseEmitter.event().name("complete").data(finalData));
-                log.info("[SSE] complete 이벤트 전송 성공");
+                sendSseEvent(emitter, "progress", finalData);
+                // 완료 이벤트가 프론트에 도착할 시간 확보
+                Thread.sleep(500);
+                log.info("[SSE] 분석 완료 신호 전송 성공");
 
-                // 클라이언트가 complete 이벤트를 받을 시간을 확보
-                Thread.sleep(200);
-
+                // 클라이언트가 완료 신호를 받았을 시간을 충분히 제공한 후 서버에서 명시적으로 연결 종료
+                emitter.complete();
+                log.info("[SSE] emitter 완료 - 서버 측 SSE 연결 종료");
             } catch (Exception e) {
-                log.error("[SSE] complete 이벤트 전송 실패: {}", e.getMessage());
+                log.error("[SSE] 분석 완료 신호 전송 실패: {}", e.getMessage());
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {
+                }
             }
-            emitter.complete();
-            log.info("[SSE] emitter.complete() 호출 완료");
 
             // 🎉 분석 완료 로그
             int totalProcessed = successCount + alreadyProcessedCount + skipCount;
@@ -722,10 +730,12 @@ public class MainApiController {
             @RequestParam String forceActive,
             @RequestParam(required = false) String sessionId,
             @RequestParam(required = false) String token,
-            Authentication authentication) {
+            Authentication authentication,
+            HttpServletResponse response) {
 
-        // Spring이 자동으로 SSE 헤더를 설정합니다
-        // produces 속성이 Spring에게 text/event-stream 응답을 알려줍니다
+        // UTF-8 인코딩 명시적 설정
+        response.setCharacterEncoding("UTF-8");
+        response.setContentType("text/event-stream;charset=UTF-8");
 
         // SSE 응답 생성 (early)
         SseEmitter emitter = new SseEmitter(1800000L);

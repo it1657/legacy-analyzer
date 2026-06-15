@@ -247,12 +247,14 @@ async function runBatchAnalysis() {
     }
 
     function processNextProgress() {
-        if (isAnalysisComplete) return;
-        if (progressQueue.length === 0) { isProcessingProgress = false; return; }
-        isProcessingProgress = true;
+        try {
+            if (isAnalysisComplete) return;
+            if (progressQueue.length === 0) { isProcessingProgress = false; return; }
+            isProcessingProgress = true;
 
-        const task = progressQueue.shift();
-        const rawDataStr = task.raw;
+            const task = progressQueue.shift();
+            const rawDataStr = task.raw;
+            console.log("[processNextProgress] 시작, rawDataStr 길이:", rawDataStr.length);
 
         // 현재 처리 단계 판단 및 오버레이 메시지 업데이트
         let stageText = "처리 중...";
@@ -320,12 +322,25 @@ async function runBatchAnalysis() {
                 }
             } catch(e) {}
         }
-        setTimeout(processNextProgress, 1);
+            console.log("[processNextProgress] 완료");
+            setTimeout(processNextProgress, 1);
+        } catch (err) {
+            console.error("[processNextProgress] 에러 발생:", err);
+            isProcessingProgress = false;
+        }
     }
     // 🎯 [ReferenceError 버그 해결]: 미선언 에러 차단을 위해 const 키워드를 붙여 고정합니다.
     const token = localStorage.getItem('token');
     const url = `/api/analyze-folder-stream?sourcePath=${encodeURIComponent(sourcePath)}&outputPath=${encodeURIComponent(outputPath)}&forceActive=${isForceChecked}&sessionId=${currentSessionId}&token=${encodeURIComponent(token || '')}`;
-    currentEventSource = new EventSource(url);
+
+    console.log("[프론트] EventSource 생성 시도, URL:", url);
+    try {
+        currentEventSource = new EventSource(url);
+        console.log("[프론트] EventSource 생성 성공, currentEventSource:", currentEventSource);
+    } catch (err) {
+        console.error("[프론트] EventSource 생성 실패:", err);
+        return;
+    }
 
     // EventSource 연결 상태 모니터링
     currentEventSource.onopen = function() {
@@ -346,9 +361,61 @@ async function runBatchAnalysis() {
         console.error("[프론트] EventSource 에러, readyState:", currentEventSource.readyState, e);
     };
 
+    console.log("[프론트] progress 리스너 등록 시도...");
     currentEventSource.addEventListener("progress", function(e) {
         try {
-            console.log("[프론트] progress 이벤트 수신");
+            console.log("[프론트] progress 이벤트 수신! rawDataStr 길이:", e.data ? e.data.length : 0);
+            console.log("[프론트] 원본 데이터:", e.data);
+
+            // 데이터 파싱해서 completed 플래그 확인
+            let data = null;
+            try {
+                data = JSON.parse(e.data);
+                console.log("[프론트] ✅ JSON 파싱 성공, 파싱된 data:", JSON.stringify(data));
+            } catch (parseErr) {
+                // JSON 파싱 실패 시 원본 데이터로 처리
+                console.error("[프론트] ❌ JSON 파싱 실패:", parseErr.message, "원본:", e.data);
+                data = { raw: e.data };
+            }
+
+            console.log("[프론트] data.completed 값:", data.completed, "type:", typeof data.completed);
+
+            // 분석 완료 신호 감지 (Backend에서 보낸 completed: true)
+            if (data && data.completed === true) {
+                console.log("[프론트] 🎉 분석 완료 신호 수신! (completed: true)");
+                isAnalysisComplete = true;
+
+                // 타이머 정지
+                if (analysisTimer) {
+                    clearInterval(analysisTimer);
+                    analysisTimer = null;
+                }
+
+                // 큐 초기화
+                progressQueue = [];
+                isProcessingProgress = false;
+
+                // 진행 바 숨기기 및 오버레이 처리
+                const progressPanel = document.getElementById('progressPanel');
+                if (progressPanel) {
+                    progressPanel.style.display = "none";
+                }
+                const overlay = document.getElementById('analysisOverlay');
+                if (overlay) {
+                    overlay.style.display = "none";
+                }
+
+                // 클라이언트에서 명시적으로 연결 종료
+                if (currentEventSource) {
+                    currentEventSource.close();
+                    console.log("[프론트] ✅ EventSource 클라이언트 종료");
+                }
+
+                // 최종 완료 처리 (버튼 활성화, 메시지 표시)
+                handleAnalysisCompletion(data);
+                return;
+            }
+
             progressQueue.push({ raw: e.data });
             if (!isProcessingProgress) processNextProgress();
         } catch (err) {
@@ -455,6 +522,54 @@ async function runBatchAnalysis() {
 
 function getEmptyMessageHtml(paddingTop, text) {
     return `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: ${paddingTop}px; font-size: 13px;">${text}</div>`;
+}
+
+// 분석 완료 처리
+function handleAnalysisCompletion(finalData) {
+    const logConsole = document.getElementById('terminalLog');
+    const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
+    const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
+
+    // 최종 완료 메시지 표시
+    const completeLine = document.createElement('div');
+    completeLine.style.color = '#1cc88a';
+    completeLine.style.fontWeight = 'bold';
+    completeLine.style.fontSize = '14px';
+    completeLine.style.marginTop = '10px';
+    completeLine.style.padding = '10px';
+    completeLine.style.borderTop = '2px solid #1cc88a';
+
+    let completeText = '✅ [분석 완료] 모든 파일 처리가 완료되었습니다!';
+    if (finalData && finalData.finalSummary) {
+        completeText += finalData.finalSummary;
+    }
+    completeLine.textContent = completeText;
+    logConsole.appendChild(completeLine);
+    logConsole.scrollTop = logConsole.scrollHeight;
+
+    // 평균 처리 시간 표시
+    if (finalData && finalData.avgTimePerFile) {
+        const txtAvgSpeed = document.getElementById("txtAvgSpeed");
+        if (txtAvgSpeed) txtAvgSpeed.textContent = finalData.avgTimePerFile;
+    }
+
+    // 버튼 활성화
+    if (step1Btn) {
+        step1Btn.disabled = false;
+        step1Btn.style.opacity = "1";
+        step1Btn.style.cursor = "pointer";
+    }
+    if (step2Btn) {
+        step2Btn.disabled = false;
+        step2Btn.style.opacity = "1";
+        step2Btn.style.cursor = "pointer";
+    }
+
+    // 세션 정리
+    clearSessionFromStorage();
+    currentSessionId = null;
+    currentEventSource = null;
+    updateSessionControlPanel();
 }
 
 // 🎯 대시보드 리셋 공정 완전 정상화 함수
