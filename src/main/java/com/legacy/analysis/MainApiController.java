@@ -17,8 +17,6 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 
-import jakarta.servlet.http.HttpServletResponse;
-
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -714,7 +712,7 @@ public class MainApiController {
         }
     }
 
-    @GetMapping(value = "/api/analyze-folder-stream", produces = "text/event-stream")
+    @GetMapping(value = "/api/analyze-folder-stream", produces = "text/event-stream;charset=UTF-8")
     @ResponseBody
     public SseEmitter analyzeFolderStream(
             @RequestParam String sourcePath,
@@ -722,20 +720,10 @@ public class MainApiController {
             @RequestParam String forceActive,
             @RequestParam(required = false) String sessionId,
             @RequestParam(required = false) String token,
-            Authentication authentication,
-            HttpServletResponse response) {
+            Authentication authentication) {
 
-        // SSE 응답 헤더 명시적 설정
-        response.setContentType("text/event-stream; charset=UTF-8");
-        response.setCharacterEncoding("UTF-8");
-        response.setHeader("Cache-Control", "no-cache");
-        response.setHeader("Connection", "keep-alive");
-        response.setHeader("X-Accel-Buffering", "no");
-        response.setBufferSize(0);
-        try {
-            response.flushBuffer();
-        } catch (IOException ignored) {
-        }
+        // Spring이 자동으로 SSE 헤더를 설정합니다
+        // produces 속성이 Spring에게 text/event-stream 응답을 알려줍니다
 
         // SSE 응답 생성 (early)
         SseEmitter emitter = new SseEmitter(1800000L);
