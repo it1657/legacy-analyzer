@@ -684,11 +684,20 @@ function dismissError() {
         analysisTimer = null;
     }
 
-    // 버튼 활성화
-    const step1Btn = document.getElementById('step1Btn');
-    const step2Btn = document.getElementById('step2Btn');
-    if (step1Btn) step1Btn.disabled = false;
-    if (step2Btn) step2Btn.disabled = false;
+    // 버튼 활성화 - 올바른 선택자 사용
+    const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
+    const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
+
+    if (step1Btn) {
+        step1Btn.disabled = false;
+        step1Btn.style.opacity = '1';
+        step1Btn.style.cursor = 'pointer';
+    }
+    if (step2Btn) {
+        step2Btn.disabled = false;
+        step2Btn.style.opacity = '1';
+        step2Btn.style.cursor = 'pointer';
+    }
 
     // 세션 정리
     clearSessionFromStorage();
