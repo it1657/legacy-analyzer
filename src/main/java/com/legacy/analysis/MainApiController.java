@@ -512,6 +512,10 @@ public class MainApiController {
             try {
                 emitter.send(SseEmitter.event().name("complete").data(finalData));
                 log.info("[SSE] complete 이벤트 전송 성공");
+
+                // 클라이언트가 complete 이벤트를 받을 시간을 확보
+                Thread.sleep(200);
+
             } catch (Exception e) {
                 log.error("[SSE] complete 이벤트 전송 실패: {}", e.getMessage());
             }
