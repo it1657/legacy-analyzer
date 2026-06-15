@@ -51,18 +51,27 @@ public class SecurityConfig {
   @Bean
   public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthenticationFilter jwtAuthenticationFilter) throws Exception {
     http
-        .csrf(csrf -> csrf.ignoringRequestMatchers("/h2-console/**"))
+        .csrf(csrf -> csrf
+            .ignoringRequestMatchers("/h2-console/**")
+            .ignoringRequestMatchers("/auth/**")
+            .ignoringRequestMatchers("/api/**")
+        )
         .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .authorizeHttpRequests(authz -> authz
             // 공개 엔드포인트
-            .requestMatchers("/auth/login", "/h2-console/**").permitAll()
+            .requestMatchers("/", "/auth/login", "/h2-console/**").permitAll()
             .requestMatchers("/css/**", "/js/**", "/images/**").permitAll()
-            // 관리자 엔드포인트
-            .requestMatchers("/admin/**", "/api/admin/**").hasRole("ADMIN")
-            // 나머지는 인증 필요 (메인 페이지 포함)
+            // 관리자 페이지는 permitAll (클라이언트에서 토큰 검증)
+            .requestMatchers("/admin/**").permitAll()
+            // API는 역할별 보호
+            .requestMatchers("/api/admin/**").hasRole("ADMIN")
+            // API는 인증 필수
+            .requestMatchers("/api/**").authenticated()
+            // 나머지는 인증 필요
             .anyRequest().authenticated()
         )
         .userDetailsService(userDetailsService)
+        .formLogin(form -> form.disable()) // Form login 비활성화 (JWT 기반 인증 사용)
         .exceptionHandling(exception -> exception
             .authenticationEntryPoint(new LoginUrlAuthenticationEntryPoint("/auth/login"))
         )

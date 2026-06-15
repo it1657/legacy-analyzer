@@ -161,16 +161,20 @@
                 <p>로그인 중...</p>
             </div>
 
-            <button type="submit" class="login-btn">로그인</button>
+            <button type="button" class="login-btn" onclick="performLogin()">로그인</button>
         </form>
     </div>
 
     <script>
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-
+        async function performLogin() {
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
+
+            if (!username || !password) {
+                alert('사용자명과 비밀번호를 입력하세요.');
+                return;
+            }
+
             const loading = document.getElementById('loading');
             const errorMsg = document.getElementById('errorMsg');
             const successMsg = document.getElementById('successMsg');
@@ -185,7 +189,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ username, password })
+                    body: JSON.stringify({ username: username, password: password })
                 });
 
                 loading.style.display = 'none';
@@ -207,10 +211,8 @@
                     // 역할에 따라 이동 경로 결정
                     const redirectUrl = data.roles && data.roles.includes('ADMIN') ? '/admin/dashboard' : '/';
 
-                    // 1초 후 해당 페이지로 리디렉트
-                    setTimeout(() => {
-                        window.location.href = redirectUrl;
-                    }, 1000);
+                    // 즉시 리다이렉트
+                    window.location.replace(redirectUrl);
                 } else {
                     const error = await response.json();
                     errorMsg.textContent = error.message || '로그인 실패했습니다.';
@@ -221,7 +223,7 @@
                 errorMsg.textContent = '서버 연결 실패: ' + error.message;
                 errorMsg.style.display = 'block';
             }
-        });
+        }
     </script>
 </body>
 </html>

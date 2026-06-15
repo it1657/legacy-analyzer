@@ -5,6 +5,23 @@
  * Phase 2 개선: 세션 관리, 에러 핸들링, 일시 중지/재개 기능 추가
  */
 // 분석 대상 파일명: dashboard.js
+
+// JWT 토큰을 자동으로 추가하는 fetch 래퍼
+const originalFetch = window.fetch;
+window.fetch = function(...args) {
+    const [resource, config] = args;
+    const token = localStorage.getItem('token');
+
+    if (token && typeof config === 'object') {
+        config.headers = config.headers || {};
+        config.headers['Authorization'] = 'Bearer ' + token;
+    } else if (token) {
+        args[1] = { headers: { 'Authorization': 'Bearer ' + token } };
+    }
+
+    return originalFetch.apply(this, args);
+};
+
 let globalFilesCache = [];
 let analysisTimer = null; // 스탑워치 제어용 전역 변수
 

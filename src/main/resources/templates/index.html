@@ -8,6 +8,12 @@
     <title>레거시 코드 명세 대시보드</title>
     <!-- 💡 [아키텍처 대변혁]: HTML 내부 스타일을 제거하고 타임리프 표준 외부 CSS 파일로 분리 바인딩합니다 -->
     <link th:href="@{/css/dashboard.css}" rel="stylesheet">
+    <script>
+        // 토큰 확인 - 없으면 로그인 페이지로 리다이렉트
+        if (!localStorage.getItem('token')) {
+            window.location.href = '/auth/login';
+        }
+    </script>
 </head>
 <body>
 <div class="container">
