@@ -51,15 +51,10 @@ window.onload = function() {
     // 관리자 버튼 표시 여부 결정
     const roles = JSON.parse(localStorage.getItem('roles') || '[]');
     const adminDashboardBtn = document.getElementById('adminDashboardBtn');
-    const analysisBtn = document.getElementById('analysisBtn');
 
     if (roles.includes('ADMIN')) {
-        // 관리자: 두 버튼 모두 표시
+        // 관리자: 관리자 대시보드 버튼만 표시
         adminDashboardBtn.style.display = 'block';
-        analysisBtn.style.display = 'block';
-    } else {
-        // 일반 사용자: 분석 버튼만 표시
-        analysisBtn.style.display = 'block';
     }
 };
 
