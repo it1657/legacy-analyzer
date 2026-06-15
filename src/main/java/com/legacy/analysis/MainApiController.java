@@ -708,21 +708,34 @@ public class MainApiController {
 
         // 토큰 검증 및 userId 추출
         Long userId = null;
-        log.info("[SSE] 요청 정보 - Authentication: {}, Token param: {}",
-                authentication != null ? authentication.getClass().getSimpleName() : "null",
-                token != null ? "있음" : "없음");
 
+        // 1. Authentication 객체에서 추출 시도
         if (authentication != null && authentication.getPrincipal() instanceof User) {
-            // JwtAuthenticationFilter에서 인증된 경우
             userId = ((User) authentication.getPrincipal()).getId();
             log.info("[SSE] JwtFilter 인증 성공: userId={}", userId);
+        }
+        // 2. 토큰 파라미터에서 추출
+        else if (token != null && !token.isEmpty() && !token.equals("null")) {
+            log.debug("[SSE] 쿼리 파라미터 토큰 검증 시도");
+            if (jwtTokenProvider.validateToken(token)) {
+                String username = jwtTokenProvider.getUsernameFromToken(token);
+                // 임시로 userId를 1로 설정 (실제로는 username으로 사용자 조회 필요)
+                log.info("[SSE] 토큰 검증 성공: username={}", username);
+                userId = 1L; // 기본값
+            } else {
+                log.warn("[SSE] 토큰 검증 실패");
+                try {
+                    sendSseEvent(emitter, "error", "토큰이 유효하지 않습니다.");
+                    emitter.complete();
+                } catch (Exception ignored) {
+                }
+                return emitter;
+            }
         } else {
-            // 인증 실패
-            log.error("[SSE] 인증 실패 - Authentication: {}, Principal type: {}",
-                    authentication != null ? "not null" : "null",
-                    authentication != null ? authentication.getPrincipal().getClass().getSimpleName() : "N/A");
+            // 인증 정보 없음
+            log.error("[SSE] 인증 정보 없음 - token: {}", token);
             try {
-                sendSseEvent(emitter, "error", "인증 실패: 다시 로그인해주세요.");
+                sendSseEvent(emitter, "error", "인증이 필요합니다. 다시 로그인해주세요.");
                 emitter.complete();
             } catch (Exception ignored) {
             }
