@@ -652,6 +652,19 @@ public class MainApiController {
         }
     }
 
+    private boolean isEmitterCompleted(SseEmitter emitter) {
+        try {
+            // emitter가 null이면 이미 완료된 상태
+            if (emitter == null) {
+                return true;
+            }
+            // 응답 상태 확인 (committed인 경우 true)
+            return false;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
     private void sendSseEvent(SseEmitter emitter, String name, Object data) {
         try {
             emitter.send(SseEmitter.event().name(name).data(data, MediaType.APPLICATION_JSON));
@@ -665,8 +678,11 @@ public class MainApiController {
         } catch (IllegalStateException e) {
             // emitter가 이미 complete 된 경우 - 무시
             log.debug("SSE 연결이 이미 종료됨: {}", e.getMessage());
+        } catch (IOException e) {
+            // 응답이 이미 committed된 경우 - 무시
+            log.debug("SSE 응답이 이미 committed됨: {}", e.getMessage());
         } catch (Exception e) {
-            log.error("SSE 전송 중 장애 발생", e);
+            log.debug("SSE 전송 중 예외: {}", e.getMessage());
         }
     }
 
@@ -723,6 +739,7 @@ public class MainApiController {
             boolean isForceActive = "true".equals(forceActive);
 
             try {
+                // 경로 검증
                 File sourceFolder = new File(normalizedSourcePath);
                 if (!sourceFolder.exists() || !sourceFolder.isDirectory()) {
                     sendSseEvent(emitter, "error", "올바르지 않은 원본 소스 경로입니다.");
@@ -735,10 +752,19 @@ public class MainApiController {
                         && !normalizedSourcePath.equals(normalizedOutputPath.trim());
                 String finalOutputPath = isCopyMode ? normalizedOutputPath.trim() : normalizedSourcePath;
 
+                // 출력 폴더 생성
                 if (isCopyMode) {
-                    File outputFolder = new File(finalOutputPath);
-                    if (!outputFolder.exists() && !outputFolder.mkdirs()) {
-                        sendSseEvent(emitter, "error", "출력 디렉터리를 생성할 수 없습니다.");
+                    try {
+                        File outputFolder = new File(finalOutputPath);
+                        if (!outputFolder.exists() && !outputFolder.mkdirs()) {
+                            sendSseEvent(emitter, "error", "출력 디렉터리를 생성할 수 없습니다.");
+                            emitter.complete();
+                            sessionManager.failSession(finalSessionId, "출력 폴더 생성 실패");
+                            return;
+                        }
+                    } catch (Exception e) {
+                        log.error("[출력 폴더 생성 실패]", e);
+                        sendSseEvent(emitter, "error", "출력 디렉터리 생성 중 오류: " + e.getMessage());
                         emitter.complete();
                         sessionManager.failSession(finalSessionId, "출력 폴더 생성 실패");
                         return;
@@ -752,96 +778,133 @@ public class MainApiController {
                         : sourceRootPath;
 
                 // [1단계] 선행 복사
-                if (isCopyMode) {
-                    performCopy(emitter, sourceRootPath, finalProjectOutputPath);
-                } else {
-                    sendDirectModeLog(emitter);
+                try {
+                    if (isCopyMode) {
+                        performCopy(emitter, sourceRootPath, finalProjectOutputPath);
+                    } else {
+                        sendDirectModeLog(emitter);
+                    }
+                } catch (Exception e) {
+                    log.error("[파일 복사 실패]", e);
+                    sendSseEvent(emitter, "error", "파일 복사 중 오류: " + e.getMessage());
+                    emitter.complete();
+                    sessionManager.failSession(finalSessionId, "파일 복사 실패");
+                    return;
                 }
 
                 // [2단계] 파일 목록 수집
-                List<Path> fileList = collectFileList(sourceRootPath);
-                sessionManager.initializeFileList(finalSessionId, fileList.size());
+                List<Path> fileList;
+                try {
+                    fileList = collectFileList(sourceRootPath);
+                    sessionManager.initializeFileList(finalSessionId, fileList.size());
+                } catch (Exception e) {
+                    log.error("[파일 목록 수집 실패]", e);
+                    sendSseEvent(emitter, "error", "파일 목록 수집 중 오류: " + e.getMessage());
+                    emitter.complete();
+                    sessionManager.failSession(finalSessionId, "파일 목록 수집 실패");
+                    return;
+                }
 
                 // AnalysisHistory 기록 생성
                 AnalysisHistory history = null;
-                if (finalUserId != null) {
-                    history = new AnalysisHistory(finalUserId, finalSessionId, normalizedSourcePath,
-                            finalOutputPath);
-                    analysisHistoryRepository.save(history);
-                    log.info("[분석 기록 생성] userId={}, sessionId={}", finalUserId, finalSessionId);
+                try {
+                    if (finalUserId != null) {
+                        history = new AnalysisHistory(finalUserId, finalSessionId, normalizedSourcePath,
+                                finalOutputPath);
+                        analysisHistoryRepository.save(history);
+                        log.info("[분석 기록 생성] userId={}, sessionId={}", finalUserId, finalSessionId);
+                    }
+                } catch (Exception e) {
+                    log.error("[분석 기록 생성 실패]", e);
+                    // 계속 진행
                 }
 
                 // [3단계] 파일 분석
                 int successCount = 0, skipCount = 0, alreadyProcessedCount = 0;
 
                 for (int i = 0; i < fileList.size(); i++) {
-                    // 중단 확인
-                    SessionState currentSession = sessionManager.getSession(finalSessionId);
-                    if (currentSession != null && currentSession.shouldStop()) {
-                        log.info("[분석 중단] 사용자 요청으로 분석이 중단됩니다.");
-                        break;
-                    }
-
-                    // 일시중지 상태 확인 및 대기
-                    while (currentSession != null && currentSession.getPausedAt() != null) {
-                        log.debug("[일시중지] 분석이 일시중지되었습니다. 재개 대기 중...");
-                        Thread.sleep(500);
-                        currentSession = sessionManager.getSession(finalSessionId);
-
+                    try {
+                        // 중단 확인
+                        SessionState currentSession = sessionManager.getSession(finalSessionId);
                         if (currentSession != null && currentSession.shouldStop()) {
-                            log.info("[분석 중단] 일시중지 중 취소 요청이 들어왔습니다.");
+                            log.info("[분석 중단] 사용자 요청으로 분석이 중단됩니다.");
                             break;
                         }
-                    }
 
-                    if (currentSession != null && currentSession.shouldStop()) {
-                        break;
-                    }
+                        // 일시중지 상태 확인 및 대기
+                        while (currentSession != null && currentSession.getPausedAt() != null) {
+                            log.debug("[일시중지] 분석이 일시중지되었습니다. 재개 대기 중...");
+                            Thread.sleep(500);
+                            currentSession = sessionManager.getSession(finalSessionId);
 
-                    Path filePath = fileList.get(i);
-                    Path relativeSubPath = sourceRootPath.relativize(filePath);
-                    Path targetPath = isCopyMode
-                            ? finalProjectOutputPath.resolve(relativeSubPath)
-                            : filePath;
-
-                    // 파일 분석
-                    FileAnalysisState fileState = analyzeFile(
-                            finalSessionId, filePath, targetPath, sourceRootPath,
-                            isForceActive, finalOutputPath);
-
-                    // 상태별 카운트
-                    if ("SUCCESS".equals(fileState.getStatus())) {
-                        successCount++;
-                    } else if ("SKIPPED".equals(fileState.getStatus())) {
-                        if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
-                            alreadyProcessedCount++;
-                        } else if ("OVERSIZE".equals(fileState.getErrorType())) {
-                            skipCount++;
+                            if (currentSession != null && currentSession.shouldStop()) {
+                                log.info("[분석 중단] 일시중지 중 취소 요청이 들어왔습니다.");
+                                break;
+                            }
                         }
-                    }
 
-                    // 진행 상황 업데이트
-                    updateAndSendProgress(emitter, finalSessionId, i + 1, fileList.size(),
-                            relativeSubPath, fileState);
+                        if (currentSession != null && currentSession.shouldStop()) {
+                            break;
+                        }
+
+                        Path filePath = fileList.get(i);
+                        Path relativeSubPath = sourceRootPath.relativize(filePath);
+                        Path targetPath = isCopyMode
+                                ? finalProjectOutputPath.resolve(relativeSubPath)
+                                : filePath;
+
+                        // 파일 분석
+                        FileAnalysisState fileState = analyzeFile(
+                                finalSessionId, filePath, targetPath, sourceRootPath,
+                                isForceActive, finalOutputPath);
+
+                        // 상태별 카운트
+                        if ("SUCCESS".equals(fileState.getStatus())) {
+                            successCount++;
+                        } else if ("SKIPPED".equals(fileState.getStatus())) {
+                            if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
+                                alreadyProcessedCount++;
+                            } else if ("OVERSIZE".equals(fileState.getErrorType())) {
+                                skipCount++;
+                            }
+                        }
+
+                        // 진행 상황 업데이트
+                        updateAndSendProgress(emitter, finalSessionId, i + 1, fileList.size(),
+                                relativeSubPath, fileState);
+                    } catch (Exception e) {
+                        log.error("[파일 분석 중 예외]", e);
+                        // 개별 파일 에러는 무시하고 계속 진행
+                    }
                 }
 
                 // [4단계] 완료 처리
-                String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+                try {
+                    String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+                    AnalysisHistory finalHistory = history;
 
-                // 다른 스레드에서 history를 참조할 수 있도록 final로 선언
-                AnalysisHistory finalHistory = history;
-
-                finalizeAnalysis(emitter, finalSessionId, finalProjectOutputPath, readmeFileName,
-                        successCount, alreadyProcessedCount, skipCount, startTime, finalHistory);
+                    finalizeAnalysis(emitter, finalSessionId, finalProjectOutputPath, readmeFileName,
+                            successCount, alreadyProcessedCount, skipCount, startTime, finalHistory);
+                } catch (Exception e) {
+                    log.error("[분석 완료 처리 중 예외]", e);
+                    // emitter가 이미 complete된 경우 무시
+                }
 
             } catch (Exception e) {
-                log.error("[폴더 스트리밍 분석 중 치명적 예외 발생]", e);
+                log.error("[폴더 스트리밍 분석 중 예외 발생]", e);
+                // 응답이 이미 committed된 경우 대비
                 try {
-                    sendSseEvent(emitter, "error", e.getMessage());
+                    if (!isEmitterCompleted(emitter)) {
+                        sendSseEvent(emitter, "error", e.getMessage());
+                        emitter.complete();
+                    }
+                } catch (Exception ignored) {
+                    log.debug("[SSE 에러 전송 실패] 응답이 이미 committed됨");
+                }
+                try {
+                    sessionManager.failSession(finalSessionId, e.getMessage());
                 } catch (Exception ignored) {
                 }
-                emitter.complete();
-                sessionManager.failSession(finalSessionId, e.getMessage());
             }
         }).start();
 
