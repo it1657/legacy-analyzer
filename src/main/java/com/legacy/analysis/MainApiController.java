@@ -2,6 +2,7 @@ package com.legacy.analysis;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
 import com.legacy.auth.User;
+import com.legacy.auth.JwtTokenProvider;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +39,7 @@ public class MainApiController {
     private final FileIoErrorHandler fileIoErrorHandler;
     private final RetryHandler retryHandler;
     private final AnalysisHistoryRepository analysisHistoryRepository;
+    private final JwtTokenProvider jwtTokenProvider;
 
     @Value("${app.analysis.max-file-size-bytes:524288}")
     private long maxFileSizeBytes;
@@ -50,7 +52,8 @@ public class MainApiController {
             ApiErrorHandler apiErrorHandler,
             FileIoErrorHandler fileIoErrorHandler,
             RetryHandler retryHandler,
-            AnalysisHistoryRepository analysisHistoryRepository) {
+            AnalysisHistoryRepository analysisHistoryRepository,
+            JwtTokenProvider jwtTokenProvider) {
         this.claudeService = claudeService;
         this.applicationTaskExecutor = applicationTaskExecutor;
         this.sessionManager = sessionManager;
@@ -58,6 +61,7 @@ public class MainApiController {
         this.fileIoErrorHandler = fileIoErrorHandler;
         this.retryHandler = retryHandler;
         this.analysisHistoryRepository = analysisHistoryRepository;
+        this.jwtTokenProvider = jwtTokenProvider;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -696,10 +700,42 @@ public class MainApiController {
             @RequestParam(required = false) String token,
             Authentication authentication) {
 
-        // userId 추출 (쿼리 파라미터 토큰이 있으면 무시하고 현재 authentication 사용)
+        // SSE 응답 생성 (early)
+        SseEmitter emitter = new SseEmitter(1800000L);
+        emitter.onCompletion(() -> log.info("[SSE Channel] 분석 작업 정상 마감 완료"));
+        emitter.onTimeout(emitter::complete);
+        emitter.onError((ex) -> emitter.complete());
+
+        // 토큰 검증
         Long userId = null;
-        if (authentication != null && authentication.getPrincipal() instanceof User) {
-            userId = ((User) authentication.getPrincipal()).getId();
+        if (authentication != null && !(authentication.getPrincipal() instanceof String)) {
+            // 필터에서 인증된 경우
+            if (authentication.getPrincipal() instanceof User) {
+                userId = ((User) authentication.getPrincipal()).getId();
+            }
+        } else if (token != null && !token.isEmpty()) {
+            // 쿼리 파라미터의 토큰으로 검증
+            if (jwtTokenProvider.validateToken(token)) {
+                String username = jwtTokenProvider.getUsernameFromToken(token);
+                log.info("[SSE 토큰 검증] 토큰으로 인증: {}", username);
+            } else {
+                log.warn("[SSE 토큰 검증] 유효하지 않은 토큰");
+                try {
+                    sendSseEvent(emitter, "error", "유효하지 않은 인증 토큰입니다.");
+                    emitter.complete();
+                } catch (Exception ignored) {
+                }
+                return emitter;
+            }
+        } else {
+            // 인증 정보 없음
+            log.warn("[SSE 인증 실패] 토큰이 없습니다");
+            try {
+                sendSseEvent(emitter, "error", "인증 정보가 필요합니다. 다시 로그인해주세요.");
+                emitter.complete();
+            } catch (Exception ignored) {
+            }
+            return emitter;
         }
 
         // 경로 정규화 (백스래시를 슬래시로 변환)
@@ -728,11 +764,6 @@ public class MainApiController {
         }
 
         final String finalSessionId = session.getSessionId();
-
-        SseEmitter emitter = new SseEmitter(1800000L);
-        emitter.onCompletion(() -> log.info("[SSE Channel] 분석 작업 정상 마감 완료"));
-        emitter.onTimeout(emitter::complete);
-        emitter.onError((ex) -> emitter.complete());
 
         new Thread(() -> {
             long startTime = System.currentTimeMillis();

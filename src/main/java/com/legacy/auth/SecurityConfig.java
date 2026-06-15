@@ -63,6 +63,8 @@ public class SecurityConfig {
             .requestMatchers("/css/**", "/js/**", "/images/**").permitAll()
             // 관리자 페이지는 permitAll (클라이언트에서 토큰 검증)
             .requestMatchers("/admin/**").permitAll()
+            // SSE 엔드포인트 (토큰 쿼리 파라미터 전달용)
+            .requestMatchers("/api/analyze-folder-stream").permitAll()
             // API는 역할별 보호
             .requestMatchers("/api/admin/**").hasRole("ADMIN")
             // API는 인증 필수
