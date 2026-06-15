@@ -40,7 +40,31 @@ window.onload = function() {
         step2Btn.style.opacity = "0.5";
         step2Btn.style.cursor = "not-allowed";
     }
+
+    // 관리자 버튼 표시 여부 결정
+    const roles = JSON.parse(localStorage.getItem('roles') || '[]');
+    const adminDashboardBtn = document.getElementById('adminDashboardBtn');
+    const analysisBtn = document.getElementById('analysisBtn');
+
+    if (roles.includes('ADMIN')) {
+        // 관리자: 두 버튼 모두 표시
+        adminDashboardBtn.style.display = 'block';
+        analysisBtn.style.display = 'block';
+    } else {
+        // 일반 사용자: 분석 버튼만 표시
+        analysisBtn.style.display = 'block';
+    }
 };
+
+// 관리자 대시보드로 이동
+function goToAdmin() {
+    window.location.href = '/admin/dashboard';
+}
+
+// 분석 화면으로 이동
+function goToAnalysis() {
+    window.location.href = '/';
+}
 
 // 1 단계: 파일 상태 조회 및 대시보드 동기화
 async function loadDashboard() {

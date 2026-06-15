@@ -68,14 +68,14 @@ public class DataInitializer implements CommandLineRunner {
           .orElseThrow(() -> new RuntimeException("ADMIN 역할이 없습니다."));
 
       User adminUser = new User("admin", "admin@example.com",
-          passwordEncoder.encode("admin123456"));
+          passwordEncoder.encode("admin"));
       adminUser.setRoles(new HashSet<>(Collections.singleton(adminRole)));
       adminUser.setActive(true);
       adminUser.setCreatedAt(LocalDateTime.now());
       adminUser.setUpdatedAt(LocalDateTime.now());
 
       userRepository.save(adminUser);
-      log.info("[기본 사용자 생성] admin (비밀번호: admin123456)");
+      log.info("[기본 사용자 생성] admin (비밀번호: admin)");
     }
   }
 }
