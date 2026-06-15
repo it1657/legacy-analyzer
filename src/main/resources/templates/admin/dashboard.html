@@ -406,6 +406,10 @@
                 <span class="nav-icon">📊</span>
                 <span>통계/보고서</span>
             </div>
+            <div class="nav-item" onclick="switchSection('audit-logs', this)">
+                <span class="nav-icon">📋</span>
+                <span>감사 로그</span>
+            </div>
         </div>
 
         <!-- 메인 콘텐츠 -->
@@ -572,6 +576,59 @@
                     </div>
                 </div>
             </div>
+
+            <!-- 감사 로그 섹션 -->
+            <div id="audit-logs" class="content-section">
+                <div class="page-header">
+                    <h1 class="page-title">감사 로그</h1>
+                </div>
+                <div id="auditLogAlert" class="alert"></div>
+
+                <!-- 필터 -->
+                <div style="margin-bottom: 1rem; display: flex; gap: 1rem; flex-wrap: wrap;">
+                    <select id="auditAction" style="padding: 0.5rem; border: 1px solid #e0e0e0; border-radius: 4px;">
+                        <option value="">모든 액션</option>
+                        <option value="LOGIN">로그인</option>
+                        <option value="LOGOUT">로그아웃</option>
+                        <option value="CREATE">생성</option>
+                        <option value="UPDATE">수정</option>
+                        <option value="DELETE">삭제</option>
+                        <option value="COMPLETED">완료</option>
+                    </select>
+
+                    <select id="auditTarget" style="padding: 0.5rem; border: 1px solid #e0e0e0; border-radius: 4px;">
+                        <option value="">모든 대상</option>
+                        <option value="USER">사용자</option>
+                        <option value="ANALYSIS">분석</option>
+                        <option value="SETTINGS">설정</option>
+                    </select>
+
+                    <button class="btn-primary" onclick="loadAuditLogs()" style="padding: 0.5rem 1rem;">검색</button>
+                </div>
+
+                <!-- 감사 로그 테이블 -->
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>시간</th>
+                                <th>사용자</th>
+                                <th>액션</th>
+                                <th>대상</th>
+                                <th>대상명</th>
+                                <th>상태</th>
+                                <th>설명</th>
+                                <th>IP</th>
+                            </tr>
+                        </thead>
+                        <tbody id="auditLogsList">
+                            <tr>
+                                <td colspan="8" class="no-data">감사 로그를 로드 중입니다...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -648,6 +705,8 @@
                 loadApiUsage();
             } else if (sectionId === 'statistics') {
                 loadStatistics();
+            } else if (sectionId === 'audit-logs') {
+                loadAuditLogs();
             }
         }
 
@@ -887,6 +946,69 @@
                     <td>${stat.totalApiRequests}</td>
                 </tr>
             `).join('');
+        }
+
+        // 감사 로그 로드
+        async function loadAuditLogs() {
+            try {
+                const action = document.getElementById('auditAction').value;
+                const target = document.getElementById('auditTarget').value;
+
+                let url = '/api/audit-logs/admin/recent-activity?limit=100';
+                if (action && target) {
+                    url = `/api/audit-logs/admin/all?limit=100&action=${action}&target=${target}`;
+                } else if (action) {
+                    url = `/api/audit-logs/admin/all?limit=100&action=${action}`;
+                } else if (target) {
+                    url = `/api/audit-logs/admin/all?limit=100&target=${target}`;
+                }
+
+                const response = await fetch(url, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('감사 로그 로드 실패');
+                }
+
+                const logs = await response.json();
+                renderAuditLogs(logs);
+            } catch (error) {
+                console.error('[감사 로그 로드 오류]', error);
+                showAlert('auditLogAlert', '감사 로그를 로드할 수 없습니다.', 'error');
+            }
+        }
+
+        // 감사 로그 렌더링
+        function renderAuditLogs(logs) {
+            const tbody = document.getElementById('auditLogsList');
+
+            if (logs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="no-data">감사 로그가 없습니다.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = logs.map(log => {
+                const timestamp = new Date(log.timestamp).toLocaleString('ko-KR');
+                const statusBadge = log.status === 'SUCCESS'
+                    ? '<span class="badge badge-active">성공</span>'
+                    : '<span class="badge badge-inactive">실패</span>';
+
+                return `
+                    <tr>
+                        <td style="font-size: 12px;">${timestamp}</td>
+                        <td>${log.username || '-'}</td>
+                        <td><strong>${log.action}</strong></td>
+                        <td>${log.target}</td>
+                        <td>${log.targetName || '-'}</td>
+                        <td>${statusBadge}</td>
+                        <td>${log.details || '-'}</td>
+                        <td style="font-size: 12px;">${log.ipAddress || '-'}</td>
+                    </tr>
+                `;
+            }).join('');
         }
 
         // 사용자 추가 모달 열기
