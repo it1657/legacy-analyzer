@@ -695,7 +695,6 @@ function dismissError() {
     currentSessionId = null;
     currentEventSource = null;
 }
-}
 
 // 관리자 대시보드로 이동
 function goToAdmin() {
