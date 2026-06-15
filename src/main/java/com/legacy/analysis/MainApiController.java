@@ -687,14 +687,18 @@ public class MainApiController {
             // JSON으로 직렬화
             String jsonData = objectMapper.writeValueAsString(data);
 
-            // SseEmitter로 전송 (이벤트 이름과 데이터)
-            emitter.send(SseEmitter.event()
+            // SseEmitter로 전송 (올바른 SSE 형식)
+            // event: name\ndata: json\n\n 형식
+            SseEmitter.SseEventBuilder event = SseEmitter.event()
                     .name(name)
                     .data(jsonData)
-                    .id(System.currentTimeMillis() + ""));
+                    .id(System.currentTimeMillis() + "")
+                    .reconnectTime(3000L);
+
+            emitter.send(event);
 
             try {
-                Thread.sleep(1);
+                Thread.sleep(10);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
             }
@@ -710,7 +714,7 @@ public class MainApiController {
         }
     }
 
-    @GetMapping("/api/analyze-folder-stream")
+    @GetMapping(value = "/api/analyze-folder-stream", produces = "text/event-stream")
     @ResponseBody
     public SseEmitter analyzeFolderStream(
             @RequestParam String sourcePath,
