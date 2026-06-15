@@ -19,6 +19,10 @@ public class SessionState {
   @Column(length = 36)
   private String sessionId;
 
+  @Column(name = "user_id")
+  @JsonProperty("userId")
+  private Long userId;
+
   @JsonProperty("sourcePath")
   private String sourcePath;
 
@@ -101,6 +105,14 @@ public class SessionState {
 
   public void setSessionId(String sessionId) {
     this.sessionId = sessionId;
+  }
+
+  public Long getUserId() {
+    return userId;
+  }
+
+  public void setUserId(Long userId) {
+    this.userId = userId;
   }
 
   public String getSourcePath() {

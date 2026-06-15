@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -33,6 +34,7 @@ public class MainApiController {
     private final ApiErrorHandler apiErrorHandler;
     private final FileIoErrorHandler fileIoErrorHandler;
     private final RetryHandler retryHandler;
+    private final AnalysisHistoryRepository analysisHistoryRepository;
 
     @Value("${app.analysis.max-file-size-bytes:524288}")
     private long maxFileSizeBytes;
@@ -44,13 +46,15 @@ public class MainApiController {
             AnalysisSessionManager sessionManager,
             ApiErrorHandler apiErrorHandler,
             FileIoErrorHandler fileIoErrorHandler,
-            RetryHandler retryHandler) {
+            RetryHandler retryHandler,
+            AnalysisHistoryRepository analysisHistoryRepository) {
         this.claudeService = claudeService;
         this.applicationTaskExecutor = applicationTaskExecutor;
         this.sessionManager = sessionManager;
         this.apiErrorHandler = apiErrorHandler;
         this.fileIoErrorHandler = fileIoErrorHandler;
         this.retryHandler = retryHandler;
+        this.analysisHistoryRepository = analysisHistoryRepository;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -317,7 +321,7 @@ public class MainApiController {
 
     private void finalizeAnalysis(SseEmitter emitter, String sessionId,
             Path finalProjectOutputPath, String readmeFileName, int successCount,
-            int alreadyProcessedCount, int skipCount, long startTime) {
+            int alreadyProcessedCount, int skipCount, long startTime, AnalysisHistory history) {
 
         try {
             // 최종 통계 계산
@@ -325,6 +329,20 @@ public class MainApiController {
             double divisor = successCount > 0 ? successCount :
                     (alreadyProcessedCount > 0 ? alreadyProcessedCount : 1.0);
             double avgTimePerFile = totalTimeSec / divisor;
+
+            // AnalysisHistory 업데이트
+            if (history != null) {
+                history.setTotalFiles(successCount + alreadyProcessedCount + skipCount);
+                history.setSuccessCount(successCount);
+                history.setSkipCount(alreadyProcessedCount);
+                history.setFailureCount(0);
+                history.setStatus("COMPLETED");
+                history.setCompletedAt(LocalDateTime.now());
+                history.setProcessingTimeMs((long) (totalTimeSec * 1000));
+                analysisHistoryRepository.save(history);
+                log.info("[분석 기록 완료] sessionId={}, successCount={}, totalTime={}초",
+                        sessionId, successCount, String.format("%.2f", totalTimeSec));
+            }
 
             // 최종 완료 메시지 전송 (핵심: 여기서 즉시 emitter 완료)
             Map<String, Object> finalData = new HashMap<>();
@@ -511,7 +529,14 @@ public class MainApiController {
             @RequestParam String sourcePath,
             @RequestParam(required = false) String outputPath,
             @RequestParam String forceActive,
-            @RequestParam(required = false) String sessionId) {
+            @RequestParam(required = false) String sessionId,
+            Authentication authentication) {
+
+        // userId 추출
+        Long userId = null;
+        if (authentication != null && authentication.getPrincipal() instanceof User) {
+            userId = ((User) authentication.getPrincipal()).getId();
+        }
 
         // 경로 정규화 (백스래시를 슬래시로 변환)
         final String normalizedSourcePath = sourcePath.replace("\\", "/");
@@ -530,6 +555,12 @@ public class MainApiController {
                     clientSessionId,
                     normalizedSourcePath,
                     normalizedOutputPath != null ? normalizedOutputPath : normalizedSourcePath);
+        }
+
+        // userId를 세션에 저장
+        final Long finalUserId = userId;
+        if (session != null && userId != null) {
+            session.setUserId(userId);
         }
 
         final String finalSessionId = session.getSessionId();
@@ -582,6 +613,15 @@ public class MainApiController {
                 // [2단계] 파일 목록 수집
                 List<Path> fileList = collectFileList(sourceRootPath);
                 sessionManager.initializeFileList(finalSessionId, fileList.size());
+
+                // AnalysisHistory 기록 생성
+                AnalysisHistory history = null;
+                if (finalUserId != null) {
+                    history = new AnalysisHistory(finalUserId, finalSessionId, normalizedSourcePath,
+                            finalOutputPath);
+                    analysisHistoryRepository.save(history);
+                    log.info("[분석 기록 생성] userId={}, sessionId={}", finalUserId, finalSessionId);
+                }
 
                 // [3단계] 파일 분석
                 int successCount = 0, skipCount = 0, alreadyProcessedCount = 0;
@@ -639,8 +679,12 @@ public class MainApiController {
 
                 // [4단계] 완료 처리
                 String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+
+                // 다른 스레드에서 history를 참조할 수 있도록 final로 선언
+                AnalysisHistory finalHistory = history;
+
                 finalizeAnalysis(emitter, finalSessionId, finalProjectOutputPath, readmeFileName,
-                        successCount, alreadyProcessedCount, skipCount, startTime);
+                        successCount, alreadyProcessedCount, skipCount, startTime, finalHistory);
 
             } catch (Exception e) {
                 log.error("[폴더 스트리밍 분석 중 치명적 예외 발생]", e);

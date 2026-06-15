@@ -28,10 +28,16 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'com.h2database:h2:2.2.224'
 
-    // 4. 롬복(Lombok) 호환성 설정
+    // 4. Spring Security & JWT 인증
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'io.jsonwebtoken:jjwt-api:0.12.5'
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.5'
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.5'
+
+    // 5. 롬복(Lombok) 호환성 설정
     compileOnly 'org.projectlombok:lombok:1.18.30'
     annotationProcessor 'org.projectlombok:lombok:1.18.30'
 
-    // 4. 최초 원본 스프링 기본 테스트 사양
+    // 6. 최초 원본 스프링 기본 테스트 사양
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
