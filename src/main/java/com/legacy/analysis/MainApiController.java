@@ -133,6 +133,60 @@ public class MainApiController {
         }
     }
 
+    private String analyzeFileInChunks(String originalCode, String fileName, String sourceRootPath) throws Exception {
+        String[] lines = originalCode.split("\n", -1);
+        int chunkSize = 500; // 한 청크당 500줄
+        int overlapSize = 50; // 청크 사이의 겹침 줄 수 (맥락 유지)
+
+        StringBuilder finalResult = new StringBuilder();
+        int resultStartLine = 0;
+
+        for (int chunkIndex = 0; chunkIndex < lines.length; chunkIndex += chunkSize) {
+            int chunkEnd = Math.min(chunkIndex + chunkSize, lines.length);
+            int contextStart = Math.max(0, chunkIndex - overlapSize);
+
+            // 청크 구성
+            StringBuilder chunkContent = new StringBuilder();
+
+            // 이전 맥락 포함 (주석으로 표시)
+            if (contextStart < chunkIndex) {
+                chunkContent.append("// ========== 이전 코드 맥락 (주석 처리 불필요) ==========\n");
+                for (int i = contextStart; i < chunkIndex; i++) {
+                    chunkContent.append(lines[i]).append("\n");
+                }
+                chunkContent.append("// ================================================================\n");
+            }
+
+            // 현재 청크 (주석 처리 필요)
+            for (int i = chunkIndex; i < chunkEnd; i++) {
+                chunkContent.append(lines[i]).append("\n");
+            }
+
+            // Claude API로 청크 분석
+            String chunkDescription = String.format("%s (청크 %d/%d)", fileName,
+                    (chunkIndex / chunkSize) + 1, (lines.length + chunkSize - 1) / chunkSize);
+            String analyzedChunk = claudeService.analyzeCodeWithClaude(
+                    chunkContent.toString(), chunkDescription, sourceRootPath);
+
+            // 결과에서 이전 맥락 제거 후 병합
+            String[] analyzedLines = analyzedChunk.split("\n", -1);
+            int skipLines = contextStart < chunkIndex ? (chunkIndex - contextStart + 2) : 0;
+
+            for (int i = skipLines; i < analyzedLines.length; i++) {
+                if (i < analyzedLines.length - 1 || !analyzedLines[i].isEmpty()) {
+                    finalResult.append(analyzedLines[i]);
+                    if (i < analyzedLines.length - 1) {
+                        finalResult.append("\n");
+                    }
+                }
+            }
+
+            log.info("[청크 분석 진행] {} - 줄 {}-{} 완료", fileName, chunkIndex + 1, chunkEnd);
+        }
+
+        return finalResult.toString();
+    }
+
     private FileAnalysisState analyzeFile(String sessionId, Path filePath,
             Path targetPath, Path sourceRootPath, boolean forceActive, String finalOutputPath) {
 
@@ -173,9 +227,18 @@ public class MainApiController {
             String originalCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
                     () -> readFileStrictSafely(filePath));
 
-            // Claude 분석
-            String commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
-                    () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString()));
+            // Claude 분석 (큰 파일은 청크 분할)
+            String commentedCode;
+            if (forceActive && fileSize > maxFileSizeBytes) {
+                // 큰 파일을 청크로 나눠서 분석
+                commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
+                        () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString()));
+                log.info("[청크 분할 분석] {} ({}bytes)", filePath.getFileName(), fileSize);
+            } else {
+                // 일반적인 분석
+                commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
+                        () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString()));
+            }
 
             // 파일 쓰기
             retryHandler.executeWithRetry(sessionId, filePath.toString(),
