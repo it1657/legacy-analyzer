@@ -337,9 +337,13 @@ async function runBatchAnalysis() {
     };
 
     currentEventSource.addEventListener("progress", function(e) {
-        console.log("[프론트] progress 이벤트 수신");
-        progressQueue.push({ raw: e.data });
-        if (!isProcessingProgress) processNextProgress();
+        try {
+            console.log("[프론트] progress 이벤트 수신");
+            progressQueue.push({ raw: e.data });
+            if (!isProcessingProgress) processNextProgress();
+        } catch (err) {
+            console.error("[프론트] progress 이벤트 처리 에러:", err);
+        }
     });
 
     // ===================================================================
