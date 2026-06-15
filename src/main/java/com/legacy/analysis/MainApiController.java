@@ -508,8 +508,15 @@ public class MainApiController {
                     "- 용량 미처리 패스: " + skipCount + "개\n" +
                     "=========================================\n");
 
-            emitter.send(SseEmitter.event().name("complete").data(finalData));
+            log.info("[SSE] complete 이벤트 전송 시도");
+            try {
+                emitter.send(SseEmitter.event().name("complete").data(finalData));
+                log.info("[SSE] complete 이벤트 전송 성공");
+            } catch (Exception e) {
+                log.error("[SSE] complete 이벤트 전송 실패: {}", e.getMessage());
+            }
             emitter.complete();
+            log.info("[SSE] emitter.complete() 호출 완료");
 
             // 🎉 분석 완료 로그
             int totalProcessed = successCount + alreadyProcessedCount + skipCount;
