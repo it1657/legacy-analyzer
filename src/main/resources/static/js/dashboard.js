@@ -649,3 +649,135 @@ function logout() {
 
     window.location.href = '/auth/login';
 }
+
+// 알림 토글
+function toggleNotifications() {
+    const panel = document.getElementById('notificationPanel');
+    if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        loadNotifications();
+    } else {
+        panel.style.display = 'none';
+    }
+}
+
+// 알림 로드
+async function loadNotifications() {
+    try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/notifications', {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        if (!response.ok) {
+            return;
+        }
+
+        const notifications = await response.json();
+        renderNotifications(notifications);
+
+        // 미읽음 개수 업데이트
+        updateUnreadCount();
+    } catch (error) {
+        console.error('[알림 로드 오류]', error);
+    }
+}
+
+// 알림 렌더링
+function renderNotifications(notifications) {
+    const list = document.getElementById('notificationList');
+
+    if (notifications.length === 0) {
+        list.innerHTML = '<div style="padding: 2rem; text-align: center; color: #999;">알림이 없습니다</div>';
+        return;
+    }
+
+    list.innerHTML = notifications.slice(0, 10).map(notif => {
+        const time = new Date(notif.createdAt).toLocaleString('ko-KR');
+        const bgColor = notif.isRead ? '#f9f9f9' : '#f0f0ff';
+
+        return `
+            <div style="padding: 1rem; border-bottom: 1px solid #f0f0f0; background-color: ${bgColor}; cursor: pointer;"
+                 onclick="markNotificationAsRead(${notif.id})">
+                <div style="font-weight: bold; margin-bottom: 0.25rem; color: #333;">${notif.title}</div>
+                <div style="font-size: 13px; color: #666; margin-bottom: 0.5rem;">${notif.message}</div>
+                <div style="font-size: 11px; color: #999;">${time}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+// 미읽음 개수 업데이트
+async function updateUnreadCount() {
+    try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/notifications/unread-count', {
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        if (!response.ok) {
+            return;
+        }
+
+        const data = await response.json();
+        const badge = document.getElementById('notificationBadge');
+
+        if (data.unreadCount > 0) {
+            badge.textContent = data.unreadCount;
+            badge.style.display = 'flex';
+        } else {
+            badge.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('[미읽음 개수 조회 오류]', error);
+    }
+}
+
+// 알림 읽음 처리
+async function markNotificationAsRead(notificationId) {
+    try {
+        const token = localStorage.getItem('token');
+        await fetch(`/api/notifications/${notificationId}/read`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        loadNotifications();
+    } catch (error) {
+        console.error('[알림 읽음 처리 오류]', error);
+    }
+}
+
+// 모든 알림 삭제
+async function clearAllNotifications() {
+    if (!confirm('모든 알림을 삭제하시겠습니까?')) {
+        return;
+    }
+
+    try {
+        const token = localStorage.getItem('token');
+        await fetch('/api/notifications', {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${token}`
+            }
+        });
+
+        loadNotifications();
+    } catch (error) {
+        console.error('[알림 삭제 오류]', error);
+    }
+}
+
+// 페이지 로드 시 알림 개수 업데이트
+window.addEventListener('load', () => {
+    updateUnreadCount();
+    // 30초마다 알림 개수 확인
+    setInterval(updateUnreadCount, 30000);
+});
