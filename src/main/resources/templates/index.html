@@ -17,13 +17,12 @@
 </head>
 <body>
 <div class="container">
-    <header>
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <h1>☕ Code Analyzer & Dashboard</h1>
-            </div>
-            <div style="display: flex; gap: 10px; align-items: center;">
-                <span id="loginUserInfo" style="color: #666; font-size: 14px; font-weight: 500; margin-right: 10px;">로그인 중...</span>
+    <header style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 2rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+        <div>
+            <h1 style="margin: 0; color: white;">☕ Code Analyzer & Dashboard</h1>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <span id="loginUserInfo" style="color: white; font-size: 14px; font-weight: 500; margin-right: 10px;">로그인 중...</span>
                 <div style="position: relative;">
                     <button type="button" onclick="toggleNotifications()" class="btn" style="background-color: #f39c12; color: white; padding: 8px 12px; border-radius: 50%; width: 40px; height: 40px;">🔔</button>
                     <span id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background-color: #e74a3b; color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; display: none;">0</span>
