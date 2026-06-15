@@ -61,13 +61,21 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     // 1. Authorization 헤더에서 토큰 추출
     String bearerToken = request.getHeader("Authorization");
     if (bearerToken != null && bearerToken.startsWith("Bearer ")) {
-      return bearerToken.substring(7);
+      String token = bearerToken.substring(7);
+      log.debug("[JWT] Authorization 헤더에서 토큰 추출");
+      return token;
     }
 
     // 2. 쿼리 파라미터에서 토큰 추출 (SSE/EventSource용)
     String queryToken = request.getParameter("token");
-    if (queryToken != null && !queryToken.isEmpty()) {
+    if (queryToken != null && !queryToken.isEmpty() && !queryToken.equals("null")) {
+      log.debug("[JWT] 쿼리 파라미터에서 토큰 추출 (길이: {})", queryToken.length());
       return queryToken;
+    }
+
+    if (request.getRequestURI().contains("analyze-folder-stream")) {
+      log.warn("[JWT] SSE 요청인데 토큰 없음 - Header: {}, Param: {}",
+              request.getHeader("Authorization"), request.getParameter("token"));
     }
 
     return null;

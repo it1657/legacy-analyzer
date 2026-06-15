@@ -706,32 +706,23 @@ public class MainApiController {
         emitter.onTimeout(emitter::complete);
         emitter.onError((ex) -> emitter.complete());
 
-        // 토큰 검증
+        // 토큰 검증 및 userId 추출
         Long userId = null;
-        if (authentication != null && !(authentication.getPrincipal() instanceof String)) {
-            // 필터에서 인증된 경우
-            if (authentication.getPrincipal() instanceof User) {
-                userId = ((User) authentication.getPrincipal()).getId();
-            }
-        } else if (token != null && !token.isEmpty()) {
-            // 쿼리 파라미터의 토큰으로 검증
-            if (jwtTokenProvider.validateToken(token)) {
-                String username = jwtTokenProvider.getUsernameFromToken(token);
-                log.info("[SSE 토큰 검증] 토큰으로 인증: {}", username);
-            } else {
-                log.warn("[SSE 토큰 검증] 유효하지 않은 토큰");
-                try {
-                    sendSseEvent(emitter, "error", "유효하지 않은 인증 토큰입니다.");
-                    emitter.complete();
-                } catch (Exception ignored) {
-                }
-                return emitter;
-            }
+        log.info("[SSE] 요청 정보 - Authentication: {}, Token param: {}",
+                authentication != null ? authentication.getClass().getSimpleName() : "null",
+                token != null ? "있음" : "없음");
+
+        if (authentication != null && authentication.getPrincipal() instanceof User) {
+            // JwtAuthenticationFilter에서 인증된 경우
+            userId = ((User) authentication.getPrincipal()).getId();
+            log.info("[SSE] JwtFilter 인증 성공: userId={}", userId);
         } else {
-            // 인증 정보 없음
-            log.warn("[SSE 인증 실패] 토큰이 없습니다");
+            // 인증 실패
+            log.error("[SSE] 인증 실패 - Authentication: {}, Principal type: {}",
+                    authentication != null ? "not null" : "null",
+                    authentication != null ? authentication.getPrincipal().getClass().getSimpleName() : "N/A");
             try {
-                sendSseEvent(emitter, "error", "인증 정보가 필요합니다. 다시 로그인해주세요.");
+                sendSseEvent(emitter, "error", "인증 실패: 다시 로그인해주세요.");
                 emitter.complete();
             } catch (Exception ignored) {
             }
