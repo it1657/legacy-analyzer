@@ -893,6 +893,7 @@ public class MainApiController {
 
                 // [3단계] 파일 분석
                 int successCount = 0, skipCount = 0, alreadyProcessedCount = 0;
+                log.info("[파일 분석 시작] 총 {} 개 파일", fileList.size());
 
                 for (int i = 0; i < fileList.size(); i++) {
                     try {
@@ -901,6 +902,10 @@ public class MainApiController {
                         if (currentSession != null && currentSession.shouldStop()) {
                             log.info("[분석 중단] 사용자 요청으로 분석이 중단됩니다.");
                             break;
+                        }
+
+                        if (i % 10 == 0 || i < 3) {
+                            log.info("[파일 분석 진행] {}/{} 파일 처리 중", i + 1, fileList.size());
                         }
 
                         // 일시중지 상태 확인 및 대기
@@ -951,15 +956,29 @@ public class MainApiController {
                 }
 
                 // [4단계] 완료 처리
-                try {
-                    String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
-                    AnalysisHistory finalHistory = history;
+                String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+                AnalysisHistory finalHistory = history;
 
+                try {
+                    log.info("[분석 종료 단계 진입] fileList.size={}", fileList.size());
                     finalizeAnalysis(emitter, finalSessionId, finalProjectOutputPath, readmeFileName,
                             successCount, alreadyProcessedCount, skipCount, startTime, finalHistory);
+                    log.info("[분석 완료 처리 성공]");
                 } catch (Exception e) {
                     log.error("[분석 완료 처리 중 예외]", e);
-                    // emitter가 이미 complete된 경우 무시
+                    // emitter가 이미 complete된 경우에도 명시적으로 종료 시도
+                    try {
+                        // 최소한의 완료 신호라도 보내기
+                        Map<String, Object> fallbackData = new HashMap<>();
+                        fallbackData.put("completed", true);
+                        fallbackData.put("error", e.getMessage());
+                        sendSseEvent(emitter, "progress", fallbackData);
+                        Thread.sleep(100);
+                        emitter.complete();
+                        log.info("[폴백] emitter 완료 - 예외 상황에서도 종료");
+                    } catch (Exception ignored) {
+                        log.warn("[폴백 실패] emitter 완료 불가");
+                    }
                 }
 
             } catch (Exception e) {
