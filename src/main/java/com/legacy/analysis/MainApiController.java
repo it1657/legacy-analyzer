@@ -684,7 +684,14 @@ public class MainApiController {
 
     private void sendSseEvent(SseEmitter emitter, String name, Object data) {
         try {
-            emitter.send(SseEmitter.event().name(name).data(data, MediaType.APPLICATION_JSON));
+            // JSON으로 직렬화
+            String jsonData = objectMapper.writeValueAsString(data);
+
+            // SseEmitter로 전송 (이벤트 이름과 데이터)
+            emitter.send(SseEmitter.event()
+                    .name(name)
+                    .data(jsonData)
+                    .id(System.currentTimeMillis() + ""));
 
             try {
                 Thread.sleep(1);
@@ -715,11 +722,16 @@ public class MainApiController {
             HttpServletResponse response) {
 
         // SSE 응답 헤더 명시적 설정
-        response.setContentType("text/event-stream");
+        response.setContentType("text/event-stream; charset=UTF-8");
         response.setCharacterEncoding("UTF-8");
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("Connection", "keep-alive");
         response.setHeader("X-Accel-Buffering", "no");
+        response.setBufferSize(0);
+        try {
+            response.flushBuffer();
+        } catch (IOException ignored) {
+        }
 
         // SSE 응답 생성 (early)
         SseEmitter emitter = new SseEmitter(1800000L);
