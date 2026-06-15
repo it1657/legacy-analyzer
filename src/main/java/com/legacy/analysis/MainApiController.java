@@ -715,7 +715,7 @@ public class MainApiController {
         SseEmitter emitter = new SseEmitter(1800000L);
         emitter.onCompletion(() -> log.info("[SSE Channel] 분석 작업 정상 마감 완료"));
         emitter.onTimeout(emitter::complete);
-        emitter.onError((ex) -> emitter.complete());
+        // emitter.onError 핸들러 제거 - 에러 발생 시 바로 연결 종료하면 complete 이벤트를 받지 못함
 
         // 토큰 검증 및 userId 추출
         Long userId = null;
