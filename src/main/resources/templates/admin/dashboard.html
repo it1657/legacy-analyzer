@@ -402,6 +402,10 @@
                 <span class="nav-icon">📈</span>
                 <span>API 사용량</span>
             </div>
+            <div class="nav-item" onclick="switchSection('statistics', this)">
+                <span class="nav-icon">📊</span>
+                <span>통계/보고서</span>
+            </div>
         </div>
 
         <!-- 메인 콘텐츠 -->
@@ -512,6 +516,62 @@
                     </table>
                 </div>
             </div>
+
+            <!-- 통계/보고서 섹션 -->
+            <div id="statistics" class="content-section">
+                <div class="page-header">
+                    <h1 class="page-title">통계/보고서</h1>
+                </div>
+                <div id="statisticsAlert" class="alert"></div>
+
+                <!-- 시스템 통계 -->
+                <div style="margin-bottom: 2rem;">
+                    <h3 style="margin-bottom: 1rem; font-size: 18px; color: #333;">📊 시스템 통계</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
+                        <div class="stat-card">
+                            <div class="stat-label">총 분석 횟수</div>
+                            <div class="stat-value" id="totalAnalysisStat">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">성공률</div>
+                            <div class="stat-value" id="successRateStat">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">평균 처리시간</div>
+                            <div class="stat-value" id="avgProcessingTimeStat">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">총 파일 분석</div>
+                            <div class="stat-value" id="totalFilesStat">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 사용자별 통계 -->
+                <div>
+                    <h3 style="margin-bottom: 1rem; font-size: 18px; color: #333;">👥 사용자별 통계</h3>
+                    <div class="table-container">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>사용자명</th>
+                                    <th>이메일</th>
+                                    <th>분석 횟수</th>
+                                    <th>성공률</th>
+                                    <th>평균 시간 (초)</th>
+                                    <th>총 파일</th>
+                                    <th>API 요청</th>
+                                </tr>
+                            </thead>
+                            <tbody id="userStatsList">
+                                <tr>
+                                    <td colspan="7" class="no-data">통계를 로드 중입니다...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -586,6 +646,8 @@
                 loadAnalysisHistory();
             } else if (sectionId === 'api-usage') {
                 loadApiUsage();
+            } else if (sectionId === 'statistics') {
+                loadStatistics();
             }
         }
 
@@ -757,6 +819,74 @@
         // 사용자 상세 API 사용량 조회 (모달로 표시)
         async function viewDetailedUsage(userId) {
             alert(`사용자 ${userId}의 상세 API 사용량은 향후 구현될 예정입니다.`);
+        }
+
+        // 통계/보고서 로드
+        async function loadStatistics() {
+            try {
+                // 시스템 통계 로드
+                const systemResponse = await fetch('/api/statistics/admin/system', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!systemResponse.ok) {
+                    throw new Error('시스템 통계 로드 실패');
+                }
+
+                const systemStats = await systemResponse.json();
+                renderSystemStatistics(systemStats);
+
+                // 사용자별 통계 로드
+                const userResponse = await fetch('/api/statistics/admin/users', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!userResponse.ok) {
+                    throw new Error('사용자 통계 로드 실패');
+                }
+
+                const userStats = await userResponse.json();
+                renderUserStatistics(userStats);
+            } catch (error) {
+                console.error('[통계 로드 오류]', error);
+                showAlert('statisticsAlert', '통계를 로드할 수 없습니다.', 'error');
+            }
+        }
+
+        // 시스템 통계 렌더링
+        function renderSystemStatistics(stats) {
+            document.getElementById('totalAnalysisStat').textContent = stats.totalAnalysis || 0;
+            document.getElementById('successRateStat').textContent =
+                (stats.overallSuccessRate || 0).toFixed(1) + '%';
+            document.getElementById('avgProcessingTimeStat').textContent =
+                ((stats.avgProcessingTimeMs || 0) / 1000).toFixed(2) + '초';
+            document.getElementById('totalFilesStat').textContent = stats.totalFilesAnalyzed || 0;
+        }
+
+        // 사용자별 통계 렌더링
+        function renderUserStatistics(userStats) {
+            const tbody = document.getElementById('userStatsList');
+
+            if (userStats.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="no-data">통계 데이터가 없습니다.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = userStats.map(stat => `
+                <tr>
+                    <td>${stat.username || '-'}</td>
+                    <td>${stat.email || '-'}</td>
+                    <td>${stat.totalAnalysis}</td>
+                    <td>${(stat.successRate || 0).toFixed(1)}%</td>
+                    <td>${((stat.avgProcessingTimeMs || 0) / 1000).toFixed(2)}</td>
+                    <td>${stat.totalFilesAnalyzed}</td>
+                    <td>${stat.totalApiRequests}</td>
+                </tr>
+            `).join('');
         }
 
         // 사용자 추가 모달 열기
