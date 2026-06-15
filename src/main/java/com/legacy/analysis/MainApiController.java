@@ -331,10 +331,24 @@ public class MainApiController {
     private void performCopy(SseEmitter emitter, Path sourceRootPath, Path finalProjectOutputPath)
             throws IOException {
 
-        // 기존 출력 경로 백업
-        backupExistingOutput(emitter, finalProjectOutputPath);
+        // 새로운 출력 폴더가 없으면 생성, 있으면 내용 삭제
+        if (Files.exists(finalProjectOutputPath)) {
+            try (Stream<Path> stream = Files.walk(finalProjectOutputPath)) {
+                stream.sorted((p1, p2) -> p2.compareTo(p1))
+                        .forEach(path -> {
+                            try {
+                                if (Files.isDirectory(path)) {
+                                    Files.deleteIfExists(path);
+                                } else {
+                                    Files.deleteIfExists(path);
+                                }
+                            } catch (IOException e) {
+                                log.warn("파일 삭제 실패: {}", path, e);
+                            }
+                        });
+            }
+        }
 
-        // 새로운 출력 폴더 생성
         if (!Files.exists(finalProjectOutputPath)) {
             Files.createDirectories(finalProjectOutputPath);
         }
