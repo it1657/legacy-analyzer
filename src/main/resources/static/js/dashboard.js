@@ -332,6 +332,16 @@ async function runBatchAnalysis() {
         if (!isProcessingProgress) processNextProgress();
     });
 
+    currentEventSource.addEventListener("error", function(e) {
+        if (e.eventPhase === EventSource.CLOSED || currentEventSource.readyState === EventSource.CLOSED) {
+            log.debug("[SSE] 연결 정상 종료");
+            // EventSource가 이미 종료된 경우 - 재연결 시도 방지
+            currentEventSource.close();
+        } else if (e.eventPhase === EventSource.CONNECTING) {
+            log.warn("[SSE] 재연결 시도 중...");
+        }
+    });
+
     // ===================================================================
     // 💡 [마무리 및 타이머 종료 구간]: 작업 완료 시 스탑워치 정지 및 카드판 피날레
     // ===================================================================
