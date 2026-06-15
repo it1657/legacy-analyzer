@@ -600,9 +600,10 @@ public class MainApiController {
             @RequestParam(required = false) String outputPath,
             @RequestParam String forceActive,
             @RequestParam(required = false) String sessionId,
+            @RequestParam(required = false) String token,
             Authentication authentication) {
 
-        // userId 추출
+        // userId 추출 (쿼리 파라미터 토큰이 있으면 무시하고 현재 authentication 사용)
         Long userId = null;
         if (authentication != null && authentication.getPrincipal() instanceof User) {
             userId = ((User) authentication.getPrincipal()).getId();

@@ -323,7 +323,8 @@ async function runBatchAnalysis() {
         setTimeout(processNextProgress, 1);
     }
     // 🎯 [ReferenceError 버그 해결]: 미선언 에러 차단을 위해 const 키워드를 붙여 고정합니다.
-    const url = `/api/analyze-folder-stream?sourcePath=${encodeURIComponent(sourcePath)}&outputPath=${encodeURIComponent(outputPath)}&forceActive=${isForceChecked}&sessionId=${currentSessionId}`;
+    const token = localStorage.getItem('token');
+    const url = `/api/analyze-folder-stream?sourcePath=${encodeURIComponent(sourcePath)}&outputPath=${encodeURIComponent(outputPath)}&forceActive=${isForceChecked}&sessionId=${currentSessionId}&token=${encodeURIComponent(token || '')}`;
     currentEventSource = new EventSource(url);
 
     currentEventSource.addEventListener("progress", function(e) {
