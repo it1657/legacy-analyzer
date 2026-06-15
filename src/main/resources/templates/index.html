@@ -1,136 +1,147 @@
+<!-- [AI 한글 주석 보완 완료] -->
+<!-- 확장자(.html) 맞춤형 자동 생성 목업 주석 예시 1 -->
 <!DOCTYPE html>
 <html lang="ko" xmlns:th="http://thymeleaf.org">
 <head>
     <meta charset="UTF-8">
+<!-- 분석 대상 파일명: index.html -->
     <title>레거시 코드 명세 대시보드</title>
     <!-- 💡 [아키텍처 대변혁]: HTML 내부 스타일을 제거하고 타임리프 표준 외부 CSS 파일로 분리 바인딩합니다 -->
     <link th:href="@{/css/dashboard.css}" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>☕ Code Analyzer & Dashboard <span style="font-size: 14px; color: #858796; font-weight: normal; margin-left: 10px;">v5.5 고속 검색판</span></h1>
-            <div class="author">작성자: <strong>정재훈</strong></div>
-        </header>
+<div class="container">
+    <header>
+        <h1>☕ Code Analyzer & Dashboard <span style="font-size: 14px; color: #858796; font-weight: normal; margin-left: 10px;">v5.5 고속 검색판</span></h1>
+        <div class="author">작성자: <strong>정재훈</strong></div>
+    </header>
 
-        <!-- 📁 지정 경로 자동화 제어 센터 -->
-        <div class="card">
-            <div class="card-header bg-dark" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 20px;">
-                <span>📁 지정 경로 자동화 제어 센터</span>
-                <button type="button" onclick="resetDashboard()" class="btn" style="background-color: #f6c23e; color: #333; padding: 6px 16px; font-size: 13px; border-radius: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.15);">🔄 화면 대시보드 초기화</button>
-            </div>
-            <div class="card-body">
-                <div style="display: flex; flex-direction: column; gap: 15px;">
-                    <div class="control-row">
-                        <label for="sourceFolderPath" style="font-weight: bold; min-width: 110px;">📂 원본 경로:</label>
-                        <input type="text" id="sourceFolderPath" class="form-control" placeholder="분석할 레거시 프로젝트 경로">
-                        <button type="button" onclick="loadDashboard()" class="btn">1 단계: 파일 상태 조회</button>
+    <!-- 📁 지정 경로 자동화 제어 센터 -->
+    <div class="card">
+        <div class="card-header bg-dark" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 20px;">
+            <span>📁 지정 경로 자동화 제어 센터</span>
+            <button type="button" onclick="resetDashboard()" class="btn" style="background-color: #f6c23e; color: #333; padding: 6px 16px; font-size: 13px; border-radius: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.15);">🔄 화면 대시보드 초기화</button>
+        </div>
+        <div class="card-body">
+            <div style="display: flex; flex-direction: column; gap: 15px;">
+                <div class="control-row">
+                    <label for="sourceFolderPath" style="font-weight: bold; min-width: 110px;">📂 원본 경로:</label>
+                    <input type="text" id="sourceFolderPath" class="form-control" placeholder="분석할 레거시 프로젝트 경로">
+                    <button type="button" onclick="loadDashboard()" class="btn">1 단계: 파일 상태 조회</button>
+                </div>
+                <div class="control-row">
+                    <label for="outputFolderPath" style="font-weight: bold; min-width: 110px;">🎯 출력 경로:</label>
+                    <input type="text" id="outputFolderPath" class="form-control" placeholder="결과물을 생성할 특정 폴더 경로">
+
+                    <div style="display: flex; align-items: center; gap: 6px; margin-right: 5px; white-space: nowrap;">
+                        <input type="checkbox" id="chkForceActive" style="width: 18px; height: 18px; cursor: pointer;">
+                        <label for="chkForceActive" style="font-size: 13px; font-weight: bold; color: #e74a3b; cursor: pointer; user-select: none;">⚠️ 미처리 파일 강제 포함</label>
                     </div>
-                    <div class="control-row">
-                        <label for="outputFolderPath" style="font-weight: bold; min-width: 110px;">🎯 출력 경로:</label>
-                        <input type="text" id="outputFolderPath" class="form-control" placeholder="결과물을 생성할 특정 폴더 경로">
 
-                        <div style="display: flex; align-items: center; gap: 6px; margin-right: 5px; white-space: nowrap;">
-                            <input type="checkbox" id="chkForceActive" style="width: 18px; height: 18px; cursor: pointer;">
-                            <label for="chkForceActive" style="font-size: 13px; font-weight: bold; color: #e74a3b; cursor: pointer; user-select: none;">⚠️ 미처리 파일 강제 포함</label>
+                    <button type="button" onclick="runBatchAnalysis()" class="btn btn-success">2 단계: 특정 경로에 결과 생성</button>
+                </div>
+                <div class="control-row" id="sessionControlPanel" style="display: none; gap: 10px;">
+                    <span style="font-weight: bold; color: #4e73df;">분석 중:</span>
+                    <span id="sessionIdDisplay" style="font-size: 12px; color: #858796; font-family: monospace;"></span>
+                    <button type="button" onclick="pauseAnalysis()" class="btn" style="background-color: #f6c23e; color: #333;">⏸️ 일시 중지</button>
+                    <button type="button" onclick="resumeAnalysis()" class="btn" style="background-color: #4e73df; color: white; display: none;" id="resumeBtn">▶️ 재개</button>
+                    <button type="button" onclick="cancelAnalysis()" class="btn" style="background-color: #e74a3b; color: white;">❌ 취소</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- 🟢 [좌측] 실시간 프로세스 콘솔 패널 -->
+        <div class="col-left">
+            <div class="card">
+                <div class="card-header bg-primary">💻 실시간 프로세스 콘솔</div>
+                <div id="errorPanel" style="display: none; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px; padding: 12px; margin-bottom: 10px;">
+                    <div style="color: #721c24; font-weight: bold; margin-bottom: 5px;">⚠️ 에러 발생</div>
+                    <div id="errorMessage" style="color: #721c24; font-size: 13px; white-space: pre-wrap; word-break: break-word;"></div>
+                    <button type="button" onclick="dismissError()" style="margin-top: 8px; background-color: #721c24; color: white; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;">닫기</button>
+                </div>
+                <div class="card-body">
+                    <div class="stat-summary">
+                        <div class="stat-item">📁 총 파일: <span id="txtTotal" style="color:#4e73df;">0</span>개</div>
+                        <div class="stat-item">🟢 패치 완료: <span id="txtComplete" style="color:#1cc88a;">0</span>개</div>
+                        <div class="stat-item">🔴 미처리 파일: <span id="txtWait" style="color:#e74a3b;">0</span>개</div>
+                    </div>
+
+                    <div class="stat-summary" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px; background-color: #f8f9fc; border: 1px dashed #e3e6f0; border-radius: 5px; padding: 8px;">
+                        <div class="stat-item" style="font-size: 13px;">총 소요 시간: <span id="txtTotalTime" style="color:#36b9cc; font-weight: bold;">0.00</span>초</div>
+                        <div class="stat-item" style="font-size: 13px;">평균 처리 속도: <span id="txtAvgSpeed" style="color:#f6c23e; font-weight: bold;">0.00</span>초/개</div>
+                    </div>
+
+                    <div class="split-dashboard" style="flex: 1; display: flex; flex-direction: column;">
+                        <div style="flex: 1; display: flex; flex-direction: column; margin-top: 10px; position: relative;">
+                            <div class="sub-dashboard-title" style="color: #4e73df;">
+                                <span>🚀 실시간 모니터링 터미널</span>
+                                <span id="progressPanel" class="progress-container" style="margin: 0; width: 150px; height: 12px;">
+                                        <div class="progress-bar-animated"></div>
+                                    </span>
+                            </div>
+                            <!-- 💡 [좌측 교정]: 가로 밀림과 무한 증식을 막는 완전 격리형 스타일 주입 -->
+                            <div id="terminalLog" class="terminal-log" style="width: 100%; height: 350px; max-height: 350px; overflow-y: auto; overflow-x: hidden; word-break: break-all; white-space: pre-wrap; box-sizing: border-box;">시스템 가동 대기 중... 먼저 [1단계: 파일 상태 조회]를 실행하십시오.</div>
                         </div>
-
-                        <button type="button" onclick="runBatchAnalysis()" class="btn btn-success">2 단계: 특정 경로에 결과 생성</button>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- 💡 [UX 완전 진압 아키텍처]: 좌측과 우측의 내부 HTML 자식 컴포넌트 깊이를 자석처럼 일치시켰습니다 -->
-        <div class="row">
-
-            <!-- ===================================================================
-                 🟢 [좌측] 실시간 프로세스 콘솔 패널 (우측 대시보드와 대칭 구조 매핑)
-                 =================================================================== -->
-            <div class="col-left">
-                <div class="card">
-                    <div class="card-header bg-primary">💻 실시간 프로세스 콘솔</div>
-                    <div class="card-body">
-
-                        <!-- 상단 통계 수치 영역 -->
-                        <div class="stat-summary">
-                            <div class="stat-item">📁 총 파일: <span id="txtTotal" style="color:#4e73df;">0</span>개</div>
-                            <div class="stat-item">🟢 패치 완료: <span id="txtComplete" style="color:#1cc88a;">0</span>개</div>
-                            <div class="stat-item">🔴 미처리 파일: <span id="txtWait" style="color:#e74a3b;">0</span>개</div>
-                        </div>
-
-                        <div class="stat-summary" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px; background-color: #f8f9fc; border: 1px dashed #e3e6f0; border-radius: 5px; padding: 8px;">
-                            <div class="stat-item" style="font-size: 13px;">총 소요 시간: <span id="txtTotalTime" style="color:#36b9cc; font-weight: bold;">0.00</span>초</div>
-                            <div class="stat-item" style="font-size: 13px;">평균 처리 속도: <span id="txtAvgSpeed" style="color:#f6c23e; font-weight: bold;">0.00</span>초/개</div>
-                        </div>
-
-                        <!-- 💡 [구조 교정 핵심]: 우측 이중 분할과 똑같은 자식 wrapper 깊이를 주어, 검은색 창이 아래 바닥선까지 자동으로 영리하게 찢어지며 늘어나게 만듭니다 -->
-                        <div class="split-dashboard" style="flex: 1; display: flex; flex-direction: column;">
-                            <div style="flex: 1; display: flex; flex-direction: column; margin-top: 10px;">
-                                <div class="sub-dashboard-title" style="color: #4e73df;">
-                                    <span>🚀 실시간 모니터링 터미널</span>
-                                    <span id="progressPanel" class="progress-container" style="margin: 0; width: 150px; height: 12px;">
-                                    <div class="progress-bar-animated"></div>
-                                </span>
+        <!-- 🟢 [우측] 분석 상태 관리 종합 대시보드 패널 -->
+        <div class="col-right">
+            <div class="card">
+                <div class="card-header bg-success">
+                    <span>📊 분석 상태 관리 종합 대시보드</span>
+                    <div class="search-wrapper">
+                        <input type="text" id="uiSearchInput" class="search-control" placeholder="🔍 파일명 또는 패키지 경로 고속 필터링..." onkeyup="filterFileList()">
+                    </div>
+                </div>
+                <div class="card-body" style="position: relative;">
+                    <div class="split-dashboard">
+                        <!-- 상단 위판: 미처리 대기 격리 목록 -->
+                        <div>
+                            <div class="sub-dashboard-title" style="color: #e74a3b;">
+                                <span>🚨 미처리 대기 목록 (<span id="lblWaitCnt">0</span>)</span>
+                                <span style="font-size: 11px; font-weight: normal; color:#858796;">용량 초과 및 분석 대기 파일</span>
+                            </div>
+                            <!-- 💡 [우측 위판 교정]: 수천 개 바인딩 시 세로 폭발 방지 스크롤선 구축 -->
+                            <div id="waitGrid" class="dashboard-grid" style="max-height: 250px; overflow-y: auto; overflow-x: hidden; box-sizing: border-box;">
+                                <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 50px; font-size: 13px;">
+                                    경로 조회 시 미처리 소스가 이곳에 표기됩니다.
                                 </div>
-                                <!-- 진짜 자바 컴포넌트 터미널 로그창 안착 -->
-                                <div id="terminalLog" class="terminal-log">시스템 가동 대기 중... 먼저 [1단계: 파일 상태 조회]를 실행하십시오.</div>
                             </div>
                         </div>
 
+                        <!-- 하단 아래판: 주석 패치 완료 목록 -->
+                        <div style="flex: 1; display: flex; flex-direction: column;">
+                            <div class="sub-dashboard-title" style="color: #1cc88a;">
+                                <span>🟢 주석 패치 완료 목록 (<span id="lblCompleteCnt">0</span>)</span>
+                                <span style="font-size: 11px; font-weight: normal; color:#858796;">구조 유지 배포 완료</span>
+                            </div>
+                            <!-- 💡 [우측 아래판 교정]: 균형 잡힌 상하 밸런스 스크롤선 구축 -->
+                            <div id="completeGrid" class="dashboard-grid" style="flex: 1; min-height: 200px; max-height: 250px; overflow-y: auto; overflow-x: hidden; box-sizing: border-box;">
+                                <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 80px; font-size: 13px;">
+                                    패치가 완료된 안전 파일 목록입니다.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 분석 중 상태 오버레이 (우측 대시보드만 마스킹) -->
+                    <div id="analysisOverlay" class="analysis-overlay" style="display: none;">
+                        <div class="spinner"></div>
+                        <div style="color: white; margin-top: 15px; font-weight: bold; font-size: 14px;">분석 중...</div>
                     </div>
                 </div>
             </div>
+        </div>
+    </div> <!-- .row 마감 -->
+</div> <!-- .container 마감 -->
 
-            <!-- ===================================================================
-                 🟢 [우측] 분석 상태 관리 종합 대시보드 패널
-                 =================================================================== -->
-            <div class="col-right">
-                <div class="card">
-                    <div class="card-header bg-success">
-                        <span>📊 분석 상태 관리 종합 대시보드</span>
-                        <div class="search-wrapper">
-                            <input type="text" id="uiSearchInput" class="search-control" placeholder="🔍 파일명 또는 패키지 경로 고속 필터링..." onkeyup="filterFileList()">
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="split-dashboard">
-
-                            <!-- 상단 위판: 미처리 대기 격리 목록 -->
-                            <div>
-                                <div class="sub-dashboard-title" style="color: #e74a3b;">
-                                    <span>🚨 미처리 대기 목록 (<span id="lblWaitCnt">0</span>)</span>
-                                    <span style="font-size: 11px; font-weight: normal; color:#858796;">용량 초과 및 분석 대기 파일</span>
-                                </div>
-                                <div id="waitGrid" class="dashboard-grid">
-                                    <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 50px; font-size: 13px;">
-                                        경로 조회 시 미처리 소스가 이곳에 표기됩니다.
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- 하단 아래판: 주석 패치 완료 목록 -->
-                            <div style="flex: 1; display: flex; flex-direction: column;">
-                                <div class="sub-dashboard-title" style="color: #1cc88a;">
-                                    <span>🟢 주석 패치 완료 목록 (<span id="lblCompleteCnt">0</span>)</span>
-                                    <span style="font-size: 11px; font-weight: normal; color:#858796;">구조 유지 배포 완료</span>
-                                </div>
-                                <div id="completeGrid" class="dashboard-grid" style="flex: 1; min-height: 200px;">
-                                    <div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 80px; font-size: 13px;">
-                                        패치가 완료된 안전 파일 목록입니다.
-                                    </div>
-                                </div>
-                            </div>
-
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div> <!-- .row 마감 -->
-    </div> <!-- .container 마감 -->
-
-    <div th:replace="~{fragments/modal :: confirmModal}"></div>
-
-    <script th:src="@{/js/dashboard.js}"></script>
+<div th:replace="~{fragments/modal :: confirmModal}"></div>
+<script th:src="@{/js/dashboard.js}"></script>
 </body>
+
 </html>

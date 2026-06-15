@@ -1,5 +1,6 @@
 package com.legacy;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -37,6 +38,18 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Value("${app.analysis.system-prompt-filename:CLAUDE.md}")
     private String systemPromptFilename;
+
+    private final ApiErrorHandler apiErrorHandler;
+    private final FileIoErrorHandler fileIoErrorHandler;
+    private final SessionConfig sessionConfig;
+
+    @Autowired
+    public ClaudeServiceImpl(ApiErrorHandler apiErrorHandler, FileIoErrorHandler fileIoErrorHandler,
+        SessionConfig sessionConfig) {
+      this.apiErrorHandler = apiErrorHandler;
+      this.fileIoErrorHandler = fileIoErrorHandler;
+      this.sessionConfig = sessionConfig;
+    }
 
     /**
      * 최초 가동 자동화 인프라:
@@ -251,14 +264,15 @@ public class ClaudeServiceImpl implements ClaudeService {
         userMessage.put("content", "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode);
         requestBody.put("messages", Collections.singletonList(userMessage));
 
-        int maxRetries = 3;
-        int retryDelayMs = 1500;
+        // 설정값에서 재시도 정책 로드
+        int maxRetries = sessionConfig.getMaxRetries();
+        long initialRetryDelay = sessionConfig.getInitialRetryDelayMs();
+        long maxRetryDelay = sessionConfig.getMaxRetryDelayMs();
 
-        for (int retry = 1; retry <= maxRetries; retry++) {
+        for (int retry = 0; retry < maxRetries; retry++) {
             try {
                 Map<?, ?> response = webClient.post()
                         .uri("/v1/messages")
-                        .bodyValue(requestBody)
                         .retrieve()
                         .bodyToMono(Map.class)
                         .block();
@@ -268,23 +282,47 @@ public class ClaudeServiceImpl implements ClaudeService {
                     if (contentList != null && !contentList.isEmpty()) {
                         Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
                         String aiJsonResponse = String.valueOf(contentMap.get("text"));
+                        log.info("[API 분석 성공] 파일명: {}", fileName);
                         return mergeCommentsIntoCode(sourceCode, aiJsonResponse, extension);
                     }
                 }
                 throw new RuntimeException("AI 응답 바디 구조 파싱 예외 공정 발생");
 
             } catch (Exception e) {
-                log.warn("[API 통신 지연 발생] 파일명: {} | ( {} / {} 회 시도 실패) : {}", fileName, retry, maxRetries, e.getMessage());
+                // 에러 분류
+                ApiErrorHandler.ErrorType errorType = apiErrorHandler.classifyError(e, 0);
 
-                if (retry == maxRetries) {
-                    log.error("[프로세스 홀딩 방어 선언] {} 파일이 최대 재시도 횟수를 초과했습니다. 에러 배너 우회 결합 모드로 전환합니다.", fileName, e);
-                    return "/* [API 통신 장애 발생 - 최대 재시도 초과]: " + e.getMessage() + " */\n" + sourceCode;
+                // 재시도 불가능한 에러는 즉시 반환
+                if (!apiErrorHandler.isRetryable(errorType)) {
+                    String userMsg = apiErrorHandler.getUserFriendlyMessage(errorType, fileName);
+                    apiErrorHandler.logError(errorType, fileName, e, retry, false);
+                    log.error("[비복구 오류] {}", userMsg);
+                    return "/* [비복구 오류 발생 - " + errorType.name() + "]: " + e.getMessage() + " */\n" + sourceCode;
                 }
 
-                try {
-                    Thread.sleep((long) retryDelayMs * retry);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
+                // 재시도 대기 시간 계산
+                boolean isLastAttempt = (retry == maxRetries - 1);
+                if (!isLastAttempt) {
+                    long retryDelay = apiErrorHandler.calculateRetryDelay(errorType, retry,
+                        initialRetryDelay, maxRetryDelay);
+
+                    String userMsg = apiErrorHandler.getUserFriendlyMessage(errorType, fileName);
+                    apiErrorHandler.logError(errorType, fileName, e, retry + 1, true);
+                    log.info("[자동 재시도] {} | {}ms 대기 후 {}회차 시도", userMsg, retryDelay, retry + 2);
+
+                    try {
+                        Thread.sleep(retryDelay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                } else {
+                    // 최종 재시도 실패
+                    String userMsg = apiErrorHandler.getUserFriendlyMessage(errorType, fileName);
+                    apiErrorHandler.logError(errorType, fileName, e, maxRetries, false);
+                    log.error("[최대 재시도 초과] {} | 파일: {}", userMsg, fileName);
+                    return String.format("/* [API 통신 장애 발생 - 최대 재시도 초과 (%d/%d): %s] */\n",
+                        retry + 1, maxRetries, e.getMessage()) + sourceCode;
                 }
             }
         }

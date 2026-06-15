@@ -2,6 +2,7 @@
 
 /* ===================================================================
    1. 전역 레이아웃 및 본문 컨테이너 명세 (좌우 강제 수평 일치)
+// 분석 대상 파일명: dashboard.css
    =================================================================== */
 body { font-family: 'Segoe UI', sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; color: #333; }
 .container { max-width: 1650px; margin: 0 auto; }
@@ -70,3 +71,35 @@ span.badge-green { background-color: #1cc88a; }
 .progress-container { display: none; width: 100%; background-color: #e9ecef; border-radius: 6px; overflow: hidden; margin-top: 15px; height: 16px; border: 1px solid #ced4da; }
 .progress-bar-animated { width: 100%; height: 100%; background: linear-gradient(45deg, #1cc88a 25%, #15a571 25%, #15a571 50%, #1cc88a 50%, #1cc88a 75%, #15a571 75%, #15a571); background-size: 40px 40px; animation: progress-bar-stripes 1s linear infinite; }
 @keyframes progress-bar-stripes { 0% { background-position: 40px 0; } 100% { background-position: 0 0; } }
+
+/* ===================================================================
+   5. 분석 중 상태 오버레이 및 로딩 스피너
+   =================================================================== */
+.analysis-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    z-index: 1000;
+    backdrop-filter: blur(2px);
+}
+
+.spinner {
+    border: 5px solid rgba(255, 255, 255, 0.2);
+    border-top: 5px solid white;
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }

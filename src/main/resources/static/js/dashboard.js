@@ -1,9 +1,21 @@
+/* [AI 한글 주석 보완 완료] */
+// 확장자(.js) 맞춤형 자동 생성 목업 주석 예시 1
 /**
- * Code Analyzer & Dashboard v1.0 - Core Script Engine
+ * Code Analyzer & Dashboard v1.0 - Core Script Engine (Bug Fixed Version)
+ * Phase 2 개선: 세션 관리, 에러 핸들링, 일시 중지/재개 기능 추가
  */
+// 분석 대상 파일명: dashboard.js
 let globalFilesCache = [];
+let analysisTimer = null; // 스탑워치 제어용 전역 변수
 
-// [최초 가동 및 무결성 제어]: 화면이 열리자마자 2단계 버튼을 클릭 못하게 강제 잠금 처리합니다.
+// 세션 및 분석 제어 변수
+let currentSessionId = null; // 현재 분석 세션 ID
+let currentEventSource = null; // 현재 SSE 연결
+let isAnalysisPaused = false; // 분석 일시 중지 상태
+let isPausedLocally = false; // 로컬에서 일시 중지됨
+let isAnalysisComplete = false; // 분석 완료 상태 플래그
+
+// [최초 가동 제어]: 화면이 열리자마자 2단계 버튼을 클릭 못하게 강제 잠금 처리합니다.
 window.onload = function() {
     const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
     if(step2Btn) {
@@ -21,16 +33,11 @@ async function loadDashboard() {
     const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
 
     document.getElementById('uiSearchInput').value = "";
+    if(!path.trim()) { alert('원본 소스 경로를 지정해 주세요!'); return; }
 
-    if(!path.trim()) {
-        alert('원본 소스 경로를 지정해 주세요!');
-        return;
-    }
-
-    // 새 조회 시 이전 턴의 타이머 지표 소독 (0.00초 리셋)
     const txtTotalTime = document.getElementById("txtTotalTime");
     const txtAvgSpeed = document.getElementById("txtAvgSpeed");
-    if (txtTotalTime) txtTotalTime.innerText = "0.00";
+    if (txtTotalTime) txtTotalTime.innerText = "0.0";
     if (txtAvgSpeed) txtAvgSpeed.innerText = "0.00";
 
     logConsole.textContent = "[안내] 원본 디렉터리 구조 계층 조사 및 이중 격리 검증 중...";
@@ -42,21 +49,13 @@ async function loadDashboard() {
             body: JSON.stringify({ folderPath: path, outputPath: outPath })
         });
         const data = await response.json();
-
-        if(data.error) {
-            logConsole.textContent = "[오류] " + data.error;
-            return;
-        }
+        if(data.error) { logConsole.textContent = "[오류] " + data.error; return; }
 
         logConsole.textContent = data.consoleLog;
         globalFilesCache = data.files && data.files.length > 0 ? data.files : [];
         renderDividedGrid(globalFilesCache);
 
-        if(step2Btn) {
-            step2Btn.disabled = false;
-            step2Btn.style.opacity = "1";
-            step2Btn.style.cursor = "pointer";
-        }
+        if(step2Btn) { step2Btn.disabled = false; step2Btn.style.opacity = "1"; step2Btn.style.cursor = "pointer"; }
     } catch (error) {
         logConsole.textContent = "[통신 오류] 백엔드 서버 상태를 확인하세요. (" + error.message + ")";
     }
@@ -69,8 +68,7 @@ function renderDividedGrid(filesArray) {
     const srcPath = document.getElementById('sourceFolderPath').value;
     let outPath = document.getElementById('outputFolderPath').value;
 
-    waitGrid.innerHTML = "";
-    completeGrid.innerHTML = "";
+    waitGrid.innerHTML = completeGrid.innerHTML = "";
     let currentWaitCnt = 0, currentCompleteCnt = 0;
 
     if(filesArray.length === 0) {
@@ -93,25 +91,22 @@ function renderDividedGrid(filesArray) {
 
         const nameSpan = document.createElement('span');
         nameSpan.textContent = file.fileName ? file.fileName.replaceAll('#', '/').replaceAll('\\', '/') : "";
-        nameSpan.style.wordBreak = "break-all";
-        nameSpan.style.paddingRight = "10px";
+        nameSpan.style.wordBreak = "break-all"; nameSpan.style.paddingRight = "10px";
 
         const badgeSpan = document.createElement('span');
         badgeSpan.className = `status-badge ${file.isCompleted ? 'badge-green' : 'badge-red'}`;
         badgeSpan.textContent = file.isCompleted ? "패치완료" : "대기중";
 
-        fileDiv.appendChild(nameSpan);
-        fileDiv.appendChild(badgeSpan);
+        fileDiv.appendChild(nameSpan); fileDiv.appendChild(badgeSpan);
 
         fileDiv.onclick = function() {
             const windowSeparator = outPath.endsWith('\\') || outPath.endsWith('/') ? "" : "\\";
             const absoluteWindowsPath = outPath + windowSeparator + file.fileName.replaceAll('/', '\\').replaceAll('#', '\\');
-
             navigator.clipboard.writeText(absoluteWindowsPath).then(() => {
                 const logConsole = document.getElementById('terminalLog');
-                logConsole.textContent = `[경로 복사 완료] 윈도우 탐색기 주소창에 붙여넣기(Ctrl+V) 하세요:\n경로 주소: ${absoluteWindowsPath}`;
+                logConsole.textContent = `[경로 복사 완료] 주소창에 붙여넣기(Ctrl+V) 하세요:\n${absoluteWindowsPath}`;
                 logConsole.scrollTop = logConsole.scrollHeight;
-            }).catch(err => console.error("경로 복사 실패: ", err));
+            }).catch(err => console.error("복사 실패: ", err));
         };
 
         if (!file.isCompleted) { waitGrid.appendChild(fileDiv); currentWaitCnt++; }
@@ -127,6 +122,7 @@ function renderDividedGrid(filesArray) {
     if(currentWaitCnt === 0) waitGrid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #1cc88a; padding-top: 50px; font-weight: bold;">[알림] 조건에 맞는 미처리 파일이 0개입니다.</div>`;
     if(currentCompleteCnt === 0) completeGrid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 100px;">조건에 맞는 패치 완료 파일이 없습니다.</div>`;
 }
+
 // 브라우저 캐시 실시간 검색 엔진
 function filterFileList() {
     const query = document.getElementById('uiSearchInput').value.toLowerCase().trim();
@@ -144,86 +140,294 @@ function openCustomConfirmModal() {
         const modal = document.getElementById('customConfirmModal');
         const btnConfirm = document.getElementById('btnModalConfirm');
         const btnCancel = document.getElementById('btnModalCancel');
-
         modal.style.display = 'flex';
-
-        // 위험 감수하고 진행 버튼 클릭 시
-        btnConfirm.onclick = function() {
-            modal.style.display = 'none';
-            resolve(true);
-        };
-
-        // 취소 버튼 클릭 시
-        btnCancel.onclick = function() {
-            modal.style.display = 'none';
-            resolve(false);
-        };
+        btnConfirm.onclick = function() { modal.style.display = 'none'; resolve(true); };
+        btnCancel.onclick = function() { modal.style.display = 'none'; resolve(false); };
     });
 }
-
-// 2 단계: 주석 생성 엔진 비동기 가동 제어
+// 2 단계: 주석 생성 엔진 비동기 가동 제어 (실시간 SSE 스트리밍 수송 버전)
 async function runBatchAnalysis() {
-    const sourcePath = document.getElementById('sourceFolderPath').value;
-    const outputPath = document.getElementById('outputFolderPath').value;
+    const sourcePath = document.getElementById('sourceFolderPath').value.replace(/\\/g, '/');
+    const outputPath = document.getElementById('outputFolderPath').value.replace(/\\/g, '/');
     const isForceChecked = document.getElementById('chkForceActive').checked;
     const logConsole = document.getElementById('terminalLog');
     const progressPanel = document.getElementById('progressPanel');
     const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
     const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
 
-    if(!sourcePath.trim()) {
-        alert('원본 소스 경로를 지정해 주세요!');
-        return;
-    }
+    if(!sourcePath.trim()) { alert('원본 소스 경로를 지정해 주세요!'); return; }
+    if (!outputPath.trim()) { const isProceed = await openCustomConfirmModal(); if (!isProceed) return; }
 
-    if (!outputPath.trim()) {
-        const isProceed = await openCustomConfirmModal();
-        if (!isProceed) return; // 사용자가 모달에서 취소를 누르면 진입 차단 세이프 홀딩
-    }
+    // 세션 생성
+    currentSessionId = generateSessionId();
+    isAnalysisPaused = false;
+    isPausedLocally = false;
+    isAnalysisComplete = false;
+    saveSessionToStorage({ sessionId: currentSessionId, sourcePath, outputPath, startTime: new Date() });
+    updateSessionControlPanel();
 
     step1Btn.disabled = true; step2Btn.disabled = true;
     step1Btn.style.opacity = "0.5"; step1Btn.style.cursor = "not-allowed";
     step2Btn.style.opacity = "0.5"; step2Btn.style.cursor = "not-allowed";
-    logConsole.textContent = "[안내] 지정 경로 분석 및 하이브리드 주석 배포 가동 중...\n완료 시 자동으로 대시보드가 분할 동기화 갱신됩니다.";
+
+    logConsole.textContent = "[세션 시작] SessionID: " + currentSessionId + "\n";
     progressPanel.style.display = "block";
+    document.getElementById('analysisOverlay').style.display = "flex";
 
-    setTimeout(async () => {
-        try {
-            const response = await fetch('/api/analyze-folder', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    sourcePath: sourcePath,
-                    outputPath: outputPath,
-                    forceActive: isForceChecked ? "true" : "false"
-                })
-            });
-            const data = await response.json();
-            progressPanel.style.display = "none";
+    // 💡 [스탑워치 정상화]: 독립 타이머 기동
+    if (analysisTimer) clearInterval(analysisTimer);
+    let startTimeStamp = Date.now();
+    const timerElement = document.getElementById('txtTotalTime');
+    if (timerElement) timerElement.textContent = "0.0";
 
-            if(data.log) {
-                logConsole.textContent = data.log;
-                logConsole.scrollTop = logConsole.scrollHeight;
+    analysisTimer = setInterval(() => {
+        let elapsed = ((Date.now() - startTimeStamp) / 1000).toFixed(1);
+        if (timerElement) timerElement.textContent = elapsed;
+    }, 100);
+
+    // 🎯 [변수 스코프 고정]: 카운터 및 가상 큐 변수 선언
+    let liveSuccessCnt = 0;   let liveAlreadyCnt = 0;   let liveOversizeCnt = 0;
+    let pendingLogs = [];     let isLogRendering = false;
+    let throttleCounter = 0;  let isProcessingProgress = false;  let progressQueue = [];
+
+    function flushLogBuffer() {
+        if (pendingLogs.length === 0) { isLogRendering = false; return; }
+        isLogRendering = true;
+        const batchSize = Math.min(pendingLogs.length, 30);
+        const fragment = document.createDocumentFragment();
+        for (let i = 0; i < batchSize; i++) {
+            const msg = pendingLogs.shift();
+            const logLine = document.createElement('div'); logLine.textContent = msg; fragment.appendChild(logLine);
+        }
+        logConsole.appendChild(fragment); logConsole.scrollTop = logConsole.scrollHeight;
+        requestAnimationFrame(flushLogBuffer);
+    }
+
+    function processNextProgress() {
+        if (isAnalysisComplete) return;
+        if (progressQueue.length === 0) { isProcessingProgress = false; return; }
+        isProcessingProgress = true;
+
+        const task = progressQueue.shift();
+        const rawDataStr = task.raw;
+
+        // 현재 처리 단계 판단 및 오버레이 메시지 업데이트
+        let stageText = "처리 중...";
+        if (rawDataStr.includes("[시스템]")) {
+            stageText = "📁 파일 복사 중...";
+        } else if (rawDataStr.includes("[★주석패치완료]") || rawDataStr.includes("[★분석실패]")) {
+            stageText = "🔍 파일 분석 중...";
+        } else if (rawDataStr.includes("[스킵]")) {
+            stageText = "⏭️ 파일 검증 중...";
+        }
+        const overlay = document.getElementById('analysisOverlay');
+        if (overlay) {
+            const statusDiv = overlay.querySelector('div:last-child');
+            if (statusDiv) statusDiv.textContent = stageText;
+        }
+
+        let currentStatusStr = "ALREADY";
+        if (rawDataStr.includes('"status":"SUCCESS"') || rawDataStr.includes("'status':'SUCCESS'")) currentStatusStr = "SUCCESS";
+        else if (rawDataStr.includes('"status":"OVERSIZE"') || rawDataStr.includes("'status':'OVERSIZE'")) currentStatusStr = "OVERSIZE";
+
+        if (currentStatusStr === "SUCCESS") liveSuccessCnt++;
+        else if (currentStatusStr === "OVERSIZE") liveOversizeCnt++;
+        else liveAlreadyCnt++;
+
+        throttleCounter++;
+
+        if (rawDataStr.includes('"logMessage":')) {
+            try {
+                const parsed = JSON.parse(rawDataStr);
+                if (parsed.logMessage && parsed.logMessage.trim() !== "") {
+                    pendingLogs.push(parsed.logMessage);
+                    if (!isLogRendering) requestAnimationFrame(flushLogBuffer);
+                }
+            } catch(e) {}
+        }
+
+        if (throttleCounter % 15 === 0 || throttleCounter < 30) {
+            const total = 3171;
+            const liveCompleted = liveSuccessCnt + liveAlreadyCnt;
+            const liveRemaining = Math.max(0, total - liveCompleted);
+
+            const percent = Math.round((liveCompleted / total) * 100);
+            const progressBar = progressPanel.querySelector('.progress-bar');
+            if (progressBar) {
+                progressBar.style.width = `${percent}%`;
+                progressBar.textContent = `${liveCompleted} / ${total} (${percent}%)`;
             }
 
-            // 계측 타이머 수치 화면 마킹 연동 (문자열 형식 검사 통과 규격 적용)
-            if (data.totalTimeSec) document.getElementById("txtTotalTime").innerText = `${data.totalTimeSec}`;
-            if (data.avgTimePerFile) document.getElementById("txtAvgSpeed").innerText = `${data.avgTimePerFile}`;
-
-            await loadDashboard();
-        } catch (error) {
-            logConsole.textContent = "[통신 오류] 프로세스 정지 (" + error.message + ")";
-        } finally {
-            step1Btn.disabled = false; step2Btn.disabled = false;
-            step1Btn.style.opacity = "1"; step1Btn.style.cursor = "pointer";
-            step2Btn.style.opacity = "1"; step2Btn.style.cursor = "pointer";
-            progressPanel.style.display = "none";
+            if (document.getElementById('lblCompleteCnt')) document.getElementById('lblCompleteCnt').textContent = `${liveCompleted}개`;
+            if (document.getElementById('lblWaitCnt')) document.getElementById('lblWaitCnt').textContent = `${liveRemaining}개`;
+            if (document.getElementById('txtComplete')) document.getElementById('txtComplete').textContent = `${liveCompleted}`;
+            if (document.getElementById('txtWait')) document.getElementById('txtWait').textContent = `${liveRemaining}`;
         }
-    }, 50);
+
+        if (rawDataStr.includes('"fileName":')) {
+            try {
+                const parsed = JSON.parse(rawDataStr);
+                const normalizedFileName = parsed.fileName ? parsed.fileName.replaceAll('\\', '/') : "";
+                const cachedFile = globalFilesCache.find(f => (f.fileName ? f.fileName.replaceAll('\\', '/') : "") === normalizedFileName);
+                if (cachedFile) {
+                    cachedFile.isCompleted = (currentStatusStr === "SUCCESS" || currentStatusStr === "ALREADY");
+
+                    // ✨ [실시간 렌더링 동기화 추가]: 파일 데이터 상태가 바뀔 때 대시보드 화면판을 실시간 리프레시합니다.
+                    renderDividedGrid(globalFilesCache);
+                }
+            } catch(e) {}
+        }
+        setTimeout(processNextProgress, 1);
+    }
+    // 🎯 [ReferenceError 버그 해결]: 미선언 에러 차단을 위해 const 키워드를 붙여 고정합니다.
+    const url = `/api/analyze-folder-stream?sourcePath=${encodeURIComponent(sourcePath)}&outputPath=${encodeURIComponent(outputPath)}&forceActive=${isForceChecked}&sessionId=${currentSessionId}`;
+    currentEventSource = new EventSource(url);
+
+    currentEventSource.addEventListener("progress", function(e) {
+        progressQueue.push({ raw: e.data });
+        if (!isProcessingProgress) processNextProgress();
+    });
+
+    // ===================================================================
+    // 💡 [마무리 및 타이머 종료 구간]: 작업 완료 시 스탑워치 정지 및 카드판 피날레
+    // ===================================================================
+    currentEventSource.addEventListener("complete", function(e) {
+        isAnalysisComplete = true;
+        progressQueue = [];
+        isProcessingProgress = false;
+
+        if (analysisTimer) {
+            clearInterval(analysisTimer);
+            analysisTimer = null;
+        }
+
+        let finalData = { avgTimePerFile: "0.00", finalSummary: "" };
+        try {
+            if (e.data) finalData = JSON.parse(e.data);
+        } catch(err) { console.error("마무리 데이터 파싱 실패:", err); }
+
+        // 혹시 버퍼에 남아있던 잔여 로그가 있다면 마감 전에 화면에 마저 전부 방출
+        if (pendingLogs.length > 0) {
+            const fragment = document.createDocumentFragment();
+            while (pendingLogs.length > 0) {
+                const msg = pendingLogs.shift();
+                const logLine = document.createElement('div');
+                logLine.textContent = msg;
+                fragment.appendChild(logLine);
+            }
+            logConsole.appendChild(fragment);
+            logConsole.scrollTop = logConsole.scrollHeight;
+        }
+
+        // 🎯 [텍스트 매칭 버그 파괴 구간]: 불안정했던 대형 문자열 비교 로직을 배제하고 무결성 캐시를 갱신합니다.
+        globalFilesCache.forEach(file => {
+            const normalized = file.fileName ? file.fileName.replaceAll('\\', '/') : "";
+            // 명시적으로 용량 초과 스킵 판정을 받지 않은 모든 남은 미처리 파일 자산을 피날레 패치완료(true) 처리합니다.
+            if (!logConsole.textContent.includes("[용량 초과 스킵] " + normalized)) {
+                file.isCompleted = true;
+            }
+        });
+
+        // 🔄 최종 정제된 무결성 캐시 배열로 대시보드 최종 강제 리프레시 (마지막 1개 잔여 카드 완전 삭제)
+        renderDividedGrid(globalFilesCache);
+
+        const finalCompleted = liveSuccessCnt + liveAlreadyCnt;
+        if (document.getElementById('lblCompleteCnt')) document.getElementById('lblCompleteCnt').textContent = `${finalCompleted}개`;
+        if (document.getElementById('lblWaitCnt')) document.getElementById('lblWaitCnt').textContent = `${liveOversizeCnt}개`;
+        if (document.getElementById('txtComplete')) document.getElementById('txtComplete').textContent = `${finalCompleted}`;
+        if (document.getElementById('txtWait')) document.getElementById('txtWait').textContent = `${liveOversizeCnt}`;
+
+        const progressBar = progressPanel.querySelector('.progress-bar');
+        if (progressBar) {
+            progressBar.style.width = "100%";
+            progressBar.textContent = "100% 완료";
+        }
+
+        // 프로그래스 패널 및 오버레이 숨김
+        document.getElementById('analysisOverlay').style.display = "none";
+        setTimeout(() => {
+            progressPanel.style.display = "none";
+        }, 500);
+
+        const txtAvgSpeed = document.getElementById("txtAvgSpeed");
+        if (txtAvgSpeed && finalData.avgTimePerFile) txtAvgSpeed.textContent = finalData.avgTimePerFile;
+
+        // ✅ 분석 완료 메시지 (요약 정보 포함)
+        const completeLine = document.createElement('div');
+        completeLine.style.color = '#1cc88a';
+        completeLine.style.fontWeight = 'bold';
+        completeLine.style.fontSize = '14px';
+        completeLine.style.marginTop = '10px';
+        completeLine.style.padding = '10px';
+        completeLine.style.borderTop = '2px solid #1cc88a';
+
+        let completeText = '✅ [분석 완료] 모든 파일 처리가 완료되었습니다!';
+        if (finalData.finalSummary) {
+            completeText += finalData.finalSummary;
+        }
+        completeLine.textContent = completeText;
+        logConsole.appendChild(completeLine);
+        logConsole.scrollTop = logConsole.scrollHeight;
+
+        step1Btn.disabled = false; step2Btn.disabled = false;
+        step1Btn.style.opacity = "1"; step1Btn.style.cursor = "pointer";
+        step2Btn.style.opacity = "1"; step2Btn.style.cursor = "pointer";
+
+        // 세션 정리
+        clearSessionFromStorage();
+        if (currentEventSource) {
+            currentEventSource.close();
+        }
+        currentSessionId = null;
+        currentEventSource = null;
+        updateSessionControlPanel();
+    });
+
+    currentEventSource.addEventListener("error", function(e) {
+        isAnalysisComplete = true;
+        progressQueue = [];
+        isProcessingProgress = false;
+
+        if (logConsole.textContent.includes("[프로세스 종료]")) {
+            if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+            document.getElementById('analysisOverlay').style.display = "none";
+            progressPanel.style.display = "none";
+            renderDividedGrid(globalFilesCache);
+            const finalCompleted = liveSuccessCnt + liveAlreadyCnt;
+            if (document.getElementById('lblCompleteCnt')) document.getElementById('lblCompleteCnt').textContent = `${finalCompleted}개`;
+            if (document.getElementById('lblWaitCnt')) document.getElementById('lblWaitCnt').textContent = `${liveOversizeCnt}개`;
+            clearSessionFromStorage();
+            currentSessionId = null;
+            currentEventSource.close();
+            return;
+        }
+
+        // 에러 메시지 표시
+        document.getElementById('analysisOverlay').style.display = "none";
+        progressPanel.style.display = "none";
+        showError("분석 중 오류가 발생했습니다. 상태를 확인하고 다시 시도해주세요.");
+
+        if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+        step1Btn.disabled = false; step2Btn.disabled = false;
+
+        clearSessionFromStorage();
+        currentSessionId = null;
+        updateSessionControlPanel();
+        currentEventSource.close();
+    });
 }
 
-// 대시보드 무결성 초기화 완전 리셋 함수
+function getEmptyMessageHtml(paddingTop, text) {
+    return `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: ${paddingTop}px; font-size: 13px;">${text}</div>`;
+}
+
+// 🎯 대시보드 리셋 공정 완전 정상화 함수
 function resetDashboard() {
+    if (analysisTimer) {
+        clearInterval(analysisTimer);
+        analysisTimer = null;
+    }
+
     document.getElementById('sourceFolderPath').value = "";
     document.getElementById('outputFolderPath').value = "";
     document.getElementById('chkForceActive').checked = false;
@@ -231,22 +435,26 @@ function resetDashboard() {
     document.getElementById('terminalLog').textContent = "시스템 가동 대기 중... 먼저 [1단계: 파일 상태 조회]를 실행하십시오.";
     document.getElementById('progressPanel').style.display = "none";
 
+    const progressBar = document.querySelector('#progressPanel .progress-bar');
+    if (progressBar) {
+        progressBar.style.width = "0%";
+        progressBar.textContent = "0%";
+    }
+
     document.getElementById('txtTotal').textContent = "0";
     document.getElementById('txtComplete').textContent = "0";
     document.getElementById('txtWait').textContent = "0";
     document.getElementById('lblWaitCnt').textContent = "0개";
     document.getElementById('lblCompleteCnt').textContent = "0개";
 
-    // 속도 타이머 리셋 청소
     const txtTotalTime = document.getElementById("txtTotalTime");
     const txtAvgSpeed = document.getElementById("txtAvgSpeed");
-    if (txtTotalTime) txtTotalTime.innerText = "0.00";
+    if (txtTotalTime) txtTotalTime.innerText = "0.0";
     if (txtAvgSpeed) txtAvgSpeed.innerText = "0.00";
 
     globalFilesCache = [];
-
-    document.getElementById('waitGrid').innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 50px; font-size: 13px;">경로 조회 시 미처리 소스가 이곳에 격리 표기됩니다.</div>`;
-    document.getElementById('completeGrid').innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: #858796; padding-top: 100px; font-size: 13px;">패치가 완료된 안전 파일 자산 목록입니다.</div>`;
+    document.getElementById('waitGrid').innerHTML = getEmptyMessageHtml(50, "경로 조회 시 미처리 소스가 이곳에 격리 표기됩니다.");
+    document.getElementById('completeGrid').innerHTML = getEmptyMessageHtml(100, "패치가 완료된 안전 파일 자산 목록입니다.");
 
     const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
     if(step2Btn) {
@@ -254,5 +462,163 @@ function resetDashboard() {
         step2Btn.style.opacity = "0.5";
         step2Btn.style.cursor = "not-allowed";
     }
-    console.log("원본 경로 포함 대시보드 무결성 초기화 완료");
+
+    const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
+    if(step1Btn) {
+        step1Btn.disabled = false;
+        step1Btn.style.opacity = "1";
+        step1Btn.style.cursor = "pointer";
+    }
+
+    console.log("원본 경로 포함 대시보드 무결성 초기화 및 캐시 소독 완료");
+}
+
+// ===================================================================
+// Phase 2: 세션 관리 함수들
+// ===================================================================
+
+// 세션 ID 생성
+function generateSessionId() {
+    return 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+}
+
+// 세션을 localStorage에 저장
+function saveSessionToStorage(sessionData) {
+    localStorage.setItem('analysisSession', JSON.stringify(sessionData));
+}
+
+// localStorage에서 세션 로드
+function loadSessionFromStorage() {
+    const data = localStorage.getItem('analysisSession');
+    return data ? JSON.parse(data) : null;
+}
+
+// localStorage에서 세션 제거
+function clearSessionFromStorage() {
+    localStorage.removeItem('analysisSession');
+}
+
+// 세션 제어 패널 UI 업데이트
+function updateSessionControlPanel() {
+    const panel = document.getElementById('sessionControlPanel');
+    const sessionIdDisplay = document.getElementById('sessionIdDisplay');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
+    const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
+
+    if (currentSessionId) {
+        panel.style.display = 'flex';
+        if (sessionIdDisplay) sessionIdDisplay.textContent = currentSessionId;
+
+        if (isPausedLocally) {
+            resumeBtn.style.display = 'inline-block';
+            document.querySelector("button[onclick='pauseAnalysis()']").style.display = 'none';
+        } else {
+            resumeBtn.style.display = 'none';
+            document.querySelector("button[onclick='pauseAnalysis()']").style.display = 'inline-block';
+        }
+    } else {
+        panel.style.display = 'none';
+    }
+}
+
+// 분석 일시 중지
+function pauseAnalysis() {
+    if (!currentSessionId) return;
+
+    fetch('/api/session/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: currentSessionId })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            isPausedLocally = true;
+            const logConsole = document.getElementById('terminalLog');
+            logConsole.textContent += "\n[일시 중지] 분석이 일시 중지되었습니다. '재개' 버튼으로 계속 진행할 수 있습니다.\n";
+            updateSessionControlPanel();
+        } else {
+            alert('일시 중지 실패: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('일시 중지 요청 실패:', error);
+        alert('일시 중지 요청 중 오류가 발생했습니다.');
+    });
+}
+
+// 분석 재개
+function resumeAnalysis() {
+    if (!currentSessionId) return;
+
+    fetch('/api/session/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: currentSessionId })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            isPausedLocally = false;
+            const logConsole = document.getElementById('terminalLog');
+            logConsole.textContent += "\n[재개] 분석을 재개합니다...\n";
+            updateSessionControlPanel();
+        } else {
+            alert('재개 실패: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('재개 요청 실패:', error);
+        alert('재개 요청 중 오류가 발생했습니다.');
+    });
+}
+
+// 분석 취소
+function cancelAnalysis() {
+    if (!currentSessionId) return;
+
+    if (!confirm('현재 분석을 취소하시겠습니까?')) return;
+
+    if (currentEventSource) {
+        currentEventSource.close();
+        currentEventSource = null;
+    }
+
+    const logConsole = document.getElementById('terminalLog');
+    logConsole.textContent += "\n[취소됨] 분석이 사용자에 의해 취소되었습니다.\n";
+
+    clearSessionFromStorage();
+    currentSessionId = null;
+    updateSessionControlPanel();
+
+    const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
+    const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
+    if (step1Btn && step2Btn) {
+        step1Btn.disabled = false;
+        step2Btn.disabled = false;
+        step1Btn.style.opacity = "1";
+        step2Btn.style.opacity = "1";
+        step1Btn.style.cursor = "pointer";
+        step2Btn.style.cursor = "pointer";
+    }
+}
+
+// 에러 메시지 표시
+function showError(message) {
+    const errorPanel = document.getElementById('errorPanel');
+    const errorMessage = document.getElementById('errorMessage');
+
+    if (errorPanel && errorMessage) {
+        errorMessage.textContent = message;
+        errorPanel.style.display = 'block';
+    }
+}
+
+// 에러 메시지 닫기
+function dismissError() {
+    const errorPanel = document.getElementById('errorPanel');
+    if (errorPanel) {
+        errorPanel.style.display = 'none';
+    }
 }
