@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 구조화된 분석 로그 엔트리
 package com.legacy.analysis;
 
 import com.fasterxml.jackson.annotation.JsonProperty;

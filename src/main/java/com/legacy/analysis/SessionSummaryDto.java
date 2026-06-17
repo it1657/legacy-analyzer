@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 세션 분석 결과 요약 정보
 package com.legacy.analysis;
 
 import com.fasterxml.jackson.annotation.JsonProperty;

@@ -1,8 +1,5 @@
 package com.legacy.statistics;
 
-import java.util.HashMap;
-import java.util.Map;
-
 // 사용자별 분석 통계
 public class UserStatisticsDto {
   private Long userId;

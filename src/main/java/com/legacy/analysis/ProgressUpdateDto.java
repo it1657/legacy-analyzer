@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 진행 상황 업데이트 DTO
 package com.legacy.analysis;
 
 import com.fasterxml.jackson.annotation.JsonProperty;

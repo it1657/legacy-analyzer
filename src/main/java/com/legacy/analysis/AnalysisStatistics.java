@@ -1,10 +1,7 @@
-/* [AI 한글 주석 보완 완료] */
-// 확장자(.java) 맞춤형 자동 생성 목업 주석 예시 1
 package com.legacy.analysis;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
-// 분석 대상 파일명: AnalysisStatistics.java
 import java.util.Map;
 import com.fasterxml.jackson.annotation.JsonProperty;
 

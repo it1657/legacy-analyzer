@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 분석 전용 구조화된 로거
 package com.legacy.analysis;
 
 import org.slf4j.Logger;

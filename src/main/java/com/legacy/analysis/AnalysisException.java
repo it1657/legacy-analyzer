@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 분석 과정 중 발생하는 커스텀 예외
 package com.legacy.analysis;
 import com.legacy.core.ApiErrorHandler;
 

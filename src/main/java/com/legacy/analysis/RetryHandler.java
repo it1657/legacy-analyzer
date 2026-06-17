@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 재시도 로직 핸들러 - 지수적 백오프 기반 자동 재시도
 package com.legacy.analysis;
 import com.legacy.core.ApiErrorHandler;
 

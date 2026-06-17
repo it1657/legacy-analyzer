@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 성능 메트릭 수집기
 package com.legacy.api.monitoring;
 
 import org.slf4j.Logger;

@@ -1,22 +1,21 @@
 package com.legacy.analysis;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.legacy.auth.JwtTokenProvider;
+import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
-import com.legacy.auth.User;
-import com.legacy.auth.JwtTokenProvider;
-
+import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.AsyncTaskExecutor;
-import org.springframework.http.MediaType;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Qualifier;
-import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.File;
 import java.io.IOException;

@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 실시간 모니터링 API 컨트롤러
 package com.legacy.api.monitoring;
 import com.legacy.analysis.AnalysisSessionManager;
 import com.legacy.analysis.AnalysisLogger;

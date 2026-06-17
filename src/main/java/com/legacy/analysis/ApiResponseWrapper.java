@@ -1,5 +1,3 @@
-/* [AI 한글 주석 보완 완료] */
-// 모든 API 응답을 표준화하는 래퍼
 package com.legacy.analysis;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
