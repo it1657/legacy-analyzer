@@ -554,7 +554,13 @@ public class MainApiController {
                         sessionManager.completeSession(sessionId);
                     }
 
-                    // README 생성
+                    // README 생성 (Claude API KEY가 설정된 경우에만 실행)
+                    String apiKey = System.getenv("CLAUDE_API_KEY");
+                    if (apiKey == null || apiKey.isEmpty() || apiKey.equals("MOCK_KEY_FOR_TEST")) {
+                        log.info("[비동기] README 생성 스킵 - Claude API KEY 미설정 (테스트 모드)");
+                        return;
+                    }
+
                     StringBuilder projectStructureSummary = new StringBuilder();
                     if (session != null) {
                         for (FileAnalysisState fileState : session.getProcessedFilesList().values()) {
