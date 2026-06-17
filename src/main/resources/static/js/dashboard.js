@@ -248,82 +248,101 @@ async function runBatchAnalysis() {
 
     function processNextProgress() {
         try {
-            if (isAnalysisComplete) return;
-            if (progressQueue.length === 0) { isProcessingProgress = false; return; }
-            isProcessingProgress = true;
-
-            const task = progressQueue.shift();
-            const rawDataStr = task.raw;
-            console.log("[processNextProgress] 시작, rawDataStr 길이:", rawDataStr.length);
-
-        // 현재 처리 단계 판단 및 오버레이 메시지 업데이트
-        let stageText = "처리 중...";
-        if (rawDataStr.includes("[시스템]")) {
-            stageText = "📁 파일 복사 중...";
-        } else if (rawDataStr.includes("[★주석패치완료]") || rawDataStr.includes("[★분석실패]")) {
-            stageText = "🔍 파일 분석 중...";
-        } else if (rawDataStr.includes("[스킵]")) {
-            stageText = "⏭️ 파일 검증 중...";
-        }
-        const overlay = document.getElementById('analysisOverlay');
-        if (overlay) {
-            const statusDiv = overlay.querySelector('div:last-child');
-            if (statusDiv) statusDiv.textContent = stageText;
-        }
-
-        let currentStatusStr = "ALREADY";
-        if (rawDataStr.includes('"status":"SUCCESS"') || rawDataStr.includes("'status':'SUCCESS'")) currentStatusStr = "SUCCESS";
-        else if (rawDataStr.includes('"status":"OVERSIZE"') || rawDataStr.includes("'status':'OVERSIZE'")) currentStatusStr = "OVERSIZE";
-
-        if (currentStatusStr === "SUCCESS") liveSuccessCnt++;
-        else if (currentStatusStr === "OVERSIZE") liveOversizeCnt++;
-        else liveAlreadyCnt++;
-
-        throttleCounter++;
-
-        if (rawDataStr.includes('"logMessage":')) {
-            try {
-                const parsed = JSON.parse(rawDataStr);
-                if (parsed.logMessage && parsed.logMessage.trim() !== "") {
-                    pendingLogs.push(parsed.logMessage);
-                    if (!isLogRendering) requestAnimationFrame(flushLogBuffer);
-                }
-            } catch(e) {}
-        }
-
-        if (throttleCounter % 15 === 0 || throttleCounter < 30) {
-            const total = 3171;
-            const liveCompleted = liveSuccessCnt + liveAlreadyCnt;
-            const liveRemaining = Math.max(0, total - liveCompleted);
-
-            const percent = Math.round((liveCompleted / total) * 100);
-            const progressBar = progressPanel.querySelector('.progress-bar');
-            if (progressBar) {
-                progressBar.style.width = `${percent}%`;
-                progressBar.textContent = `${liveCompleted} / ${total} (${percent}%)`;
+            // 🔴 완료 신호 체크: 먼저 완료 상태 확인
+            if (isAnalysisComplete) {
+                console.log("[processNextProgress] 분석 완료됨, 처리 중단");
+                isProcessingProgress = false;
+                return;
             }
 
-            if (document.getElementById('lblCompleteCnt')) document.getElementById('lblCompleteCnt').textContent = `${liveCompleted}개`;
-            if (document.getElementById('lblWaitCnt')) document.getElementById('lblWaitCnt').textContent = `${liveRemaining}개`;
-            if (document.getElementById('txtComplete')) document.getElementById('txtComplete').textContent = `${liveCompleted}`;
-            if (document.getElementById('txtWait')) document.getElementById('txtWait').textContent = `${liveRemaining}`;
-        }
+            // 🔴 큐 확인: 처리할 항목이 없으면 대기
+            if (progressQueue.length === 0) {
+                console.log("[processNextProgress] 큐 비어있음, 대기");
+                isProcessingProgress = false;
+                return;
+            }
 
-        if (rawDataStr.includes('"fileName":')) {
-            try {
-                const parsed = JSON.parse(rawDataStr);
-                const normalizedFileName = parsed.fileName ? parsed.fileName.replaceAll('\\', '/') : "";
-                const cachedFile = globalFilesCache.find(f => (f.fileName ? f.fileName.replaceAll('\\', '/') : "") === normalizedFileName);
-                if (cachedFile) {
-                    cachedFile.isCompleted = (currentStatusStr === "SUCCESS" || currentStatusStr === "ALREADY");
+            // 큐에서 작업 추출
+            isProcessingProgress = true;
+            const task = progressQueue.shift();
+            const rawDataStr = task.raw;
+            console.log("[processNextProgress] 큐 항목 처리, 남은 큐 개수:", progressQueue.length);
 
-                    // ✨ [실시간 렌더링 동기화 추가]: 파일 데이터 상태가 바뀔 때 대시보드 화면판을 실시간 리프레시합니다.
-                    renderDividedGrid(globalFilesCache);
+            // 현재 처리 단계 판단 및 오버레이 메시지 업데이트
+            let stageText = "처리 중...";
+            if (rawDataStr.includes("[시스템]")) {
+                stageText = "📁 파일 복사 중...";
+            } else if (rawDataStr.includes("[★주석패치완료]") || rawDataStr.includes("[★분석실패]")) {
+                stageText = "🔍 파일 분석 중...";
+            } else if (rawDataStr.includes("[스킵]")) {
+                stageText = "⏭️ 파일 검증 중...";
+            }
+            const overlay = document.getElementById('analysisOverlay');
+            if (overlay) {
+                const statusDiv = overlay.querySelector('div:last-child');
+                if (statusDiv) statusDiv.textContent = stageText;
+            }
+
+            let currentStatusStr = "ALREADY";
+            if (rawDataStr.includes('"status":"SUCCESS"') || rawDataStr.includes("'status':'SUCCESS'")) currentStatusStr = "SUCCESS";
+            else if (rawDataStr.includes('"status":"OVERSIZE"') || rawDataStr.includes("'status':'OVERSIZE'")) currentStatusStr = "OVERSIZE";
+
+            if (currentStatusStr === "SUCCESS") liveSuccessCnt++;
+            else if (currentStatusStr === "OVERSIZE") liveOversizeCnt++;
+            else liveAlreadyCnt++;
+
+            throttleCounter++;
+
+            if (rawDataStr.includes('"logMessage":')) {
+                try {
+                    const parsed = JSON.parse(rawDataStr);
+                    if (parsed.logMessage && parsed.logMessage.trim() !== "") {
+                        pendingLogs.push(parsed.logMessage);
+                        if (!isLogRendering) requestAnimationFrame(flushLogBuffer);
+                    }
+                } catch(e) {}
+            }
+
+            // 진행률 업데이트 (15개마다 또는 처음 30개)
+            if (throttleCounter % 15 === 0 || throttleCounter < 30) {
+                const total = 3171;
+                const liveCompleted = liveSuccessCnt + liveAlreadyCnt;
+                const liveRemaining = Math.max(0, total - liveCompleted);
+
+                const percent = Math.round((liveCompleted / total) * 100);
+                const progressBar = progressPanel.querySelector('.progress-bar');
+                if (progressBar) {
+                    progressBar.style.width = `${percent}%`;
+                    progressBar.textContent = `${liveCompleted} / ${total} (${percent}%)`;
                 }
-            } catch(e) {}
-        }
-            console.log("[processNextProgress] 완료");
-            setTimeout(processNextProgress, 1);
+
+                if (document.getElementById('lblCompleteCnt')) document.getElementById('lblCompleteCnt').textContent = `${liveCompleted}개`;
+                if (document.getElementById('lblWaitCnt')) document.getElementById('lblWaitCnt').textContent = `${liveRemaining}개`;
+                if (document.getElementById('txtComplete')) document.getElementById('txtComplete').textContent = `${liveCompleted}`;
+                if (document.getElementById('txtWait')) document.getElementById('txtWait').textContent = `${liveRemaining}`;
+            }
+
+            // 파일 목록 실시간 업데이트
+            if (rawDataStr.includes('"fileName":')) {
+                try {
+                    const parsed = JSON.parse(rawDataStr);
+                    const normalizedFileName = parsed.fileName ? parsed.fileName.replaceAll('\\', '/') : "";
+                    const cachedFile = globalFilesCache.find(f => (f.fileName ? f.fileName.replaceAll('\\', '/') : "") === normalizedFileName);
+                    if (cachedFile) {
+                        cachedFile.isCompleted = (currentStatusStr === "SUCCESS" || currentStatusStr === "ALREADY");
+                        renderDividedGrid(globalFilesCache);
+                    }
+                } catch(e) {}
+            }
+
+            // 다음 항목 처리 (재귀적으로 바로 호출, 약간의 딜레이만 추가)
+            if (progressQueue.length > 0 && !isAnalysisComplete) {
+                // 큐에 항목이 남아있으면 바로 처리 (마이크로 태스크로 먼저 처리)
+                Promise.resolve().then(processNextProgress);
+            } else {
+                // 큐가 비었으면 다음 이벤트 대기
+                isProcessingProgress = false;
+            }
         } catch (err) {
             console.error("[processNextProgress] 에러 발생:", err);
             isProcessingProgress = false;
@@ -365,35 +384,31 @@ async function runBatchAnalysis() {
     currentEventSource.addEventListener("progress", function(e) {
         try {
             console.log("[프론트] progress 이벤트 수신! rawDataStr 길이:", e.data ? e.data.length : 0);
-            console.log("[프론트] 원본 데이터:", e.data);
 
-            // 데이터 파싱해서 completed 플래그 확인
+            // 데이터 파싱
             let data = null;
             try {
                 data = JSON.parse(e.data);
-                console.log("[프론트] ✅ JSON 파싱 성공, 파싱된 data:", JSON.stringify(data));
+                console.log("[프론트] ✅ JSON 파싱 성공");
             } catch (parseErr) {
-                // JSON 파싱 실패 시 원본 데이터로 처리
-                console.error("[프론트] ❌ JSON 파싱 실패:", parseErr.message, "원본:", e.data);
+                console.error("[프론트] ❌ JSON 파싱 실패:", parseErr.message);
                 data = { raw: e.data };
             }
 
-            console.log("[프론트] data.completed 값:", data.completed, "type:", typeof data.completed);
-
-            // 분석 완료 신호 감지 (Backend에서 보낸 completed: true)
+            // 🔴 우선순위 1: 완료 신호 즉시 처리 (큐를 무시하고 바로 처리)
             if (data && data.completed === true) {
-                console.log("[프론트] 🎉 분석 완료 신호 수신! (completed: true)");
+                console.log("[프론트] 🎉 [완료 신호] completed=true 수신! 즉시 처리 시작");
                 isAnalysisComplete = true;
+
+                // 큐 처리 완전 중단
+                progressQueue = [];
+                isProcessingProgress = false;
 
                 // 타이머 정지
                 if (analysisTimer) {
                     clearInterval(analysisTimer);
                     analysisTimer = null;
                 }
-
-                // 큐 초기화
-                progressQueue = [];
-                isProcessingProgress = false;
 
                 // 진행 바 숨기기 및 오버레이 처리
                 const progressPanel = document.getElementById('progressPanel');
@@ -405,21 +420,31 @@ async function runBatchAnalysis() {
                     overlay.style.display = "none";
                 }
 
+                // 최종 완료 처리
+                console.log("[프론트] 분석 완료 처리 함수 호출");
+                handleAnalysisCompletion(data);
+
                 // 클라이언트에서 명시적으로 연결 종료
-                if (currentEventSource) {
-                    currentEventSource.close();
-                    console.log("[프론트] ✅ EventSource 클라이언트 종료");
+                try {
+                    if (currentEventSource) {
+                        currentEventSource.close();
+                        console.log("[프론트] ✅ EventSource 클라이언트 측 종료 완료");
+                    }
+                } catch (closeErr) {
+                    console.error("[프론트] EventSource 종료 실패:", closeErr);
                 }
 
-                // 최종 완료 처리 (버튼 활성화, 메시지 표시)
-                handleAnalysisCompletion(data);
                 return;
             }
 
+            // 🟢 일반 진행 신호: 큐에 추가 후 순차 처리
             progressQueue.push({ raw: e.data });
-            if (!isProcessingProgress) processNextProgress();
+            if (!isProcessingProgress) {
+                console.log("[프론트] 큐 처리 시작");
+                processNextProgress();
+            }
         } catch (err) {
-            console.error("[프론트] progress 이벤트 처리 에러:", err);
+            console.error("[프론트] progress 이벤트 처리 중 예외 발생:", err);
         }
     });
 

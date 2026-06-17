@@ -511,23 +511,33 @@ public class MainApiController {
 
             // 클라이언트가 명시적으로 종료를 감지하도록 completed 플래그 추가
             finalData.put("completed", true);
+            finalData.put("isCompletionSignal", true); // 추가: 완료 신호임을 명확히 표시
 
-            log.info("[SSE] 분석 완료 신호 전송 (progress 이벤트)");
+            log.info("[SSE] 분석 완료 신호 전송 시작 - sessionId={}", sessionId);
+            boolean completionSignalSent = false;
             try {
                 sendSseEvent(emitter, "progress", finalData);
+                completionSignalSent = true;
+                log.info("[SSE] ✅ 분석 완료 신호(completed=true) 전송 성공 - sessionId={}", sessionId);
+
                 // 완료 이벤트가 프론트에 도착할 시간 확보
                 Thread.sleep(500);
-                log.info("[SSE] 분석 완료 신호 전송 성공");
 
                 // 클라이언트가 완료 신호를 받았을 시간을 충분히 제공한 후 서버에서 명시적으로 연결 종료
                 emitter.complete();
-                log.info("[SSE] emitter 완료 - 서버 측 SSE 연결 종료");
+                log.info("[SSE] ✅ emitter.complete() 호출 성공 - 서버 측 SSE 연결 종료 - sessionId={}", sessionId);
             } catch (Exception e) {
-                log.error("[SSE] 분석 완료 신호 전송 실패: {}", e.getMessage());
+                log.error("[SSE] ⚠️ 분석 완료 신호 전송 실패 (Exception) - sessionId={}: {}", sessionId, e.getMessage());
                 try {
                     emitter.complete();
+                    log.info("[SSE] Exception 후 emitter.complete() 호출 성공 - sessionId={}", sessionId);
                 } catch (Exception ignored) {
+                    log.debug("[SSE] Exception 후 emitter.complete() 실패 - sessionId={}", sessionId);
                 }
+            }
+
+            if (!completionSignalSent) {
+                log.error("[SSE] 🚨 분석 완료 신호를 전송하지 못했습니다! - sessionId={}", sessionId);
             }
 
             // 🎉 분석 완료 로그
@@ -692,7 +702,15 @@ public class MainApiController {
         try {
             // JSON으로 직렬화
             String jsonData = objectMapper.writeValueAsString(data);
-            log.info("[SSE] 전송: name={}, jsonData 길이={}", name, jsonData.length());
+
+            // 완료 신호는 명확하게 로깅
+            boolean isCompletionSignal = data instanceof Map && ((Map<?, ?>) data).containsKey("completed");
+            if (isCompletionSignal) {
+                log.info("[SSE] 🚨 완료 신호 전송: name={}, jsonData 길이={}, completed={}",
+                        name, jsonData.length(), ((Map<?, ?>) data).get("completed"));
+            } else {
+                log.debug("[SSE] 진행 신호 전송: name={}, jsonData 길이={}", name, jsonData.length());
+            }
 
             // SseEmitter로 전송 (올바른 SSE 형식)
             // event: name\ndata: json\n\n 형식
@@ -703,7 +721,12 @@ public class MainApiController {
                     .reconnectTime(3000L);
 
             emitter.send(event);
-            log.info("[SSE] {} 이벤트 전송 완료", name);
+
+            if (isCompletionSignal) {
+                log.info("[SSE] ✅ 완료 신호 전송 완료");
+            } else {
+                log.debug("[SSE] {} 이벤트 전송 완료", name);
+            }
 
             try {
                 Thread.sleep(10);
@@ -713,12 +736,12 @@ public class MainApiController {
 
         } catch (IllegalStateException e) {
             // emitter가 이미 complete 된 경우 - 무시
-            log.debug("SSE 연결이 이미 종료됨: {}", e.getMessage());
+            log.debug("[SSE] IllegalStateException - 연결이 이미 종료됨: {}", e.getMessage());
         } catch (IOException e) {
             // 응답이 이미 committed된 경우 - 무시
-            log.debug("SSE 응답이 이미 committed됨: {}", e.getMessage());
+            log.debug("[SSE] IOException - 응답이 이미 committed됨: {}", e.getMessage());
         } catch (Exception e) {
-            log.debug("SSE 전송 중 예외: {}", e.getMessage());
+            log.warn("[SSE] ⚠️ 예외 발생: {} - {}", e.getClass().getSimpleName(), e.getMessage());
         }
     }
 
