@@ -50,6 +50,21 @@ public class AnalysisHistory {
   @Column(name = "notes")
   private String notes;
 
+  @Column(name = "model_name", length = 100)
+  private String modelName;
+
+  @Column(name = "input_tokens")
+  private long inputTokens;
+
+  @Column(name = "output_tokens")
+  private long outputTokens;
+
+  @Column(name = "total_tokens")
+  private long totalTokens;
+
+  @Column(name = "estimated_cost")
+  private Double estimatedCost;
+
   // 생성자
   public AnalysisHistory() {
   }
@@ -174,5 +189,45 @@ public class AnalysisHistory {
 
   public void setNotes(String notes) {
     this.notes = notes;
+  }
+
+  public String getModelName() {
+    return modelName;
+  }
+
+  public void setModelName(String modelName) {
+    this.modelName = modelName;
+  }
+
+  public long getInputTokens() {
+    return inputTokens;
+  }
+
+  public void setInputTokens(long inputTokens) {
+    this.inputTokens = inputTokens;
+  }
+
+  public long getOutputTokens() {
+    return outputTokens;
+  }
+
+  public void setOutputTokens(long outputTokens) {
+    this.outputTokens = outputTokens;
+  }
+
+  public long getTotalTokens() {
+    return totalTokens;
+  }
+
+  public void setTotalTokens(long totalTokens) {
+    this.totalTokens = totalTokens;
+  }
+
+  public Double getEstimatedCost() {
+    return estimatedCost;
+  }
+
+  public void setEstimatedCost(Double estimatedCost) {
+    this.estimatedCost = estimatedCost;
   }
 }

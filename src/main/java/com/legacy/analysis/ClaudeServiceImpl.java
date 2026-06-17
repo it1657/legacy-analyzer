@@ -23,6 +23,9 @@ public class ClaudeServiceImpl implements ClaudeService {
     // Jackson ObjectMapper 글로벌 인스턴스 공유로 불필요한 객체 재생성 경고 차단
     private static final ObjectMapper mapper = new ObjectMapper();
 
+    // ThreadLocal을 이용한 토큰 사용량 추적 (세션별 누적)
+    private static final ThreadLocal<TokenUsage> tokenUsageHolder = ThreadLocal.withInitial(TokenUsage::new);
+
     @Value("${anthropic.api.key}")
     private String apiKey;
 
@@ -51,6 +54,21 @@ public class ClaudeServiceImpl implements ClaudeService {
       this.apiErrorHandler = apiErrorHandler;
       this.fileIoErrorHandler = fileIoErrorHandler;
       this.sessionConfig = sessionConfig;
+    }
+
+    @Override
+    public TokenUsage getTotalTokenUsage() {
+        return tokenUsageHolder.get();
+    }
+
+    @Override
+    public void resetTokenUsage() {
+        tokenUsageHolder.remove();
+    }
+
+    @Override
+    public String getCurrentModel() {
+        return apiModel;
     }
 
     /**
@@ -269,6 +287,10 @@ public class ClaudeServiceImpl implements ClaudeService {
                     if (contentList != null && !contentList.isEmpty()) {
                         Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
                         String aiJsonResponse = String.valueOf(contentMap.get("text"));
+
+                        // 토큰 사용량 추출 및 저장
+                        extractAndStoreTokenUsage(response);
+
                         log.info("[API 분석 성공] 파일명: {}", fileName);
                         return mergeCommentsIntoCode(sourceCode, aiJsonResponse, extension);
                     }
@@ -389,6 +411,43 @@ public class ClaudeServiceImpl implements ClaudeService {
                     "// [주의] 초대용량 특수 마킹 주석 예외 자동 결합 모드\n\n";
 
             return errorBanner + sourceCode;
+        }
+    }
+
+    /**
+     * Claude API 응답에서 토큰 사용량 정보를 추출하여 누적 저장
+     */
+    private void extractAndStoreTokenUsage(Map<?, ?> response) {
+        try {
+            Map<?, ?> usage = (Map<?, ?>) response.get("usage");
+            if (usage != null) {
+                long inputTokens = 0;
+                long outputTokens = 0;
+
+                // 입력 토큰 추출
+                Object inputObj = usage.get("input_tokens");
+                if (inputObj != null) {
+                    inputTokens = ((Number) inputObj).longValue();
+                }
+
+                // 출력 토큰 추출
+                Object outputObj = usage.get("output_tokens");
+                if (outputObj != null) {
+                    outputTokens = ((Number) outputObj).longValue();
+                }
+
+                // 현재 누적 토큰 정보 조회
+                TokenUsage current = tokenUsageHolder.get();
+                current.setInputTokens(current.getInputTokens() + inputTokens);
+                current.setOutputTokens(current.getOutputTokens() + outputTokens);
+                current.setTotalTokens(current.getInputTokens() + current.getOutputTokens());
+                current.setModelName(apiModel);
+
+                log.info("[토큰 사용량] 입력: {}, 출력: {}, 누적 합계: {}",
+                        inputTokens, outputTokens, current.getTotalTokens());
+            }
+        } catch (Exception e) {
+            log.warn("[토큰 추출 실패] {}", e.getMessage());
         }
     }
 }

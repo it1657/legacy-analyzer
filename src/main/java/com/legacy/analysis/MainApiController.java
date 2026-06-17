@@ -609,6 +609,33 @@ public class MainApiController {
                 history.setStatus("COMPLETED");
                 history.setCompletedAt(LocalDateTime.now());
                 history.setProcessingTimeMs((long) (totalTimeSec * 1000));
+
+                // 토큰 사용량 저장
+                try {
+                    TokenUsage tokenUsage = claudeService.getTotalTokenUsage();
+                    if (tokenUsage != null) {
+                        history.setInputTokens(tokenUsage.getInputTokens());
+                        history.setOutputTokens(tokenUsage.getOutputTokens());
+                        history.setTotalTokens(tokenUsage.getTotalTokens());
+                        history.setModelName(claudeService.getCurrentModel());
+
+                        // 토큰 기반 비용 계산
+                        double estimatedCost = calculateEstimatedCost(
+                                tokenUsage.getInputTokens(),
+                                tokenUsage.getOutputTokens(),
+                                claudeService.getCurrentModel());
+                        history.setEstimatedCost(estimatedCost);
+
+                        log.info("[토큰 저장] 입력: {}, 출력: {}, 총합: {}, 비용: ${} ",
+                                tokenUsage.getInputTokens(),
+                                tokenUsage.getOutputTokens(),
+                                tokenUsage.getTotalTokens(),
+                                String.format("%.4f", estimatedCost));
+                    }
+                } catch (Exception e) {
+                    log.warn("[토큰 저장 실패] {}", e.getMessage());
+                }
+
                 analysisHistoryRepository.save(history);
                 log.info("[분석 기록 완료] sessionId={}, successCount={}, totalTime={}초",
                         sessionId, successCount, String.format("%.2f", totalTimeSec));
@@ -1405,6 +1432,39 @@ public class MainApiController {
         final String[] units = new String[]{"B", "KB", "MB", "GB"};
         int digitGroups = (int) (Math.log10(bytes) / Math.log10(1024));
         return String.format("%.2f %s", bytes / Math.pow(1024, digitGroups), units[digitGroups]);
+    }
+
+    // Claude API 비용 계산 메서드
+    private double calculateEstimatedCost(long inputTokens, long outputTokens, String modelName) {
+        // Claude 모델별 가격 (USD per 1M tokens)
+        double inputPrice = 0.0;
+        double outputPrice = 0.0;
+
+        if (modelName != null) {
+            if (modelName.contains("haiku")) {
+                // Claude 3.5 Haiku: $0.80/MTok (입력), $4.00/MTok (출력)
+                inputPrice = 0.80;
+                outputPrice = 4.00;
+            } else if (modelName.contains("sonnet")) {
+                // Claude 3.5 Sonnet: $3.00/MTok (입력), $15.00/MTok (출력)
+                inputPrice = 3.00;
+                outputPrice = 15.00;
+            } else if (modelName.contains("opus")) {
+                // Claude 3 Opus: $15.00/MTok (입력), $45.00/MTok (출력)
+                inputPrice = 15.00;
+                outputPrice = 45.00;
+            } else {
+                // 기본값 (Haiku)
+                inputPrice = 0.80;
+                outputPrice = 4.00;
+            }
+        }
+
+        // 비용 계산: (토큰 수 / 1,000,000) * 가격
+        double inputCost = (inputTokens / 1_000_000.0) * inputPrice;
+        double outputCost = (outputTokens / 1_000_000.0) * outputPrice;
+
+        return inputCost + outputCost;
     }
 }
 

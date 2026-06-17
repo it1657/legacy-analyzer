@@ -15,4 +15,22 @@ public interface ClaudeService {
      * @return 한글 주석이 결합 완료된 소스 코드 문자열
      */
     String analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath);
+
+    // 토큰 사용량 추적 관련 메서드
+    /**
+     * 현재까지 누적된 토큰 사용량 조회
+     * @return 누적된 토큰 정보 (입력, 출력, 총 토큰, 모델명)
+     */
+    TokenUsage getTotalTokenUsage();
+
+    /**
+     * 누적된 토큰 사용량 초기화
+     */
+    void resetTokenUsage();
+
+    /**
+     * 현재 세션의 모델명 조회
+     * @return Claude 모델명
+     */
+    String getCurrentModel();
 }

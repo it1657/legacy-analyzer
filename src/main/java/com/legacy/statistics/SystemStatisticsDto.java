@@ -17,6 +17,12 @@ public class SystemStatisticsDto {
   private long totalApiRequests;
   private long totalDataProcessedBytes;
   private double avgDataPerRequest;
+  private long totalInputTokens;
+  private long totalOutputTokens;
+  private long totalTokens;
+  private double totalApiCost;
+  private Map<String, Long> tokensByModel;
+  private Map<String, Double> costByModel;
   private Map<String, Long> analysisStatusDistribution;
   private List<Map<String, Object>> topUsers;
   private List<Map<String, Object>> recentActivity;
@@ -24,6 +30,8 @@ public class SystemStatisticsDto {
   // 생성자
   public SystemStatisticsDto() {
     this.analysisStatusDistribution = new HashMap<>();
+    this.tokensByModel = new HashMap<>();
+    this.costByModel = new HashMap<>();
     this.topUsers = new ArrayList<>();
     this.recentActivity = new ArrayList<>();
   }
@@ -171,5 +179,53 @@ public class SystemStatisticsDto {
 
   public void setRecentActivity(List<Map<String, Object>> recentActivity) {
     this.recentActivity = recentActivity;
+  }
+
+  public long getTotalInputTokens() {
+    return totalInputTokens;
+  }
+
+  public void setTotalInputTokens(long totalInputTokens) {
+    this.totalInputTokens = totalInputTokens;
+  }
+
+  public long getTotalOutputTokens() {
+    return totalOutputTokens;
+  }
+
+  public void setTotalOutputTokens(long totalOutputTokens) {
+    this.totalOutputTokens = totalOutputTokens;
+  }
+
+  public long getTotalTokens() {
+    return totalTokens;
+  }
+
+  public void setTotalTokens(long totalTokens) {
+    this.totalTokens = totalTokens;
+  }
+
+  public double getTotalApiCost() {
+    return totalApiCost;
+  }
+
+  public void setTotalApiCost(double totalApiCost) {
+    this.totalApiCost = totalApiCost;
+  }
+
+  public Map<String, Long> getTokensByModel() {
+    return tokensByModel;
+  }
+
+  public void setTokensByModel(Map<String, Long> tokensByModel) {
+    this.tokensByModel = tokensByModel;
+  }
+
+  public Map<String, Double> getCostByModel() {
+    return costByModel;
+  }
+
+  public void setCostByModel(Map<String, Double> costByModel) {
+    this.costByModel = costByModel;
   }
 }

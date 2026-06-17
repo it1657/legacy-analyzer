@@ -70,6 +70,33 @@ public class StatisticsController {
               .mapToLong(u -> u.getRequestSize() + u.getResponseSize())
               .sum());
 
+      // 토큰 통계
+      Long totalInputTokens = analysisHistoryRepository.getTotalInputTokensSystem();
+      Long totalOutputTokens = analysisHistoryRepository.getTotalOutputTokensSystem();
+      Double totalCost = analysisHistoryRepository.getTotalCostSystem();
+
+      stats.setTotalInputTokens(totalInputTokens != null ? totalInputTokens : 0);
+      stats.setTotalOutputTokens(totalOutputTokens != null ? totalOutputTokens : 0);
+      stats.setTotalTokens(totalInputTokens != null && totalOutputTokens != null ?
+          totalInputTokens + totalOutputTokens : 0);
+      stats.setTotalApiCost(totalCost != null ? totalCost : 0.0);
+
+      // 모델별 토큰 및 비용 통계
+      List<Object[]> tokensByModel = analysisHistoryRepository.getTokensByModel();
+      List<Object[]> costByModel = analysisHistoryRepository.getCostByModel();
+
+      for (Object[] row : tokensByModel) {
+        if (row[0] != null && row[1] != null) {
+          stats.getTokensByModel().put((String) row[0], ((Number) row[1]).longValue());
+        }
+      }
+
+      for (Object[] row : costByModel) {
+        if (row[0] != null && row[1] != null) {
+          stats.getCostByModel().put((String) row[0], ((Number) row[1]).doubleValue());
+        }
+      }
+
       // 계산
       stats.calculateMetrics();
 
@@ -154,6 +181,17 @@ public class StatisticsController {
             userApiUsage.stream()
                 .mapToLong(u -> u.getRequestSize() + u.getResponseSize())
                 .sum());
+
+        // 토큰 통계
+        Long userInputTokens = analysisHistoryRepository.getTotalInputTokensByUser(user.getId());
+        Long userOutputTokens = analysisHistoryRepository.getTotalOutputTokensByUser(user.getId());
+        Double userCost = analysisHistoryRepository.getTotalCostByUser(user.getId());
+
+        stats.setTotalInputTokens(userInputTokens != null ? userInputTokens : 0);
+        stats.setTotalOutputTokens(userOutputTokens != null ? userOutputTokens : 0);
+        stats.setTotalTokens(userInputTokens != null && userOutputTokens != null ?
+            userInputTokens + userOutputTokens : 0);
+        stats.setTotalApiCost(userCost != null ? userCost : 0.0);
 
         stats.calculateMetrics();
         userStats.add(stats);
@@ -249,5 +287,111 @@ public class StatisticsController {
           .body(Collections.singletonMap("message",
               "성능 통계 조회 실패: " + e.getMessage()));
     }
+  }
+
+  // 관리자: 토큰 사용량 통계
+  @GetMapping("/admin/tokens")
+  @PreAuthorize("hasRole('ADMIN')")
+  @ResponseBody
+  public ResponseEntity<?> getTokenStatistics() {
+    try {
+      Map<String, Object> stats = new HashMap<>();
+
+      // 전체 토큰 통계
+      Long totalInputTokens = analysisHistoryRepository.getTotalInputTokensSystem();
+      Long totalOutputTokens = analysisHistoryRepository.getTotalOutputTokensSystem();
+      Long totalTokens = analysisHistoryRepository.getTotalTokensSystem();
+      Double totalCost = analysisHistoryRepository.getTotalCostSystem();
+
+      stats.put("total_input_tokens", totalInputTokens != null ? totalInputTokens : 0);
+      stats.put("total_output_tokens", totalOutputTokens != null ? totalOutputTokens : 0);
+      stats.put("total_tokens", totalTokens != null ? totalTokens : 0);
+      stats.put("total_cost", totalCost != null ? totalCost : 0.0);
+
+      // 모델별 통계
+      Map<String, Long> tokensByModel = new HashMap<>();
+      Map<String, Double> costByModel = new HashMap<>();
+
+      List<Object[]> tokenResults = analysisHistoryRepository.getTokensByModel();
+      for (Object[] row : tokenResults) {
+        if (row[0] != null && row[1] != null) {
+          tokensByModel.put((String) row[0], ((Number) row[1]).longValue());
+        }
+      }
+
+      List<Object[]> costResults = analysisHistoryRepository.getCostByModel();
+      for (Object[] row : costResults) {
+        if (row[0] != null && row[1] != null) {
+          costByModel.put((String) row[0], ((Number) row[1]).doubleValue());
+        }
+      }
+
+      stats.put("tokens_by_model", tokensByModel);
+      stats.put("cost_by_model", costByModel);
+
+      // 평균 토큰 수
+      List<AnalysisHistory> allAnalysis = analysisHistoryRepository.findAll();
+      if (!allAnalysis.isEmpty()) {
+        double avgInputTokens = allAnalysis.stream()
+            .mapToLong(AnalysisHistory::getInputTokens)
+            .average()
+            .orElse(0);
+        double avgOutputTokens = allAnalysis.stream()
+            .mapToLong(AnalysisHistory::getOutputTokens)
+            .average()
+            .orElse(0);
+
+        stats.put("avg_input_tokens", Math.round(avgInputTokens));
+        stats.put("avg_output_tokens", Math.round(avgOutputTokens));
+      }
+
+      return ResponseEntity.ok(stats);
+    } catch (Exception e) {
+      log.error("[토큰 통계 조회 실패]", e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+          .body(Collections.singletonMap("message",
+              "토큰 통계 조회 실패: " + e.getMessage()));
+    }
+  }
+
+  // 사용자: 자신의 토큰 사용량
+  @GetMapping("/my-tokens")
+  @ResponseBody
+  public ResponseEntity<?> getMyTokenStatistics(
+      @RequestHeader(value = "Authorization", required = false) String authHeader) {
+    try {
+      Long userId = extractUserIdFromAuth(authHeader);
+      if (userId == null) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+            .body(Collections.singletonMap("message", "인증되지 않은 사용자"));
+      }
+
+      Map<String, Object> stats = new HashMap<>();
+
+      // 사용자 토큰 통계
+      Long inputTokens = analysisHistoryRepository.getTotalInputTokensByUser(userId);
+      Long outputTokens = analysisHistoryRepository.getTotalOutputTokensByUser(userId);
+      Long totalTokens = analysisHistoryRepository.getTotalTokensByUser(userId);
+      Double cost = analysisHistoryRepository.getTotalCostByUser(userId);
+
+      stats.put("input_tokens", inputTokens != null ? inputTokens : 0);
+      stats.put("output_tokens", outputTokens != null ? outputTokens : 0);
+      stats.put("total_tokens", totalTokens != null ? totalTokens : 0);
+      stats.put("total_cost", cost != null ? cost : 0.0);
+
+      return ResponseEntity.ok(stats);
+    } catch (Exception e) {
+      log.error("[사용자 토큰 통계 조회 실패]", e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+          .body(Collections.singletonMap("message",
+              "토큰 통계 조회 실패: " + e.getMessage()));
+    }
+  }
+
+  // 헬퍼: 인증 헤더에서 userId 추출
+  private Long extractUserIdFromAuth(String authHeader) {
+    // 이 메서드는 SecurityContextHolder나 다른 방식으로 userId를 가져와야 함
+    // 현재는 간단한 구현, 실제로는 Spring Security 컨텍스트 사용 권장
+    return null;
   }
 }

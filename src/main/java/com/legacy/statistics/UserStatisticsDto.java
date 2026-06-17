@@ -15,6 +15,10 @@ public class UserStatisticsDto {
   private double avgProcessingTimeMs;
   private long totalApiRequests;
   private long totalDataProcessedBytes;
+  private long totalInputTokens;
+  private long totalOutputTokens;
+  private long totalTokens;
+  private double totalApiCost;
 
   // 생성자
   public UserStatisticsDto() {
@@ -141,5 +145,37 @@ public class UserStatisticsDto {
 
   public void setTotalDataProcessedBytes(long totalDataProcessedBytes) {
     this.totalDataProcessedBytes = totalDataProcessedBytes;
+  }
+
+  public long getTotalInputTokens() {
+    return totalInputTokens;
+  }
+
+  public void setTotalInputTokens(long totalInputTokens) {
+    this.totalInputTokens = totalInputTokens;
+  }
+
+  public long getTotalOutputTokens() {
+    return totalOutputTokens;
+  }
+
+  public void setTotalOutputTokens(long totalOutputTokens) {
+    this.totalOutputTokens = totalOutputTokens;
+  }
+
+  public long getTotalTokens() {
+    return totalTokens;
+  }
+
+  public void setTotalTokens(long totalTokens) {
+    this.totalTokens = totalTokens;
+  }
+
+  public double getTotalApiCost() {
+    return totalApiCost;
+  }
+
+  public void setTotalApiCost(double totalApiCost) {
+    this.totalApiCost = totalApiCost;
   }
 }
