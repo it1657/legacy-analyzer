@@ -60,43 +60,20 @@ public class ClaudeServiceImpl implements ClaudeService {
     private String loadSystemPromptFromMd() {
         java.io.File mdFile = new java.io.File("src/main/resources/" + systemPromptFilename);
 
-        // [모던 자바 텍스트 블록 적용]: 역슬래시 찌꺼기와 개행문자 더하기 없는 가독성 극대화 프롬프트
+        // [레거시 시스템 분석 전문가 프롬프트 - 간소화]
         String defaultTemplate = """
-                # [System Role] 다중 언어 레거시 코드 분석기
-                
-                현재 분석 중인 파일명은 'fileName' 이며, 확장자는 '{extension}' 입니다.
-                
-                ## 1. 언어 자동 감지 및 주석 규칙 (Language Auto-Detection)
-                입력받은 소스 코드의 문법을 분석하여 언어를 자동 감지 한 후, 반드시 해당 언어 표준 규격에 맞는 한글 주석을 삽입하십시오.
-                
-                - **Java 파일일 경우 (.java)**:
-                    - 클래스 및 주요 비즈니스 메서드 상단에 표준 Javadoc 가이드를 적용하십시오. (주석 기호: // 또는 /* */)
-                - **Vue / React / JavaScript / TypeScript 파일일 경우 (.vue, .js, .jsx, .ts, .tsx)**:
-                    - 핵심 스크립트 로직 영역은 표준 JavaScript/TypeScript 주석(//)을 적용하십시오.
-                    - React의 JSX 화면 렌더링 구역 내부에는 컴파일 에러를 방지하기 위해 리액트 전용 중괄호 주석 포맷({/* 주석내용 */})을 철저하게 준수하십시오.
-                    - Vue의 HTML 템플릿 구역(<template>) 내부에는 반드시 HTML 표준 주석 포맷(<!-- 주석내용 -->)을 사용하십시오.
-                - **Nexacro / MiPlatform / XML 파일일 경우 (.xfdl, .xml)**:
-                    - 표준 XML 주석 포맷(<!-- 주석내용 -->)을 철저히 준수하십시오.
-                    - 대기업 전용 특수 업무 약어(SAL:급여, HRM:인사 등)를 직관적인 한글 비즈니스 용어로 치환하여 주석을 기재하십시오.
-                
-                ## 2. 제약 조건 (Constraints)
-                - ⚠️ 기존에 소스 코드 내부에 작성되어 있는 선배 개발자의 기존 주석이나 설명문은 절대 삭제하거나 수정하지 말고 100% 보존하십시오.
-                - 새로운 AI 보완 설명 주석은 기존 주석의 하단이나 로직 옆에 안전하게 추가하십시오.
-                - 기존 소스 코드의 로직, 변수명, 실행 구조는 절대 한 글자도 변형하거나 훼손해서는 안 됩니다.
-                
-                ## [프로젝트별 특수 세부 지침 규칙 (필수 준수)]
-                ${customSpecData}
-                
-                ## ⚠️ [출력 토큰 제한 우회 필수 규칙 - 포맷 강제]
-                - 절대 인사말, 설명 텍스트, 마크다운 코드 블록(```)을 출력하지 마십시오.
-                - 절대 소스 코드 전체를 다시 복사해서 반환하지 마십시오.
-                - 오직 원본 코드의 몇 번째 라인에 어떤 한글 주석이 들어가야 하는지 위치 정보만 아래 예시와 같은 유효한 JSON 배열 포맷으로 응답하십시오.
-                
-                [응답 JSON 포맷 예시 (확장자에 맞는 문법 필수)]:
-                [
-                  {"lineNumber": 1, "comment": "(여기에 ${extension} 문법에 맞는 주석 입력)"},
-                  {"lineNumber": 15, "comment": "(여기에 ${extension} 문법에 맞는 주석 입력)"}
-                ]""";
+                레거시 시스템 분석가: 파일(fileName, 확장자: ${extension})의 비즈니스 로직만 한글 주석으로 설명하자.
+
+                주석 우선순위:
+                1. 비즈니스 로직 (왜 존재하는가?)
+                2. 복잡한 알고리즘 (의도와 흐름)
+                3. API/DB 접근 (의존성)
+                4. 예외 처리 (대응 방법)
+
+                규칙: 기존 주석 100% 보존, 새 주석은 하단/옆에 추가
+                언어별: Java(/,/**), JS(//), JSX({/**/}), XML(<!---->)
+
+                응답: JSON만 ([{"lineNumber": N, "comment": "..."}])""";
 
         if (!mdFile.exists() || mdFile.length() == 0) {
             try {
@@ -187,6 +164,11 @@ public class ClaudeServiceImpl implements ClaudeService {
             extension = fileName.substring(i).toLowerCase();
         }
 
+        // 첫 호출 시 API KEY 상태 로깅 (Debug 용도)
+        log.info("[API KEY 상태] apiKey={}, isEmpty={}",
+            (apiKey == null ? "NULL" : (apiKey.isEmpty() ? "EMPTY" : "설정됨(" + apiKey.length() + "자)")),
+            apiKey == null || apiKey.trim().isEmpty());
+
         // ===================================================================
         // [정밀 수정 구간]: 산출물 자동화 시스템 전용 README.md 다이렉트 패스
         // ===================================================================
@@ -263,7 +245,8 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         Map<String, String> userMessage = new HashMap<>();
         userMessage.put("role", "user");
-        userMessage.put("content", "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode);
+        userMessage.put("content", "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
+                "\n\n⚠️ 중요: 반드시 JSON 배열 형식으로만 응답하세요. Markdown 기호(```), 인사말, 설명 등 JSON 외의 다른 텍스트는 절대로 포함하지 마세요.");
         requestBody.put("messages", Collections.singletonList(userMessage));
 
         // 설정값에서 재시도 정책 로드
@@ -275,6 +258,8 @@ public class ClaudeServiceImpl implements ClaudeService {
             try {
                 Map<?, ?> response = webClient.post()
                         .uri("/v1/messages")
+                        .header("anthropic-version", "2023-06-01")
+                        .bodyValue(requestBody)
                         .retrieve()
                         .bodyToMono(Map.class)
                         .block();
@@ -291,6 +276,21 @@ public class ClaudeServiceImpl implements ClaudeService {
                 throw new RuntimeException("AI 응답 바디 구조 파싱 예외 공정 발생");
 
             } catch (Exception e) {
+                // 모든 예외에 대해 로깅
+                log.error("[예외 발생] 예외 타입: {}, 메시지: {}", e.getClass().getSimpleName(), e.getMessage());
+
+                // 400/401 오류인 경우 응답 바디 로깅 (디버깅용)
+                if (e instanceof org.springframework.web.reactive.function.client.WebClientResponseException) {
+                    org.springframework.web.reactive.function.client.WebClientResponseException wce =
+                        (org.springframework.web.reactive.function.client.WebClientResponseException) e;
+                    try {
+                        String responseBody = wce.getResponseBodyAsString();
+                        log.error("[API 응답 상세] statusCode={}, body={}", wce.getStatusCode(), responseBody);
+                    } catch (Exception bodyEx) {
+                        log.error("[API 응답 상세] statusCode={}, 바디 접근 실패: {}", wce.getStatusCode(), bodyEx.getMessage());
+                    }
+                }
+
                 // 에러 분류
                 ApiErrorHandler.ErrorType errorType = apiErrorHandler.classifyError(e, 0);
 
@@ -340,7 +340,19 @@ public class ClaudeServiceImpl implements ClaudeService {
             String[] lines = sourceCode.split("\\r?\\n");
             Map<Integer, List<String>> commentMap = new HashMap<>();
 
-            List<?> commentList = mapper.readValue(jsonResponse, List.class);
+            // Claude가 마크다운 포맷으로 응답할 수 있으니 제거
+            String cleanJson = jsonResponse.trim();
+            if (cleanJson.startsWith("```json")) {
+                cleanJson = cleanJson.substring(7); // "```json" 제거
+            } else if (cleanJson.startsWith("```")) {
+                cleanJson = cleanJson.substring(3); // "```" 제거
+            }
+            if (cleanJson.endsWith("```")) {
+                cleanJson = cleanJson.substring(0, cleanJson.length() - 3); // "```" 제거
+            }
+            cleanJson = cleanJson.trim();
+
+            List<?> commentList = mapper.readValue(cleanJson, List.class);
 
             for (Object obj : commentList) {
                 if (obj instanceof Map<?, ?> item) {

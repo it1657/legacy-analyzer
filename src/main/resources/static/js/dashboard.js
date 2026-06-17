@@ -24,6 +24,10 @@ window.fetch = function(...args) {
 
 let globalFilesCache = [];
 let analysisTimer = null; // 스탑워치 제어용 전역 변수
+let progressTimeoutId = null; // 진행 신호 타임아웃 ID
+let progressQueue = []; // 진행 신호 큐
+let isProcessingProgress = false; // 진행 신호 처리 중 플래그
+let lastProgressTime = Date.now(); // 마지막 진행 신호 시간
 
 // 세션 및 분석 제어 변수
 let currentSessionId = null; // 현재 분석 세션 ID
@@ -31,9 +35,15 @@ let currentEventSource = null; // 현재 SSE 연결
 let isAnalysisPaused = false; // 분석 일시 중지 상태
 let isPausedLocally = false; // 로컬에서 일시 중지됨
 let isAnalysisComplete = false; // 분석 완료 상태 플래그
+let currentStage = null; // 현재 분석 단계 (COPY_START, COPY_DONE, COPY_SKIPPED 등)
 
 // [최초 가동 제어]: 화면이 열리자마자 2단계 버튼을 클릭 못하게 강제 잠금 처리합니다.
 window.onload = function() {
+    // 🔴 페이지 로드 시 이전 세션 정리 (자동 SSE 실행 방지)
+    clearSessionFromStorage();
+    currentSessionId = null;
+    isAnalysisComplete = false;
+
     const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
     if(step2Btn) {
         step2Btn.disabled = true;
@@ -201,6 +211,15 @@ async function runBatchAnalysis() {
     if(!sourcePath.trim()) { alert('원본 소스 경로를 지정해 주세요!'); return; }
     if (!outputPath.trim()) { const isProceed = await openCustomConfirmModal(); if (!isProceed) return; }
 
+    // 🚨 원본과 출력 경로가 같은 경우 경고
+    if (sourcePath === outputPath) {
+        const confirmed = confirm('⚠️ 원본 파일이 직접 수정됩니다!\n\n원본 경로와 출력 경로가 같습니다.\n원본 파일을 수정하시겠습니까?\n\n(권장: 서로 다른 경로를 사용하세요)');
+        if (!confirmed) {
+            alert('분석이 취소되었습니다. 출력 경로를 다시 지정해주세요.');
+            return;
+        }
+    }
+
     // 세션 생성
     currentSessionId = generateSessionId();
     isAnalysisPaused = false;
@@ -232,6 +251,8 @@ async function runBatchAnalysis() {
     let liveSuccessCnt = 0;   let liveAlreadyCnt = 0;   let liveOversizeCnt = 0;
     let pendingLogs = [];     let isLogRendering = false;
     let throttleCounter = 0;  let isProcessingProgress = false;  let progressQueue = [];
+    let lastProgressTime = Date.now();  // 마지막 progress 신호 수신 시간
+    let progressTimeoutId = null;  // 타임아웃 ID
 
     function flushLogBuffer() {
         if (pendingLogs.length === 0) { isLogRendering = false; return; }
@@ -252,6 +273,12 @@ async function runBatchAnalysis() {
             if (isAnalysisComplete) {
                 console.log("[processNextProgress] 분석 완료됨, 처리 중단");
                 isProcessingProgress = false;
+
+                // 타임아웃도 취소
+                if (progressTimeoutId) {
+                    clearTimeout(progressTimeoutId);
+                    progressTimeoutId = null;
+                }
                 return;
             }
 
@@ -268,15 +295,30 @@ async function runBatchAnalysis() {
             const rawDataStr = task.raw;
             console.log("[processNextProgress] 큐 항목 처리, 남은 큐 개수:", progressQueue.length);
 
-            // 현재 처리 단계 판단 및 오버레이 메시지 업데이트
+            // 현재 처리 단계 판단 - currentStage 전역 변수 우선
             let stageText = "처리 중...";
-            if (rawDataStr.includes("[시스템]")) {
+
+            // currentStage가 명확하면 우선 사용
+            if (currentStage === "COPY_START" || currentStage === "COPY_PROGRESS") {
                 stageText = "📁 파일 복사 중...";
-            } else if (rawDataStr.includes("[★주석패치완료]") || rawDataStr.includes("[★분석실패]")) {
+            } else if (currentStage === "COPY_DONE" || currentStage === "COPY_SKIPPED") {
                 stageText = "🔍 파일 분석 중...";
-            } else if (rawDataStr.includes("[스킵]")) {
-                stageText = "⏭️ 파일 검증 중...";
             }
+            // currentStage가 없거나 명확하지 않으면 rawDataStr 기반으로 판단
+            else if (currentStage === null || currentStage === "COPY_START") {
+                if (rawDataStr.includes("파일 분석")) {
+                    stageText = "🔍 파일 분석 중...";  // "분석 단계 진입" 같은 문구 감지
+                } else if (rawDataStr.includes("[시스템]")) {
+                    stageText = "📁 파일 복사 중...";
+                } else {
+                    stageText = "🔍 파일 분석 중...";  // 기본값
+                }
+            } else {
+                stageText = "🔍 파일 분석 중...";  // 기본값
+            }
+
+            console.log("[processNextProgress] currentStage:", currentStage, "| stageText:", stageText);
+
             const overlay = document.getElementById('analysisOverlay');
             if (overlay) {
                 const statusDiv = overlay.querySelector('div:last-child');
@@ -361,20 +403,51 @@ async function runBatchAnalysis() {
         return;
     }
 
+    // ✅ 개선: 타임아웃 제거 - 서버의 completed:true 신호를 받을 때까지만 기다림
+    // 서버에서 명확한 완료 신호(completed=true 또는 emitter.complete())를 보내므로 타임아웃이 필요 없음
+    // progressTimeoutId는 사용하지 않음
+
     // EventSource 연결 상태 모니터링
     currentEventSource.onopen = function() {
+        if (!currentEventSource) return;  // null 체크
         console.log("[프론트] EventSource 연결됨, readyState:", currentEventSource.readyState);
     };
 
     currentEventSource.onerror = function(e) {
-        // readyState가 CONNECTING(0)이면 자동 재연결 중 - 무시
+        if (!currentEventSource) return;  // null 체크
+
+        // readyState가 CONNECTING(0)이면 자동 재연결 중
         if (currentEventSource.readyState === 0) {
+            // 🔴 분석이 완료됐으면 재연결 중단!
+            if (isAnalysisComplete) {
+                console.log("[프론트] 분석 완료됐는데 재연결 시도 - 중단!");
+                currentEventSource.close();
+                return;
+            }
             console.log("[프론트] EventSource 자동 재연결 중...");
             return;
         }
-        // CLOSED(2)이면 정상 종료
+        // 🔴 CLOSED(2)이면 서버가 emitter.complete()을 호출했다는 뜻 → 분석 완료!
         if (currentEventSource.readyState === 2) {
-            console.log("[프론트] EventSource 정상 종료");
+            console.log("[프론트] 🎉🎉🎉 EventSource CLOSED 감지 - 분석 완료!");
+
+            // 아직 완료 처리가 안 됐다면 지금 처리
+            if (!isAnalysisComplete) {
+                isAnalysisComplete = true;
+                progressQueue = [];
+                isProcessingProgress = false;
+
+                if (analysisTimer) {
+                    clearInterval(analysisTimer);
+                    analysisTimer = null;
+                }
+
+                console.log("[프론트] 분석 완료 처리 함수 호출 (CLOSED 감지)");
+                handleAnalysisCompletion({
+                    avgTimePerFile: document.getElementById("txtAvgSpeed")?.textContent || "0.00",
+                    finalSummary: "\n[분석 완료] 서버 연결이 정상 종료되었습니다."
+                });
+            }
             return;
         }
         console.error("[프론트] EventSource 에러, readyState:", currentEventSource.readyState, e);
@@ -384,21 +457,59 @@ async function runBatchAnalysis() {
     currentEventSource.addEventListener("progress", function(e) {
         try {
             console.log("[프론트] progress 이벤트 수신! rawDataStr 길이:", e.data ? e.data.length : 0);
+            console.log("[프론트] 원본 e.data:", e.data?.substring(0, 200));
 
             // 데이터 파싱
             let data = null;
             try {
                 data = JSON.parse(e.data);
                 console.log("[프론트] ✅ JSON 파싱 성공");
+                console.log("[프론트] 파싱된 data 객체:", Object.keys(data));
+                console.log("[프론트] data.completed 값:", data?.completed, "타입:", typeof data?.completed);
             } catch (parseErr) {
                 console.error("[프론트] ❌ JSON 파싱 실패:", parseErr.message);
+                console.error("[프론트] 파싱 실패한 원본 데이터:", e.data);
                 data = { raw: e.data };
+            }
+
+            // Stage 기반 UI 업데이트 및 전역 변수 저장 (progress 이벤트에서 즉시 업데이트)
+            if (data?.stage) {
+                currentStage = data.stage;  // 전역 변수에 저장
+
+                const overlay = document.getElementById('analysisOverlay');
+                const statusDiv = overlay ? overlay.querySelector('div:last-child') : null;
+
+                if (data.stage === "COPY_START" || data.stage === "COPY_PROGRESS") {
+                    if (statusDiv) statusDiv.textContent = "📁 파일 복사 중...";
+                    if (data.stage === "COPY_START") {
+                        console.log("[프론트] ✅ COPY_START → 파일 복사 중...");
+                        // ⏱️ 복사 단계 5초 타임아웃 (progress 이벤트 미수신 대비)
+                        setTimeout(() => {
+                            if (currentStage === "COPY_START" && !isAnalysisComplete) {
+                                console.log("[프론트] ⏱️ COPY_START 타임아웃 (5초) → 자동으로 분석 중으로 전환");
+                                currentStage = "COPY_DONE";
+                                if (statusDiv) statusDiv.textContent = "🔍 파일 분석 중...";
+                            }
+                        }, 5000);
+                    }
+                } else if (data.stage === "COPY_DONE" || data.stage === "COPY_SKIPPED") {
+                    // ✅ COPY_DONE/SKIPPED 신호는 즉시 UI 업데이트 (큐 대기 안 함)
+                    if (statusDiv) statusDiv.textContent = "🔍 파일 분석 중...";
+                    console.log("[프론트] ✅ COPY_DONE/SKIPPED 즉시 감지 → 파일 분석 중...");
+                }
             }
 
             // 🔴 우선순위 1: 완료 신호 즉시 처리 (큐를 무시하고 바로 처리)
             if (data && data.completed === true) {
-                console.log("[프론트] 🎉 [완료 신호] completed=true 수신! 즉시 처리 시작");
+                console.log("[프론트] 🎉🎉🎉 [완료 신호] completed=true 수신! 즉시 처리 시작");
                 isAnalysisComplete = true;
+
+                // 타임아웃 취소
+                if (progressTimeoutId) {
+                    clearTimeout(progressTimeoutId);
+                    progressTimeoutId = null;
+                    console.log("[프론트] 타임아웃 취소");
+                }
 
                 // 큐 처리 완전 중단
                 progressQueue = [];
@@ -438,6 +549,12 @@ async function runBatchAnalysis() {
             }
 
             // 🟢 일반 진행 신호: 큐에 추가 후 순차 처리
+            lastProgressTime = Date.now();  // 마지막 신호 시간 갱신
+
+            // ✅ 개선: 타임아웃 제거
+            // 진행 신호가 없어도 타임아웃으로 자동 완료하지 않음
+            // 서버에서 명시적인 completed:true 신호를 받을 때만 완료 처리
+
             progressQueue.push({ raw: e.data });
             if (!isProcessingProgress) {
                 console.log("[프론트] 큐 처리 시작");
@@ -445,6 +562,49 @@ async function runBatchAnalysis() {
             }
         } catch (err) {
             console.error("[프론트] progress 이벤트 처리 중 예외 발생:", err);
+        }
+    });
+
+    // ===================================================================
+    // 💡 [완료 신호 명시적 리스너]: "completion" 이벤트로 확실한 완료 감지
+    // ===================================================================
+    currentEventSource.addEventListener("completion", function(e) {
+        console.log("[프론트] 🎉🎉🎉 completion 이벤트 수신됨! (확실한 완료 신호)", e);
+
+        isAnalysisComplete = true;
+
+        // 타임아웃 취소
+        if (progressTimeoutId) {
+            clearTimeout(progressTimeoutId);
+            progressTimeoutId = null;
+            console.log("[프론트] completion 이벤트 - 타임아웃 취소");
+        }
+
+        progressQueue = [];
+        isProcessingProgress = false;
+
+        // 타이머 정지
+        if (analysisTimer) {
+            clearInterval(analysisTimer);
+            analysisTimer = null;
+        }
+
+        let finalData = { avgTimePerFile: "0.00", finalSummary: "" };
+        try {
+            if (e.data) finalData = JSON.parse(e.data);
+        } catch(err) { console.error("[프론트] completion 데이터 파싱 실패:", err); }
+
+        console.log("[프론트] completion 처리 시작");
+        handleAnalysisCompletion(finalData);
+
+        // 클라이언트에서 명시적으로 연결 종료
+        try {
+            if (currentEventSource) {
+                currentEventSource.close();
+                console.log("[프론트] ✅ EventSource 클라이언트 측 종료 완료 (completion)");
+            }
+        } catch (closeErr) {
+            console.error("[프론트] EventSource 종료 실패 (completion):", closeErr);
         }
     });
 
@@ -555,7 +715,61 @@ function handleAnalysisCompletion(finalData) {
     const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
     const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
 
-    // 최종 완료 메시지 표시
+    console.log("[분석 완료 처리] 시작");
+
+    // 🔴 0단계: 분석 완료 플래그 설정 (이것을 먼저 해야 재연결이 중단됨!)
+    isAnalysisComplete = true;
+    progressQueue = [];
+    isProcessingProgress = false;
+
+    // 타임아웃 취소
+    if (progressTimeoutId) {
+        clearTimeout(progressTimeoutId);
+        progressTimeoutId = null;
+    }
+
+    // 타이머 정지
+    if (analysisTimer) {
+        clearInterval(analysisTimer);
+        analysisTimer = null;
+    }
+
+    // 🔴 sessionId 정리 (localStorage에서도 제거해서 자동 재연결 방지)
+    clearSessionFromStorage();
+    currentSessionId = null;
+    console.log("[분석 완료 처리] sessionId 정리, isAnalysisComplete = true 설정");
+
+    // 🔴 1단계: 진행 관련 UI 모두 숨기기
+    const progressPanel = document.getElementById('progressPanel');
+    if (progressPanel) {
+        progressPanel.style.display = "none";
+        console.log("[분석 완료 처리] progressPanel 숨김");
+    }
+
+    const overlay = document.getElementById('analysisOverlay');
+    if (overlay) {
+        overlay.style.display = "none";
+        console.log("[분석 완료 처리] analysisOverlay 숨김");
+    }
+
+    const sessionControlPanel = document.getElementById('sessionControlPanel');
+    if (sessionControlPanel) {
+        sessionControlPanel.style.display = "none";
+        console.log("[분석 완료 처리] sessionControlPanel 숨김");
+    }
+
+    // 🔴 1.5단계: 대시보드 UI 갱신 (미처리 목록 정리)
+    // 모든 파일을 완료 상태로 마크
+    if (globalFilesCache && Array.isArray(globalFilesCache)) {
+        globalFilesCache.forEach(file => {
+            file.isCompleted = true;
+        });
+        console.log("[분석 완료 처리] globalFilesCache의 모든 파일을 완료 상태로 마크됨");
+    }
+    renderDividedGrid(globalFilesCache);
+    console.log("[분석 완료 처리] 대시보드 갱신");
+
+    // 🔴 2단계: 최종 완료 메시지 표시
     const completeLine = document.createElement('div');
     completeLine.style.color = '#1cc88a';
     completeLine.style.fontWeight = 'bold';
@@ -571,14 +785,29 @@ function handleAnalysisCompletion(finalData) {
     completeLine.textContent = completeText;
     logConsole.appendChild(completeLine);
     logConsole.scrollTop = logConsole.scrollHeight;
+    console.log("[분석 완료 처리] 완료 메시지 출력");
 
-    // 평균 처리 시간 표시
+    // 🔴 3단계: 평균 처리 시간 표시
     if (finalData && finalData.avgTimePerFile) {
         const txtAvgSpeed = document.getElementById("txtAvgSpeed");
         if (txtAvgSpeed) txtAvgSpeed.textContent = finalData.avgTimePerFile;
     }
 
-    // 버튼 활성화
+    // 🔴 4단계: 타이머 정지
+    if (analysisTimer) {
+        clearInterval(analysisTimer);
+        analysisTimer = null;
+        console.log("[분석 완료 처리] 타이머 정지");
+    }
+
+    // 🔴 5단계: 모든 상태 플래그 초기화
+    isAnalysisPaused = false;
+    isPausedLocally = false;
+    isAnalysisComplete = true;
+    progressQueue = [];
+    isProcessingProgress = false;
+
+    // 🔴 6단계: 버튼 활성화
     if (step1Btn) {
         step1Btn.disabled = false;
         step1Btn.style.opacity = "1";
@@ -589,12 +818,16 @@ function handleAnalysisCompletion(finalData) {
         step2Btn.style.opacity = "1";
         step2Btn.style.cursor = "pointer";
     }
+    console.log("[분석 완료 처리] 버튼 활성화");
 
-    // 세션 정리
+    // 🔴 7단계: 세션 정리
     clearSessionFromStorage();
     currentSessionId = null;
     currentEventSource = null;
     updateSessionControlPanel();
+    console.log("[분석 완료 처리] 세션 정리 완료");
+
+    console.log("[분석 완료 처리] ✅ 전체 완료 - UI 정상화됨");
 }
 
 // 🎯 대시보드 리셋 공정 완전 정상화 함수
@@ -653,9 +886,12 @@ function resetDashboard() {
 // Phase 2: 세션 관리 함수들
 // ===================================================================
 
-// 세션 ID 생성
+// 세션 ID 생성 (사용자명 포함)
 function generateSessionId() {
-    return 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+    const username = localStorage.getItem('username') || 'guest';
+    const timestamp = Date.now();
+    const randomId = Math.random().toString(36).substr(2, 8);
+    return username + '-' + timestamp + '-' + randomId;
 }
 
 // 세션을 localStorage에 저장

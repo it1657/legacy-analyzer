@@ -218,29 +218,25 @@ public class MainApiController {
                 return fileState;
             }
 
-            // 파일 크기 확인
-            if (!forceActive && fileSize > maxFileSizeBytes) {
-                fileState.setStatus("SKIPPED");
-                fileState.setErrorType("OVERSIZE");
-                fileState.setErrorMessage(
-                        String.format("파일 크기 초과: %d bytes", fileSize));
-                fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
-                return fileState;
-            }
+            // 파일 크기 확인: 제거됨
+            // 이유: 청킹 시스템이 모든 크기의 파일을 자동으로 처리함
+            // 100KB 이상 → 자동으로 청크 분할
+            // 100KB 이하 → 한 번에 처리
 
             // 파일 읽기
             String originalCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
                     () -> readFileStrictSafely(filePath));
 
-            // Claude 분석 (큰 파일은 청크 분할)
+            // Claude 분석 (모든 파일에 자동 청킹 적용)
             String commentedCode;
-            if (forceActive && fileSize > maxFileSizeBytes) {
+            // 파일이 100KB 이상이면 자동으로 청킹 (메서드/함수 단위 분석)
+            if (fileSize > 102400) {
                 // 큰 파일을 청크로 나눠서 분석
                 commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
                         () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString()));
-                log.info("[청크 분할 분석] {} ({}bytes)", filePath.getFileName(), fileSize);
+                log.info("[자동 청크 분할 분석] {} ({}bytes) - 대용량 파일", filePath.getFileName(), fileSize);
             } else {
-                // 일반적인 분석
+                // 일반적인 분석 (작은 파일은 한 번에 처리)
                 commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
                         () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString()));
             }
@@ -399,10 +395,11 @@ public class MainApiController {
     private void performCopy(SseEmitter emitter, Path sourceRootPath, Path finalProjectOutputPath)
             throws IOException {
 
-        // 새로운 출력 폴더가 없으면 생성, 있으면 내용 삭제
+        // 새로운 출력 폴더가 없으면 생성, 있으면 내용 삭제 (.git 폴더 제외)
         if (Files.exists(finalProjectOutputPath)) {
             try (Stream<Path> stream = Files.walk(finalProjectOutputPath)) {
                 stream.sorted((p1, p2) -> p2.compareTo(p1))
+                        .filter(path -> !path.toString().contains("\\.git\\") && !path.toString().contains("/.git/"))
                         .forEach(path -> {
                             try {
                                 if (Files.isDirectory(path)) {
@@ -424,46 +421,168 @@ public class MainApiController {
         Map<String, Object> copyInitLog = new HashMap<>();
         copyInitLog.put("fileName", "SYSTEM");
         copyInitLog.put("status", "PROCESSING");
+        copyInitLog.put("stage", "COPY_START");
         copyInitLog.put("logMessage",
                 "[시스템] 원본 프로젝트 구조 무결성 선행 미러링 복사 가동 중... 잠시만 기다려 주십시오.\n");
         copyInitLog.put("processedCount", 0);
         copyInitLog.put("totalCount", 100);
         sendSseEvent(emitter, "progress", copyInitLog);
 
+        // 변수를 try 블록 밖에서 정의 (블록 밖에서도 사용 가능하게)
+        int[] stats = {0, 0};  // [processedCount, totalFiles]
+        long[] timeRef = {System.currentTimeMillis()};
+
+        log.info("[파일 복사 시작] 원본 경로 검사 중...");
+
         try (Stream<Path> copyStream = Files.walk(sourceRootPath)) {
-            copyStream.forEach(source -> {
+            java.util.List<Path> allPaths = copyStream.collect(java.util.stream.Collectors.toList());
+            stats[1] = allPaths.size();  // totalFiles
+            long lastProgressTime = System.currentTimeMillis();
+            int lastLoggedCount = 0;
+
+            log.info("[파일 복사] 총 {} 개 파일/디렉토리 검사 시작", stats[1]);
+
+            // 처음 COPY_START 직후 초기 진행 신호 전송 (브라우저 타임아웃 방지)
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            Map<String, Object> initialProgressLog = new HashMap<>();
+            initialProgressLog.put("fileName", "SYSTEM");
+            initialProgressLog.put("status", "PROCESSING");
+            initialProgressLog.put("stage", "COPY_PROGRESS");
+            initialProgressLog.put("logMessage", "[시스템] 파일 복사 진행 중... 0/" + stats[1]);
+            initialProgressLog.put("processedCount", 0);
+            initialProgressLog.put("totalCount", stats[1]);
+            sendSseEvent(emitter, "progress", initialProgressLog);
+
+            for (Path source : allPaths) {
                 try {
+                    String sourceStr = source.toString();
+                    // IDE/빌드/버전관리 설정 폴더 및 DB 파일 제외 (프로젝트 소스코드 분석만 수행)
+                    if (sourceStr.contains(".git") || sourceStr.contains(".gradle") ||
+                        sourceStr.contains(".idea") || sourceStr.contains(".claude") ||
+                        sourceStr.contains(".vscode") || sourceStr.contains("target") ||
+                        sourceStr.contains("build") || sourceStr.contains("node_modules") ||
+                        sourceStr.endsWith(".mv.db") || sourceStr.endsWith(".trace.db") ||
+                        sourceStr.endsWith(".lock.db") || sourceStr.endsWith(".env") ||
+                        sourceStr.endsWith(".log")) {
+                        stats[0]++;
+                        continue;
+                    }
+
                     Path target = finalProjectOutputPath.resolve(sourceRootPath.relativize(source));
                     if (Files.isDirectory(source)) {
                         if (!Files.exists(target)) Files.createDirectories(target);
                     } else {
+                        // 파일 복사 전 부모 디렉토리 생성
+                        Path targetDir = target.getParent();
+                        if (targetDir != null && !Files.exists(targetDir)) {
+                            Files.createDirectories(targetDir);
+                        }
+
                         if (Files.exists(target)) {
                             long sourceTime = Files.getLastModifiedTime(source).toMillis();
                             long targetTime = Files.getLastModifiedTime(target).toMillis();
-                            if (targetTime >= sourceTime) return;
+                            if (targetTime >= sourceTime) {
+                                stats[0]++;
+                                continue;
+                            }
                         }
                         Files.copy(source, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                     }
+
+                    stats[0]++;
+
+                    // 1초마다 진행 상황 전송 + 로깅 (브라우저 타임아웃 방지)
+                    long now = System.currentTimeMillis();
+                    if (now - lastProgressTime >= 1000) {
+                        Map<String, Object> copyProgressLog = new HashMap<>();
+                        copyProgressLog.put("fileName", "SYSTEM");
+                        copyProgressLog.put("status", "PROCESSING");
+                        copyProgressLog.put("stage", "COPY_PROGRESS");  // 진행 중 신호
+                        copyProgressLog.put("logMessage", "[시스템] 파일 복사 진행 중... " + stats[0] + "/" + stats[1]);
+                        copyProgressLog.put("processedCount", stats[0]);
+                        copyProgressLog.put("totalCount", stats[1]);
+                        sendSseEvent(emitter, "progress", copyProgressLog);
+
+                        // 10% 진행할 때마다 로그 출력
+                        int progress = (int) ((stats[0] * 100.0) / stats[1]);
+                        if (progress >= lastLoggedCount + 10) {
+                            log.info("[파일 복사 진행] {}% 완료 ({}/{})", progress, stats[0], stats[1]);
+                            lastLoggedCount = progress;
+                        }
+
+                        lastProgressTime = now;
+                    }
+
                 } catch (IOException e) {
                     log.error("프로젝트 폴더 미러링 카피 중 장애 발생", e);
+                    stats[0]++;
                 }
-            });
+            }
+        }
+
+        // 복사 완료 신호 (마지막 진행 상황)
+        Map<String, Object> copyFinalLog = new HashMap<>();
+        copyFinalLog.put("fileName", "SYSTEM");
+        copyFinalLog.put("status", "PROCESSING");
+        copyFinalLog.put("stage", "COPY_PROGRESS");
+        copyFinalLog.put("logMessage", "[시스템] 파일 복사 진행 중... " + stats[0] + "/" + stats[1]);
+        copyFinalLog.put("processedCount", stats[0]);
+        copyFinalLog.put("totalCount", stats[1]);
+        sendSseEvent(emitter, "progress", copyFinalLog);
+
+        long copyEndTime = System.currentTimeMillis();
+        long copyDuration = copyEndTime - timeRef[0];
+        log.info("[파일 복사 완료] {}개 파일 복사 완료 (소요시간: {}ms)", stats[0], copyDuration);
+
+        // 복사 완료 전 최종 진행 상황 전송 (2회 반복 - SSE 안정성)
+        for (int attempt = 0; attempt < 2; attempt++) {
+            Map<String, Object> finalProgressLog = new HashMap<>();
+            finalProgressLog.put("fileName", "SYSTEM");
+            finalProgressLog.put("status", "PROCESSING");
+            finalProgressLog.put("stage", "COPY_PROGRESS");
+            finalProgressLog.put("logMessage", "[시스템] 파일 복사 진행 중... " + stats[0] + "/" + stats[1]);
+            finalProgressLog.put("processedCount", stats[0]);
+            finalProgressLog.put("totalCount", stats[1]);
+            sendSseEvent(emitter, "progress", finalProgressLog);
+
+            if (attempt == 0) {
+                try {
+                    Thread.sleep(50);  // 50ms 대기 후 재전송
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+
+        // 복사 완료 신호
+        try {
+            Thread.sleep(200);  // 0.2초 대기 (UI 업데이트 확보)
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
 
         Map<String, Object> copyDoneLog = new HashMap<>();
         copyDoneLog.put("fileName", "SYSTEM");
         copyDoneLog.put("status", "PROCESSING");
+        copyDoneLog.put("stage", "COPY_DONE");
         copyDoneLog.put("logMessage",
                 "[시스템] 프로젝트 무결성 선행 복사 완수 완료. 즉시 Claude AI 주석 패치 전선 투입을 전개합니다.\n\n");
-        copyDoneLog.put("processedCount", 0);
-        copyDoneLog.put("totalCount", 100);
+        copyDoneLog.put("processedCount", stats[0]);
+        copyDoneLog.put("totalCount", stats[1]);
         sendSseEvent(emitter, "progress", copyDoneLog);
+
+        log.info("[분석 단계 진입] 복사 완료 후 파일 분석 시작...");
     }
 
     private void sendDirectModeLog(SseEmitter emitter) {
         Map<String, Object> directModeLog = new HashMap<>();
         directModeLog.put("fileName", "SYSTEM");
         directModeLog.put("status", "PROCESSING");
+        directModeLog.put("stage", "COPY_SKIPPED");
         directModeLog.put("logMessage",
                 "[경고/시스템] 출력 경로 미지정으로 원본 직접 수정 모드가 활성화되었습니다. 복사 단계를 건너뛰고 주석 패치를 전개합니다.\n\n");
         directModeLog.put("processedCount", 0);
@@ -509,35 +628,69 @@ public class MainApiController {
                     "- 용량 미처리 패스: " + skipCount + "개\n" +
                     "=========================================\n");
 
+            // 🔴 분석 완료 플래그 설정 (남은 파일 처리 중단)
+            SessionState completeSession = sessionManager.getSession(sessionId);
+            if (completeSession != null) {
+                completeSession.setAnalysisCompleted(true);
+                log.info("[SSE] 🚨 SessionState에 분석 완료 플래그 설정됨 - sessionId={}", sessionId);
+            }
+
             // 클라이언트가 명시적으로 종료를 감지하도록 completed 플래그 추가
             finalData.put("completed", true);
             finalData.put("isCompletionSignal", true); // 추가: 완료 신호임을 명확히 표시
 
             log.info("[SSE] 분석 완료 신호 전송 시작 - sessionId={}", sessionId);
             boolean completionSignalSent = false;
+            boolean emitterCompleted = false;
+
             try {
+                // 1단계: 완료 신호 전송 (별도의 "completion" 이벤트로 명확하게)
+                log.info("[SSE] sendSseEvent 호출 시작");
+                // progress 이벤트로도 보내기 (호환성)
                 sendSseEvent(emitter, "progress", finalData);
                 completionSignalSent = true;
                 log.info("[SSE] ✅ 분석 완료 신호(completed=true) 전송 성공 - sessionId={}", sessionId);
 
-                // 완료 이벤트가 프론트에 도착할 시간 확보
-                Thread.sleep(500);
+                // 추가: completion 이벤트로도 명시적 전송 (프론트가 확실히 받도록)
+                log.info("[SSE] completion 이벤트 전송 시작");
+                sendSseEvent(emitter, "completion", finalData);
+                log.info("[SSE] ✅ completion 이벤트 전송 성공");
 
-                // 클라이언트가 완료 신호를 받았을 시간을 충분히 제공한 후 서버에서 명시적으로 연결 종료
+                // 2단계: 완료 이벤트가 프론트에 도착할 시간 확보
+                log.info("[SSE] 500ms 대기 중");
+                Thread.sleep(500);
+                log.info("[SSE] 500ms 대기 완료");
+
+                // 3단계: 클라이언트가 완료 신호를 받았을 시간을 충분히 제공한 후 서버에서 명시적으로 연결 종료
+                log.info("[SSE] emitter.complete() 호출 시작");
                 emitter.complete();
-                log.info("[SSE] ✅ emitter.complete() 호출 성공 - 서버 측 SSE 연결 종료 - sessionId={}", sessionId);
-            } catch (Exception e) {
-                log.error("[SSE] ⚠️ 분석 완료 신호 전송 실패 (Exception) - sessionId={}: {}", sessionId, e.getMessage());
+                emitterCompleted = true;
+                log.info("[SSE] ✅✅✅ emitter.complete() 호출 성공 - 서버 측 SSE 연결 종료됨 - sessionId={}", sessionId);
+            } catch (InterruptedException e) {
+                log.error("[SSE] ⚠️ Thread.sleep 중단됨 - sessionId={}: {}", sessionId, e.getMessage());
+                Thread.currentThread().interrupt();
                 try {
                     emitter.complete();
-                    log.info("[SSE] Exception 후 emitter.complete() 호출 성공 - sessionId={}", sessionId);
+                    emitterCompleted = true;
                 } catch (Exception ignored) {
-                    log.debug("[SSE] Exception 후 emitter.complete() 실패 - sessionId={}", sessionId);
+                }
+            } catch (Exception e) {
+                log.error("[SSE] ⚠️ 분석 완료 신호 처리 실패 (Exception) - sessionId={}: {}", sessionId, e.getMessage(), e);
+                try {
+                    log.info("[SSE] 폴백: emitter.complete() 강제 호출");
+                    emitter.complete();
+                    emitterCompleted = true;
+                    log.info("[SSE] 폴백 성공");
+                } catch (Exception ignored) {
+                    log.error("[SSE] 폴백도 실패");
                 }
             }
 
             if (!completionSignalSent) {
-                log.error("[SSE] 🚨 분석 완료 신호를 전송하지 못했습니다! - sessionId={}", sessionId);
+                log.error("[SSE] 🚨🚨🚨 분석 완료 신호를 전송하지 못했습니다! - sessionId={}", sessionId);
+            }
+            if (!emitterCompleted) {
+                log.error("[SSE] 🚨🚨🚨 emitter.complete()을 호출하지 못했습니다! - sessionId={}", sessionId);
             }
 
             // 🎉 분석 완료 로그
@@ -561,15 +714,8 @@ public class MainApiController {
                         return;
                     }
 
-                    StringBuilder projectStructureSummary = new StringBuilder();
-                    if (session != null) {
-                        for (FileAnalysisState fileState : session.getProcessedFilesList().values()) {
-                            if ("SUCCESS".equals(fileState.getStatus())) {
-                                projectStructureSummary.append("- 파일 위치: ")
-                                        .append(fileState.getFilePath()).append("\n");
-                            }
-                        }
-                    }
+                    StringBuilder projectStructureSummary = buildDetailedProjectStructure(session, finalProjectOutputPath);
+                    log.debug("[README] 프로젝트 구조: {} 자", projectStructureSummary.length());
 
                     String readmeContent = retryHandler.executeWithRetry(sessionId, readmeFileName,
                             () -> claudeService.analyzeCodeWithClaude(
@@ -819,8 +965,17 @@ public class MainApiController {
                 : null;
 
         if (session == null) {
-            // 클라이언트의 sessionId를 사용하여 세션 생성
-            String clientSessionId = sessionId != null && !sessionId.isEmpty() ? sessionId : UUID.randomUUID().toString();
+            // 사용자 기반 세션ID 생성: userId-timestamp-randomId
+            String clientSessionId;
+            if (sessionId != null && !sessionId.isEmpty()) {
+                clientSessionId = sessionId;
+            } else {
+                // userId가 있으면 포함, 없으면 guest 사용
+                String userIdentifier = userId != null ? userId.toString() : "guest";
+                long timestamp = System.currentTimeMillis();
+                String randomPart = UUID.randomUUID().toString().substring(0, 8);
+                clientSessionId = userIdentifier + "-" + timestamp + "-" + randomPart;
+            }
             session = sessionManager.createSession(
                     clientSessionId,
                     normalizedSourcePath,
@@ -831,6 +986,14 @@ public class MainApiController {
         final Long finalUserId = userId;
         if (session != null && userId != null) {
             session.setUserId(userId);
+        }
+
+        // 새로운 분석 시작 전 완료 플래그 초기화 (이전 분석 상태 제거)
+        if (session != null) {
+            session.setAnalysisCompleted(false);
+            // DB에 즉시 저장하여 파일 분석 로직이 확인할 때 최신 상태 반영
+            sessionManager.saveSessionState(session);
+            log.info("[세션 초기화] 분석 완료 플래그 리셋 및 DB 저장 완료 - sessionId={}", session.getSessionId());
         }
 
         final String finalSessionId = session.getSessionId();
@@ -878,13 +1041,28 @@ public class MainApiController {
                         ? Path.of(finalOutputPath).resolve(sourceFolderName)
                         : sourceRootPath;
 
-                // [1단계] 선행 복사
+                // [1단계] 선행 복사 (동기 처리 - 복사 완료까지 블로킹)
+                log.info("[복사 단계 시작] 동기 처리 시작");
                 try {
                     if (isCopyMode) {
                         performCopy(emitter, sourceRootPath, finalProjectOutputPath);
+                        log.info("[복사 단계 완료] 파일 복사 동기 처리 완료, 이제 분석 단계로 전환");
                     } else {
                         sendDirectModeLog(emitter);
                     }
+
+                    // 복사 완료 후 명시적 대기 + 신호 (프론트 동기화)
+                    Thread.sleep(500);
+                    Map<String, Object> transitionLog = new HashMap<>();
+                    transitionLog.put("fileName", "SYSTEM");
+                    transitionLog.put("status", "PROCESSING");
+                    transitionLog.put("stage", "COPY_DONE");
+                    transitionLog.put("logMessage", "[시스템] 복사 단계 완료. 분석 단계로 전환합니다.");
+                    transitionLog.put("processedCount", 100);
+                    transitionLog.put("totalCount", 100);
+                    sendSseEvent(emitter, "progress", transitionLog);
+                    log.info("[분석 단계 신호] COPY_DONE 명시적 전송 완료");
+
                 } catch (Exception e) {
                     log.error("[파일 복사 실패]", e);
                     sendSseEvent(emitter, "error", "파일 복사 중 오류: " + e.getMessage());
@@ -920,78 +1098,97 @@ public class MainApiController {
                     // 계속 진행
                 }
 
-                // [3단계] 파일 분석
-                int successCount = 0, skipCount = 0, alreadyProcessedCount = 0;
-                log.info("[파일 분석 시작] 총 {} 개 파일", fileList.size());
+                // [3단계] 파일 분석 (병렬 처리)
+                java.util.concurrent.atomic.AtomicInteger successCount = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.atomic.AtomicInteger skipCount = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.atomic.AtomicInteger alreadyProcessedCount = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.atomic.AtomicInteger processedTotal = new java.util.concurrent.atomic.AtomicInteger(0);
+
+                // 분석 단계 시작 로그 (터미널에서 명확하게 보임)
+                log.info("");
+                log.info("========== 【분석 단계 시작】파일 분석 진행 중... ==========");
+                log.info("총 {} 개 파일 병렬 분석 예정 (스레드 풀: 4개)", fileList.size());
+                log.info("=".repeat(60));
+
+                // 병렬 처리용 스레드 풀 (4개 스레드)
+                java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(4);
+                java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(fileList.size());
 
                 for (int i = 0; i < fileList.size(); i++) {
-                    try {
-                        // 중단 확인
-                        SessionState currentSession = sessionManager.getSession(finalSessionId);
-                        if (currentSession != null && currentSession.shouldStop()) {
-                            log.info("[분석 중단] 사용자 요청으로 분석이 중단됩니다.");
-                            break;
-                        }
-
-                        if (i % 10 == 0 || i < 3) {
-                            log.info("[파일 분석 진행] {}/{} 파일 처리 중", i + 1, fileList.size());
-                        }
-
-                        // 일시중지 상태 확인 및 대기
-                        while (currentSession != null && currentSession.getPausedAt() != null) {
-                            log.debug("[일시중지] 분석이 일시중지되었습니다. 재개 대기 중...");
-                            Thread.sleep(500);
-                            currentSession = sessionManager.getSession(finalSessionId);
-
+                    final int fileIndex = i;
+                    executor.submit(() -> {
+                        try {
+                            // 중단 확인
+                            SessionState currentSession = sessionManager.getSession(finalSessionId);
                             if (currentSession != null && currentSession.shouldStop()) {
-                                log.info("[분석 중단] 일시중지 중 취소 요청이 들어왔습니다.");
-                                break;
+                                log.debug("[분석 중단] 스레드 #{}: 사용자 요청으로 중단", fileIndex);
+                                return;
                             }
-                        }
 
-                        if (currentSession != null && currentSession.shouldStop()) {
-                            break;
-                        }
+                            // 파일 분석
+                            Path filePath = fileList.get(fileIndex);
+                            Path relativeSubPath = sourceRootPath.relativize(filePath);
+                            Path targetPath = isCopyMode
+                                    ? finalProjectOutputPath.resolve(relativeSubPath)
+                                    : filePath;
 
-                        Path filePath = fileList.get(i);
-                        Path relativeSubPath = sourceRootPath.relativize(filePath);
-                        Path targetPath = isCopyMode
-                                ? finalProjectOutputPath.resolve(relativeSubPath)
-                                : filePath;
+                            FileAnalysisState fileState = analyzeFile(
+                                    finalSessionId, filePath, targetPath, sourceRootPath,
+                                    isForceActive, finalOutputPath);
 
-                        // 파일 분석
-                        FileAnalysisState fileState = analyzeFile(
-                                finalSessionId, filePath, targetPath, sourceRootPath,
-                                isForceActive, finalOutputPath);
-
-                        // 상태별 카운트
-                        if ("SUCCESS".equals(fileState.getStatus())) {
-                            successCount++;
-                        } else if ("SKIPPED".equals(fileState.getStatus())) {
-                            if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
-                                alreadyProcessedCount++;
-                            } else if ("OVERSIZE".equals(fileState.getErrorType())) {
-                                skipCount++;
+                            // 상태별 카운트 (원자적 연산)
+                            if ("SUCCESS".equals(fileState.getStatus())) {
+                                successCount.incrementAndGet();
+                            } else if ("SKIPPED".equals(fileState.getStatus())) {
+                                if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
+                                    alreadyProcessedCount.incrementAndGet();
+                                } else if ("OVERSIZE".equals(fileState.getErrorType())) {
+                                    skipCount.incrementAndGet();
+                                }
                             }
-                        }
 
-                        // 진행 상황 업데이트
-                        updateAndSendProgress(emitter, finalSessionId, i + 1, fileList.size(),
-                                relativeSubPath, fileState);
-                    } catch (Exception e) {
-                        log.error("[파일 분석 중 예외]", e);
-                        // 개별 파일 에러는 무시하고 계속 진행
-                    }
+                            int processed = processedTotal.incrementAndGet();
+
+                            // 진행 상황 업데이트 (10% 단위로 로그)
+                            if (processed % Math.max(1, fileList.size() / 10) == 0 || processed <= 3) {
+                                log.info("[파일 분석 진행] {}/{} 파일 처리 완료", processed, fileList.size());
+                            }
+
+                            // 진행 상황 SSE 전송
+                            updateAndSendProgress(emitter, finalSessionId, processed, fileList.size(),
+                                    relativeSubPath, fileState);
+
+                        } catch (Exception e) {
+                            log.error("[파일 분석 중 예외 - 스레드 #{}]", fileIndex, e);
+                            processedTotal.incrementAndGet();
+                        } finally {
+                            latch.countDown();
+                        }
+                    });
                 }
+
+                // 모든 스레드가 완료될 때까지 대기
+                log.info("[병렬 처리] 모든 파일 분석이 완료될 때까지 대기 중...");
+                latch.await();
+                executor.shutdown();
+                log.info("[병렬 처리] 모든 스레드 종료 완료");
 
                 // [4단계] 완료 처리
                 String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
                 AnalysisHistory finalHistory = history;
 
                 try {
+                    // 분석 완료 요약 로그
+                    log.info("");
+                    log.info("========== 【분석 완료】모든 파일 분석이 완료되었습니다! ==========");
+                    log.info("✓ 성공: {} | ⚡ 이미 처리됨: {} | ⊘ 스킵됨: {}",
+                        successCount.get(), alreadyProcessedCount.get(), skipCount.get());
+                    log.info("=".repeat(60));
+                    log.info("");
+
                     log.info("[분석 종료 단계 진입] fileList.size={}", fileList.size());
                     finalizeAnalysis(emitter, finalSessionId, finalProjectOutputPath, readmeFileName,
-                            successCount, alreadyProcessedCount, skipCount, startTime, finalHistory);
+                            successCount.get(), alreadyProcessedCount.get(), skipCount.get(), startTime, finalHistory);
                     log.info("[분석 완료 처리 성공]");
                 } catch (Exception e) {
                     log.error("[분석 완료 처리 중 예외]", e);
@@ -1082,6 +1279,133 @@ public class MainApiController {
         response.put("message", "분석이 재개되었습니다.");
         log.info("[세션 재개] sessionId={}", sessionId);
         return response;
+    }
+
+    // 상세한 프로젝트 구조 분석 메서드
+    private StringBuilder buildDetailedProjectStructure(SessionState session, Path outputPath) {
+        StringBuilder sb = new StringBuilder();
+
+        if (session == null || session.getProcessedFilesList().isEmpty()) {
+            return sb.append("분석된 파일이 없습니다.");
+        }
+
+        // 1. 패키지별 파일 분류
+        Map<String, List<String>> packageGroups = new TreeMap<>();
+        List<String> otherFiles = new ArrayList<>();
+
+        for (FileAnalysisState fileState : session.getProcessedFilesList().values()) {
+            if ("SUCCESS".equals(fileState.getStatus())) {
+                String filePath = fileState.getFilePath();
+                String packagePath = extractPackagePath(filePath);
+
+                if (packagePath != null && !packagePath.isEmpty()) {
+                    packageGroups.computeIfAbsent(packagePath, k -> new ArrayList<>()).add(filePath);
+                } else {
+                    otherFiles.add(filePath);
+                }
+            }
+        }
+
+        // 2. 패키지 구조 출력
+        sb.append("## 프로젝트 패키지 구조\n\n");
+
+        for (Map.Entry<String, List<String>> entry : packageGroups.entrySet()) {
+            String packageName = entry.getKey();
+            List<String> files = entry.getValue();
+
+            sb.append("### ").append(packageName).append(" (").append(files.size()).append("개)\n");
+
+            for (String file : files) {
+                String fileName = new File(file).getName();
+                String role = inferFileRole(fileName);
+                sb.append("- ").append(fileName);
+                if (role != null && !role.isEmpty()) {
+                    sb.append(" - ").append(role);
+                }
+                sb.append("\n");
+            }
+            sb.append("\n");
+        }
+
+        // 3. 기타 파일들
+        if (!otherFiles.isEmpty()) {
+            sb.append("### 기타 파일 및 설정\n");
+            for (String file : otherFiles) {
+                String fileName = new File(file).getName();
+                String role = inferFileRole(fileName);
+                sb.append("- ").append(fileName);
+                if (role != null && !role.isEmpty()) {
+                    sb.append(" - ").append(role);
+                }
+                sb.append("\n");
+            }
+            sb.append("\n");
+        }
+
+        // 4. 통계 정보
+        int totalFiles = (int) session.getProcessedFilesList().values().stream()
+                .filter(f -> "SUCCESS".equals(f.getStatus())).count();
+
+        sb.append("## 분석 통계\n\n");
+        sb.append("- **총 분석 파일 수**: ").append(totalFiles).append("개\n");
+        sb.append("- **패키지 수**: ").append(packageGroups.size()).append("개\n");
+        sb.append("- **분석 완료 시간**: ").append(LocalDateTime.now()).append("\n");
+
+        return sb;
+    }
+
+    // 파일 경로에서 패키지 추출
+    private String extractPackagePath(String filePath) {
+        if (filePath == null) return null;
+
+        // Java 파일의 경우 패키지 경로 추출
+        if (filePath.contains("src/main/java") || filePath.contains("src\\main\\java")) {
+            String[] parts = filePath.split("[/\\\\]");
+            StringBuilder packagePath = new StringBuilder();
+            boolean inPackage = false;
+
+            for (String part : parts) {
+                if (part.equals("java")) {
+                    inPackage = true;
+                    continue;
+                }
+                if (inPackage && !part.isEmpty() && !part.endsWith(".java")) {
+                    if (packagePath.length() > 0) packagePath.append(".");
+                    packagePath.append(part);
+                }
+            }
+            return packagePath.length() > 0 ? packagePath.toString() : "src/main/java";
+        }
+
+        // 기타 파일의 경우 상위 디렉토리 반환
+        File file = new File(filePath);
+        String parentName = file.getParentFile() != null ? file.getParentFile().getName() : "";
+        return parentName.isEmpty() ? "root" : parentName;
+    }
+
+    // 파일의 역할 추론
+    private String inferFileRole(String fileName) {
+        if (fileName.endsWith("Controller.java")) return "REST API 엔드포인트";
+        if (fileName.endsWith("Service.java")) return "비즈니스 로직";
+        if (fileName.endsWith("Repository.java")) return "데이터 접근";
+        if (fileName.endsWith("Entity.java")) return "데이터 모델";
+        if (fileName.endsWith("DTO.java")) return "데이터 전송 객체";
+        if (fileName.endsWith("Config.java")) return "설정 클래스";
+        if (fileName.endsWith("Exception.java")) return "예외 처리";
+        if (fileName.endsWith(".properties")) return "설정 파일";
+        if (fileName.endsWith(".xml")) return "XML 설정/구조";
+        if (fileName.endsWith(".js") || fileName.endsWith(".jsx")) return "JavaScript/React";
+        if (fileName.endsWith(".css") || fileName.endsWith(".scss")) return "스타일시트";
+        if (fileName.endsWith("README.md")) return "프로젝트 설명서";
+        return "";
+    }
+
+    // 바이트 단위 포맷팅
+    private String formatBytes(long bytes) {
+        if (bytes <= 0) return "0 B";
+        final String[] units = new String[]{"B", "KB", "MB", "GB"};
+        int digitGroups = (int) (Math.log10(bytes) / Math.log10(1024));
+        return String.format("%.2f %s", bytes / Math.pow(1024, digitGroups), units[digitGroups]);
     }
 }
 

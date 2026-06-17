@@ -64,6 +64,10 @@ public class SessionState {
   @JsonProperty("isCancelled")
   private boolean isCancelled = false;
 
+  @Column(name = "is_analysis_completed")
+  @JsonProperty("isAnalysisCompleted")
+  private Boolean isAnalysisCompleted = false;
+
   @Column(name = "paused_at")
   @JsonProperty("pausedAt")
   private LocalDateTime pausedAt;
@@ -246,6 +250,16 @@ public class SessionState {
   // 분석을 중단해야 하는지 판단
   public boolean shouldStop() {
     return isCancelled || "PAUSED".equals(status);
+  }
+
+  // 분석 완료 상태 확인
+  public boolean isAnalysisCompleted() {
+    return Boolean.TRUE.equals(isAnalysisCompleted);
+  }
+
+  // 분석 완료 상태 설정
+  public void setAnalysisCompleted(boolean completed) {
+    this.isAnalysisCompleted = completed;
   }
 
   // 세션 요약 생성
