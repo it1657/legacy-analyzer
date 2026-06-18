@@ -139,8 +139,8 @@ public class MainApiController {
 
     private String analyzeFileInChunks(String originalCode, String fileName, String sourceRootPath) throws Exception {
         String[] lines = originalCode.split("\n", -1);
-        int chunkSize = 500; // 한 청크당 500줄
-        int overlapSize = 50; // 청크 사이의 겹침 줄 수 (맥락 유지)
+        int chunkSize = 1000; // 한 청크당 1000줄 (API 호출 횟수 감소)
+        int overlapSize = 100; // 청크 사이의 겹침 줄 수 (맥락 유지)
 
         StringBuilder finalResult = new StringBuilder();
         int resultStartLine = 0;
@@ -228,8 +228,8 @@ public class MainApiController {
 
             // Claude 분석 (모든 파일에 자동 청킹 적용)
             String commentedCode;
-            // 파일이 100KB 이상이면 자동으로 청킹 (메서드/함수 단위 분석)
-            if (fileSize > 102400) {
+            // 파일이 150KB 이상이면 자동으로 청킹 (메서드/함수 단위 분석)
+            if (fileSize > 153600) {
                 // 큰 파일을 청크로 나눠서 분석
                 commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
                         () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString()));
@@ -1133,11 +1133,17 @@ public class MainApiController {
                 // 분석 단계 시작 로그 (터미널에서 명확하게 보임)
                 log.info("");
                 log.info("========== 【분석 단계 시작】파일 분석 진행 중... ==========");
-                log.info("총 {} 개 파일 병렬 분석 예정 (스레드 풀: 4개)", fileList.size());
+
+                // CPU 코어 수에 따라 동적 스레드 풀 크기 결정 (권장: 코어수 × 2)
+                int cpuCores = Runtime.getRuntime().availableProcessors();
+                int threadPoolSize = Math.max(8, cpuCores * 2);
+
+                log.info("총 {} 개 파일 병렬 분석 예정 (스레드 풀: {}개, CPU코어: {}개)",
+                    fileList.size(), threadPoolSize, cpuCores);
                 log.info("=".repeat(60));
 
-                // 병렬 처리용 스레드 풀 (4개 스레드)
-                java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(4);
+                // 병렬 처리용 스레드 풀 (동적 크기)
+                java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadPoolSize);
                 java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(fileList.size());
 
                 for (int i = 0; i < fileList.size(); i++) {
