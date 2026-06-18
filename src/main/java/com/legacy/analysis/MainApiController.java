@@ -739,6 +739,12 @@ public class MainApiController {
             // README 생성은 백그라운드에서 비동기 처리 (SSE 연결과 독립적)
             new Thread(() -> {
                 try {
+                    // 최종 보고서 생성 단계 명확히 표시
+                    log.info("");
+                    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    log.info("[시스템] 📄 최종 보고서(README) 생성 중... (파일 분석과 별도)");
+                    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
                     SessionState session = sessionManager.getSession(sessionId);
                     if (session != null) {
                         session.getStatistics().setEndTime(LocalDateTime.now());
@@ -748,13 +754,14 @@ public class MainApiController {
                     // README 생성 (Claude API KEY가 설정된 경우에만 실행)
                     String apiKey = System.getenv("CLAUDE_API_KEY");
                     if (apiKey == null || apiKey.isEmpty() || apiKey.equals("MOCK_KEY_FOR_TEST")) {
-                        log.info("[비동기] README 생성 스킵 - Claude API KEY 미설정 (테스트 모드)");
+                        log.info("[비동기] 📄 README 생성 스킵 - Claude API KEY 미설정 (테스트 모드)");
                         return;
                     }
 
                     StringBuilder projectStructureSummary = buildDetailedProjectStructure(session, finalProjectOutputPath);
                     log.debug("[README] 프로젝트 구조: {} 자", projectStructureSummary.length());
 
+                    log.info("[비동기] 📄 README 작성을 위해 최종 분석 수행 중...");
                     String readmeContent = retryHandler.executeWithRetry(sessionId, readmeFileName,
                             () -> claudeService.analyzeCodeWithClaude(
                                     projectStructureSummary.toString(), readmeFileName,
@@ -767,7 +774,7 @@ public class MainApiController {
                                 return null;
                             });
 
-                    log.info("[비동기] README 생성 완료");
+                    log.info("[비동기] 📄 최종 보고서(README) 생성 완료");
                 } catch (Exception e) {
                     log.error("[비동기 README 생성 중 오류]", e);
                 }
