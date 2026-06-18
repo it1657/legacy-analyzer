@@ -138,12 +138,20 @@ public class ClaudeServiceImpl implements ClaudeService {
      */
     private String repairJsonArray(String jsonStr) {
         try {
-            // 배열 경계 추출: [ 와 ] 사이의 내용만 처리
+            // 먼저 정상 JSON 파싱 시도
+            try {
+                List<?> list = mapper.readValue(jsonStr, List.class);
+                log.debug("[JSON] 정상적인 JSON 배열입니다");
+                return jsonStr;
+            } catch (Exception ignored) {
+                // 정상 JSON이 아니면 복구 로직 실행
+            }
+
+            // 배열 경계 추출
             int startIdx = jsonStr.indexOf('[');
             int endIdx = jsonStr.lastIndexOf(']');
-
             if (startIdx == -1 || endIdx == -1 || startIdx >= endIdx) {
-                log.warn("[JSON 복구] 배열 경계를 찾을 수 없음. 원본 반환");
+                log.warn("[JSON 복구] 배열 경계를 찾을 수 없음");
                 return jsonStr;
             }
 
@@ -152,40 +160,81 @@ public class ClaudeServiceImpl implements ClaudeService {
                 return "[]";
             }
 
-            // 정규식으로 lineNumber와 comment 쌍 추출
             List<Map<String, Object>> items = new ArrayList<>();
 
-            // 패턴: "lineNumber": N 또는 lineNumber: N 을 찾고, 그 다음의 comment를 찾음
-            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "\"?lineNumber\"?\\s*:\\s*(\\d+)[^}]*?\"?comment\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*?)\"",
+            // 1차 시도: 완전한 JSON 객체 추출 {lineNumber: ..., comment: ...}
+            java.util.regex.Pattern objectPattern = java.util.regex.Pattern.compile(
+                "\\{[^}]*?\"?lineNumber\"?\\s*:\\s*(\\d+)[^}]*?\"?comment\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*?)\"[^}]*?\\}",
                 java.util.regex.Pattern.DOTALL
             );
-            java.util.regex.Matcher matcher = pattern.matcher(content);
+            java.util.regex.Matcher objectMatcher = objectPattern.matcher(content);
 
-            while (matcher.find()) {
-                int lineNumber = Integer.parseInt(matcher.group(1));
-                String comment = matcher.group(2);
-                // 이스케이프된 문자 처리
-                comment = comment.replace("\\\"", "\"");
+            while (objectMatcher.find()) {
+                try {
+                    int lineNumber = Integer.parseInt(objectMatcher.group(1));
+                    String comment = objectMatcher.group(2)
+                        .replace("\\\"", "\"")
+                        .replace("\\n", "\n")
+                        .replace("\\\\", "\\");
 
-                Map<String, Object> item = new HashMap<>();
-                item.put("lineNumber", lineNumber);
-                item.put("comment", comment);
-                items.add(item);
+                    Map<String, Object> item = new HashMap<>();
+                    item.put("lineNumber", lineNumber);
+                    item.put("comment", comment);
+                    items.add(item);
+                } catch (Exception e) {
+                    log.debug("[JSON 복구] 객체 파싱 실패: {}", e.getMessage());
+                }
+            }
+
+            // 2차 시도: 분리된 lineNumber와 comment 쌍 추출
+            if (items.isEmpty()) {
+                java.util.regex.Pattern linePattern = java.util.regex.Pattern.compile(
+                    "\"?lineNumber\"?\\s*:\\s*(\\d+)"
+                );
+                java.util.regex.Pattern commentPattern = java.util.regex.Pattern.compile(
+                    "\"?comment\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*?)\""
+                );
+
+                java.util.regex.Matcher lineMatcher = linePattern.matcher(content);
+                java.util.regex.Matcher commentMatcher = commentPattern.matcher(content);
+
+                List<Integer> lineNumbers = new ArrayList<>();
+                List<String> comments = new ArrayList<>();
+
+                while (lineMatcher.find()) {
+                    lineNumbers.add(Integer.parseInt(lineMatcher.group(1)));
+                }
+
+                while (commentMatcher.find()) {
+                    String comment = commentMatcher.group(1)
+                        .replace("\\\"", "\"")
+                        .replace("\\n", "\n")
+                        .replace("\\\\", "\\");
+                    comments.add(comment);
+                }
+
+                // lineNumber와 comment의 개수가 같으면 쌍으로 묶기
+                int pairCount = Math.min(lineNumbers.size(), comments.size());
+                for (int i = 0; i < pairCount; i++) {
+                    Map<String, Object> item = new HashMap<>();
+                    item.put("lineNumber", lineNumbers.get(i));
+                    item.put("comment", comments.get(i));
+                    items.add(item);
+                }
             }
 
             if (items.isEmpty()) {
-                log.warn("[JSON 복구] 패턴과 일치하는 항목 없음. 원본: {}", content.substring(0, Math.min(100, content.length())));
+                log.warn("[JSON 복구] 파싱 가능한 항목 없음. 원본: {}",
+                    content.substring(0, Math.min(200, content.length())));
                 return jsonStr;
             }
 
-            // ObjectMapper를 사용하여 JSON 배열 재생성
             String result = mapper.writeValueAsString(items);
             log.debug("[JSON 복구 성공] 추출된 항목 수: {}", items.size());
             return result;
 
         } catch (Exception e) {
-            log.error("[JSON 복구 실패] 에러: {}", e.getMessage());
+            log.error("[JSON 복구 실패] 예외: {}", e.getMessage());
             return jsonStr;
         }
     }
