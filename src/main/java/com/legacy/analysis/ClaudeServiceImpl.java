@@ -141,7 +141,6 @@ public class ClaudeServiceImpl implements ClaudeService {
             // 먼저 정상 JSON 파싱 시도
             try {
                 List<?> list = mapper.readValue(jsonStr, List.class);
-                log.debug("[JSON] 정상적인 JSON 배열입니다");
                 return jsonStr;
             } catch (Exception ignored) {
                 // 정상 JSON이 아니면 복구 로직 실행
@@ -151,7 +150,7 @@ public class ClaudeServiceImpl implements ClaudeService {
             int startIdx = jsonStr.indexOf('[');
             int endIdx = jsonStr.lastIndexOf(']');
             if (startIdx == -1 || endIdx == -1 || startIdx >= endIdx) {
-                log.warn("[JSON 복구] 배열 경계를 찾을 수 없음");
+                log.debug("[JSON] 배열 경계를 찾을 수 없어 원본 반환");
                 return jsonStr;
             }
 
@@ -224,17 +223,16 @@ public class ClaudeServiceImpl implements ClaudeService {
             }
 
             if (items.isEmpty()) {
-                log.warn("[JSON 복구] 파싱 가능한 항목 없음. 원본: {}",
-                    content.substring(0, Math.min(200, content.length())));
+                log.debug("[JSON] 파싱 가능한 항목 없음. 원본 반환");
                 return jsonStr;
             }
 
             String result = mapper.writeValueAsString(items);
-            log.debug("[JSON 복구 성공] 추출된 항목 수: {}", items.size());
+            log.debug("[JSON] 손상된 데이터 복구 완료 ({}개 항목)", items.size());
             return result;
 
         } catch (Exception e) {
-            log.error("[JSON 복구 실패] 예외: {}", e.getMessage());
+            log.debug("[JSON] 복구 실패로 원본 반환: {}", e.getMessage());
             return jsonStr;
         }
     }
@@ -497,11 +495,14 @@ public class ClaudeServiceImpl implements ClaudeService {
             if (!cleanJson.endsWith("]")) {
                 cleanJson = cleanJson + "]";
             }
-            cleanJson = repairJsonArray(cleanJson);
+            String repairedJson = repairJsonArray(cleanJson);
 
-            log.debug("[JSON 복구 완료] 원본 길이={}, 복구 후 길이={}", jsonResponse.length(), cleanJson.length());
+            // 실제로 복구가 일어난 경우에만 로그 (정상 JSON은 로그 안 함)
+            if (!repairedJson.equals(cleanJson)) {
+                log.debug("[JSON 변환] 손상된 JSON을 복구하여 정상화했습니다");
+            }
 
-            List<?> commentList = mapper.readValue(cleanJson, List.class);
+            List<?> commentList = mapper.readValue(repairedJson, List.class);
 
             for (Object obj : commentList) {
                 if (obj instanceof Map<?, ?> item) {
