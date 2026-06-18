@@ -128,6 +128,72 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     /**
+     * JSON 배열 형식 자동 복구: 잘못된 객체 구조를 수정합니다.
+     * 예: "lineNumber": N, "comment": "..." → {"lineNumber": N, "comment": "..."}
+     */
+    private String repairJsonArray(String jsonStr) {
+        StringBuilder repaired = new StringBuilder();
+        boolean inQuotes = false;
+        boolean inObject = false;
+        char prevChar = ' ';
+
+        for (int i = 0; i < jsonStr.length(); i++) {
+            char c = jsonStr.charAt(i);
+
+            // 문자열 내부 따옴표 추적
+            if (c == '"' && prevChar != '\\') {
+                inQuotes = !inQuotes;
+            }
+
+            // 문자열 밖에서만 처리
+            if (!inQuotes) {
+                // { 만나면 객체 시작
+                if (c == '{') {
+                    inObject = true;
+                    repaired.append(c);
+                }
+                // } 만나면 객체 종료
+                else if (c == '}') {
+                    inObject = false;
+                    repaired.append(c);
+                }
+                // [ 또는 ] 그대로 유지
+                else if (c == '[' || c == ']') {
+                    repaired.append(c);
+                }
+                // , } [ ] 이후 "lineNumber"를 만나면 앞에 {를 추가
+                else if (c == '"' && i + 10 < jsonStr.length() &&
+                         jsonStr.substring(i, i + 11).equals("\"lineNumber\"")) {
+                    if (!inObject && (prevChar == ',' || prevChar == '[' || Character.isWhitespace(prevChar))) {
+                        repaired.append('{');
+                    }
+                    repaired.append(c);
+                    inObject = true;
+                }
+                // , 앞에 빠진 } 추가
+                else if (c == ',' && inObject) {
+                    repaired.append('}').append(c);
+                    inObject = false;
+                }
+                else {
+                    repaired.append(c);
+                }
+            } else {
+                repaired.append(c);
+            }
+
+            prevChar = c;
+        }
+
+        // 마지막에 열린 객체 닫기
+        if (inObject) {
+            repaired.append('}');
+        }
+
+        return repaired.toString();
+    }
+
+    /**
      * [세부 지침 파일 로드]: 프로젝트별 특수 상세 지침 텍스트를 안전하게 가져옵니다.
      */
     private String loadCustomSpec(String extension) {
@@ -264,7 +330,11 @@ public class ClaudeServiceImpl implements ClaudeService {
         Map<String, String> userMessage = new HashMap<>();
         userMessage.put("role", "user");
         userMessage.put("content", "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
-                "\n\n⚠️ 중요: 반드시 JSON 배열 형식으로만 응답하세요. Markdown 기호(```), 인사말, 설명 등 JSON 외의 다른 텍스트는 절대로 포함하지 마세요.");
+                "\n\n⚠️ 절대 중요: 다음 JSON 배열 형식으로만 응답하세요. 마크다운(```), 설명, 쉼표 오류 금지:\n" +
+                "[{\"lineNumber\": 숫자, \"comment\": \"내용\"}, {\"lineNumber\": 숫자, \"comment\": \"내용\"}]\n" +
+                "- 각 객체는 { }로 완전히 감싸기\n" +
+                "- 객체 사이에 쉼표(,) 필수\n" +
+                "- JSON 외의 모든 텍스트 금지");
         requestBody.put("messages", Collections.singletonList(userMessage));
 
         // 설정값에서 재시도 정책 로드
@@ -373,6 +443,17 @@ public class ClaudeServiceImpl implements ClaudeService {
                 cleanJson = cleanJson.substring(0, cleanJson.length() - 3); // "```" 제거
             }
             cleanJson = cleanJson.trim();
+
+            // JSON 형식 검증 및 자동 복구
+            if (!cleanJson.startsWith("[")) {
+                cleanJson = "[" + cleanJson;
+            }
+            if (!cleanJson.endsWith("]")) {
+                cleanJson = cleanJson + "]";
+            }
+            cleanJson = repairJsonArray(cleanJson);
+
+            log.debug("[JSON 복구 완료] 원본 길이={}, 복구 후 길이={}", jsonResponse.length(), cleanJson.length());
 
             List<?> commentList = mapper.readValue(cleanJson, List.class);
 
