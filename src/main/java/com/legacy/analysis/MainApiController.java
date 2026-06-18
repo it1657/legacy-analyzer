@@ -44,6 +44,18 @@ public class MainApiController {
     @Value("${app.analysis.max-file-size-bytes:524288}")
     private long maxFileSizeBytes;
 
+    @Value("${app.analysis.thread-pool-size:0}")
+    private int threadPoolSize;
+
+    @Value("${app.analysis.chunk-size-lines:1000}")
+    private int chunkSizeLines;
+
+    @Value("${app.analysis.chunk-overlap-lines:100}")
+    private int chunkOverlapLines;
+
+    @Value("${app.analysis.chunking-threshold-bytes:153600}")
+    private long chunkingThresholdBytes;
+
     @Autowired
     public MainApiController(
             ClaudeService claudeService,
@@ -139,8 +151,8 @@ public class MainApiController {
 
     private String analyzeFileInChunks(String originalCode, String fileName, String sourceRootPath) throws Exception {
         String[] lines = originalCode.split("\n", -1);
-        int chunkSize = 1000; // 한 청크당 1000줄 (API 호출 횟수 감소)
-        int overlapSize = 100; // 청크 사이의 겹침 줄 수 (맥락 유지)
+        int chunkSize = chunkSizeLines;
+        int overlapSize = chunkOverlapLines;
 
         StringBuilder finalResult = new StringBuilder();
         int resultStartLine = 0;
@@ -228,8 +240,8 @@ public class MainApiController {
 
             // Claude 분석 (모든 파일에 자동 청킹 적용)
             String commentedCode;
-            // 파일이 150KB 이상이면 자동으로 청킹 (메서드/함수 단위 분석)
-            if (fileSize > 153600) {
+            // 파일이 설정된 임계값 이상이면 자동으로 청킹
+            if (fileSize > chunkingThresholdBytes) {
                 // 큰 파일을 청크로 나눠서 분석
                 commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
                         () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString()));
@@ -1134,16 +1146,19 @@ public class MainApiController {
                 log.info("");
                 log.info("========== 【분석 단계 시작】파일 분석 진행 중... ==========");
 
-                // CPU 코어 수에 따라 동적 스레드 풀 크기 결정 (권장: 코어수 × 2)
+                // 스레드 풀 크기 결정 (0 = CPU 기반 동적, 0이 아니면 고정값)
+                int actualThreadPoolSize = threadPoolSize;
                 int cpuCores = Runtime.getRuntime().availableProcessors();
-                int threadPoolSize = Math.max(8, cpuCores * 2);
+                if (threadPoolSize <= 0) {
+                    actualThreadPoolSize = Math.max(8, cpuCores * 2);
+                }
 
                 log.info("총 {} 개 파일 병렬 분석 예정 (스레드 풀: {}개, CPU코어: {}개)",
-                    fileList.size(), threadPoolSize, cpuCores);
+                    fileList.size(), actualThreadPoolSize, cpuCores);
                 log.info("=".repeat(60));
 
-                // 병렬 처리용 스레드 풀 (동적 크기)
-                java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadPoolSize);
+                // 병렬 처리용 스레드 풀
+                java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(actualThreadPoolSize);
                 java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(fileList.size());
 
                 for (int i = 0; i < fileList.size(); i++) {
