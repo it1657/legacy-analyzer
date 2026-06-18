@@ -91,7 +91,12 @@ public class ClaudeServiceImpl implements ClaudeService {
                 규칙: 기존 주석 100% 보존, 새 주석은 하단/옆에 추가
                 언어별: Java(/,/**), JS(//), JSX({/**/}), XML(<!---->)
 
-                응답: JSON만 ([{"lineNumber": N, "comment": "..."}])""";
+                응답: 반드시 JSON 배열 형식으로만 응답. 각 객체는 반드시 lineNumber와 comment를 포함:
+                [
+                  {"lineNumber": 1, "comment": "주석 내용"},
+                  {"lineNumber": 5, "comment": "주석 내용"}
+                ]
+                주의: 마크다운 또는 다른 형식은 절대 금지. JSON만 반환.""";
 
         if (!mdFile.exists() || mdFile.length() == 0) {
             try {
@@ -132,65 +137,57 @@ public class ClaudeServiceImpl implements ClaudeService {
      * 예: "lineNumber": N, "comment": "..." → {"lineNumber": N, "comment": "..."}
      */
     private String repairJsonArray(String jsonStr) {
-        StringBuilder repaired = new StringBuilder();
-        boolean inQuotes = false;
-        boolean inObject = false;
-        char prevChar = ' ';
+        try {
+            // 배열 경계 추출: [ 와 ] 사이의 내용만 처리
+            int startIdx = jsonStr.indexOf('[');
+            int endIdx = jsonStr.lastIndexOf(']');
 
-        for (int i = 0; i < jsonStr.length(); i++) {
-            char c = jsonStr.charAt(i);
-
-            // 문자열 내부 따옴표 추적
-            if (c == '"' && prevChar != '\\') {
-                inQuotes = !inQuotes;
+            if (startIdx == -1 || endIdx == -1 || startIdx >= endIdx) {
+                log.warn("[JSON 복구] 배열 경계를 찾을 수 없음. 원본 반환");
+                return jsonStr;
             }
 
-            // 문자열 밖에서만 처리
-            if (!inQuotes) {
-                // { 만나면 객체 시작
-                if (c == '{') {
-                    inObject = true;
-                    repaired.append(c);
-                }
-                // } 만나면 객체 종료
-                else if (c == '}') {
-                    inObject = false;
-                    repaired.append(c);
-                }
-                // [ 또는 ] 그대로 유지
-                else if (c == '[' || c == ']') {
-                    repaired.append(c);
-                }
-                // , } [ ] 이후 "lineNumber"를 만나면 앞에 {를 추가
-                else if (c == '"' && i + 10 < jsonStr.length() &&
-                         jsonStr.substring(i, i + 11).equals("\"lineNumber\"")) {
-                    if (!inObject && (prevChar == ',' || prevChar == '[' || Character.isWhitespace(prevChar))) {
-                        repaired.append('{');
-                    }
-                    repaired.append(c);
-                    inObject = true;
-                }
-                // , 앞에 빠진 } 추가
-                else if (c == ',' && inObject) {
-                    repaired.append('}').append(c);
-                    inObject = false;
-                }
-                else {
-                    repaired.append(c);
-                }
-            } else {
-                repaired.append(c);
+            String content = jsonStr.substring(startIdx + 1, endIdx).trim();
+            if (content.isEmpty()) {
+                return "[]";
             }
 
-            prevChar = c;
-        }
+            // 정규식으로 lineNumber와 comment 쌍 추출
+            List<Map<String, Object>> items = new ArrayList<>();
 
-        // 마지막에 열린 객체 닫기
-        if (inObject) {
-            repaired.append('}');
-        }
+            // 패턴: "lineNumber": N 또는 lineNumber: N 을 찾고, 그 다음의 comment를 찾음
+            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "\"?lineNumber\"?\\s*:\\s*(\\d+)[^}]*?\"?comment\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*?)\"",
+                java.util.regex.Pattern.DOTALL
+            );
+            java.util.regex.Matcher matcher = pattern.matcher(content);
 
-        return repaired.toString();
+            while (matcher.find()) {
+                int lineNumber = Integer.parseInt(matcher.group(1));
+                String comment = matcher.group(2);
+                // 이스케이프된 문자 처리
+                comment = comment.replace("\\\"", "\"");
+
+                Map<String, Object> item = new HashMap<>();
+                item.put("lineNumber", lineNumber);
+                item.put("comment", comment);
+                items.add(item);
+            }
+
+            if (items.isEmpty()) {
+                log.warn("[JSON 복구] 패턴과 일치하는 항목 없음. 원본: {}", content.substring(0, Math.min(100, content.length())));
+                return jsonStr;
+            }
+
+            // ObjectMapper를 사용하여 JSON 배열 재생성
+            String result = mapper.writeValueAsString(items);
+            log.debug("[JSON 복구 성공] 추출된 항목 수: {}", items.size());
+            return result;
+
+        } catch (Exception e) {
+            log.error("[JSON 복구 실패] 에러: {}", e.getMessage());
+            return jsonStr;
+        }
     }
 
     /**
