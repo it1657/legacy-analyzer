@@ -1142,9 +1142,30 @@ public class MainApiController {
                 java.util.concurrent.atomic.AtomicInteger alreadyProcessedCount = new java.util.concurrent.atomic.AtomicInteger(0);
                 java.util.concurrent.atomic.AtomicInteger processedTotal = new java.util.concurrent.atomic.AtomicInteger(0);
 
+                // 단계 전환: 복사 → 분석 (프론트와 백엔드 모두에 명확히 표시)
+                log.info("");
+                log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                log.info("[시스템] ✓ 파일 복사 완료! 이제 AI 분석 단계를 시작합니다.");
+                log.info("[시스템] 파일 분석 중... {}개 파일 병렬 처리 준비 중", fileList.size());
+                log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+                // 프론트엔드에 단계 전환 신호 전송
+                Map<String, Object> stageTransition = new HashMap<>();
+                stageTransition.put("status", "PROCESSING");
+                stageTransition.put("stage", "ANALYSIS_START");
+                stageTransition.put("logMessage", "[시스템] ✓ 파일 복사 완료! 이제 AI 분석을 시작합니다.\n");
+                stageTransition.put("processedCount", 0);
+                stageTransition.put("totalCount", fileList.size());
+                try {
+                    sendSseEvent(emitter, "progress", stageTransition);
+                    log.info("[SSE] 분석 단계 시작 신호 전송 완료");
+                } catch (Exception e) {
+                    log.warn("[SSE] 분석 단계 신호 전송 실패: {}", e.getMessage());
+                }
+
                 // 분석 단계 시작 로그 (터미널에서 명확하게 보임)
                 log.info("");
-                log.info("========== 【분석 단계 시작】파일 분석 진행 중... ==========");
+                log.info("========== 【분석 단계 시작】AI 분석 중... ==========");
 
                 // 스레드 풀 크기 결정 (0 = CPU 기반 동적, 0이 아니면 고정값)
                 int actualThreadPoolSize = threadPoolSize;
@@ -1225,6 +1246,25 @@ public class MainApiController {
                 AnalysisHistory finalHistory = history;
 
                 try {
+                    // 단계 전환: 분석 → 최종화 (프론트와 백엔드 모두에 명확히 표시)
+                    log.info("");
+                    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    log.info("[시스템] ✓ AI 분석 완료! 이제 최종 보고서를 생성합니다.");
+                    log.info("[시스템] 분석 결과 정리 중...");
+                    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+                    // 프론트엔드에 단계 전환 신호 전송
+                    Map<String, Object> finalizationTransition = new HashMap<>();
+                    finalizationTransition.put("status", "PROCESSING");
+                    finalizationTransition.put("stage", "FINALIZATION_START");
+                    finalizationTransition.put("logMessage", "[시스템] ✓ AI 분석 완료! 최종 보고서를 생성합니다.\n");
+                    try {
+                        sendSseEvent(emitter, "progress", finalizationTransition);
+                        log.info("[SSE] 최종화 단계 시작 신호 전송 완료");
+                    } catch (Exception e) {
+                        log.warn("[SSE] 최종화 단계 신호 전송 실패: {}", e.getMessage());
+                    }
+
                     // 분석 완료 요약 로그
                     log.info("");
                     log.info("========== 【분석 완료】모든 파일 분석이 완료되었습니다! ==========");
