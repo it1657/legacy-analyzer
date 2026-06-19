@@ -8,7 +8,9 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import reactor.core.publisher.Mono;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.InputStream;
@@ -34,6 +36,17 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Value("${anthropic.api.model}")
     private String apiModel;
+
+    // 런타임 모델 오버라이드 (선택한 모델이 있으면 우선 사용)
+    private volatile String modelOverride = null;
+
+    // 지원 모델 목록과 표시명
+    public static final Map<String, String> SUPPORTED_MODELS = new java.util.LinkedHashMap<>();
+    static {
+        SUPPORTED_MODELS.put("claude-sonnet-4-6", "Claude Sonnet ($3/$15 per 1M)");
+        SUPPORTED_MODELS.put("claude-opus-4-8", "Claude Opus ($15/$75 per 1M)");
+        SUPPORTED_MODELS.put("claude-haiku-4-5-20251001", "Claude Haiku ($0.80/$4 per 1M)");
+    }
 
     @Value("${anthropic.api.max-tokens:4000}")
     private int apiMaxTokens;
@@ -68,7 +81,22 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Override
     public String getCurrentModel() {
-        return apiModel;
+        return modelOverride != null ? modelOverride : apiModel;
+    }
+
+    @Override
+    public void setModel(String model) {
+        if (model == null || model.isBlank()) {
+            this.modelOverride = null;
+            return;
+        }
+        // 유효 모델만 허용
+        if (SUPPORTED_MODELS.containsKey(model)) {
+            this.modelOverride = model;
+            log.info("[모델 변경] 선택된 모델: {}", model);
+        } else {
+            log.warn("[모델 변경 실패] 지원하지 않는 모델: {} - 기본값 유지", model);
+        }
     }
 
     /**
@@ -297,58 +325,22 @@ public class ClaudeServiceImpl implements ClaudeService {
             (apiKey == null ? "NULL" : (apiKey.isEmpty() ? "EMPTY" : "설정됨(" + apiKey.length() + "자)")),
             apiKey == null || apiKey.trim().isEmpty());
 
-        // ===================================================================
-        // [정밀 수정 구간]: 산출물 자동화 시스템 전용 README.md 다이렉트 패스
-        // ===================================================================
-        if ("README.md".equalsIgnoreCase(fileName)) {
-            String dynamicProjectName = "레거시";
-            try {
-                if (sourceFolderPath != null && !sourceFolderPath.trim().isEmpty()) {
-                    java.io.File directory = new java.io.File(sourceFolderPath);
-                    String folderName = directory.getName();
-
-                    if (!folderName.trim().isEmpty()) {
-                        dynamicProjectName = folderName.toUpperCase(); // 대문자로 변환
-                    }
-                }
-            } catch (Exception e) {
-                log.error("README 프로젝트 이름 동적 파싱 실패", e);
-                dynamicProjectName = "레거시";
+        // README.md: Claude AI로 실제 프로젝트 분석 보고서 생성
+        if ("README.md".equalsIgnoreCase(fileName) || "README_AI_SUMMARY.md".equalsIgnoreCase(fileName)) {
+            if (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty()) {
+                throw new AnalysisException(ApiErrorHandler.ErrorType.API_AUTHENTICATION,
+                    new RuntimeException("Claude API KEY가 설정되지 않았습니다. application.properties를 확인하세요."));
             }
-
-            return "# 프로젝트 기술 인수인계서 (System Operations Guide)\n\n" +
-                    "## 1. 시스템 개요 및 목적 (System Overview)\n" +
-                    "- **프로젝트명**: " + dynamicProjectName + " 레거시 시스템 전환 및 품질 보완 프로젝트\n" +
-                    "- **인도 목적**: 바쁜 일정 속 개발자 주석 작성 부담 경감 및 철수 시 후임자 아키텍처 파악 비용 최소화\n" +
-                    "- **인수 대상 소스 루트**: `" + sourceFolderPath + "`\n\n" +
-                    "## 2. 전체 프로젝트 디렉터리 아키텍처 (Project Directory Structure)\n" +
-                    "본 프로젝트의 정적 자산 및 하위 패키지 계층 구조를 완전히 추적 분석한 소스 트리 명세입니다.\n" +
-                    "후임자는 아래 소스 자산 인덱스를 기반으로 컴포넌트의 유기적 흐름을 추적하십시오.\n\n" +
-                    "### [자동 스캔된 파일 자산 인덱스]\n" +
-                    sourceCode + "\n" +
-                    "## 3. 개발 환경 및 빌드 가이드 (Development Environment & Build)\n" +
-                    "- **기본 빌드 도구**: Apache Maven / Gradle 규격 준수 (pom.xml 사양서 참조)\n" +
-                    "- **인코딩 세이프 가드**: 레거시 파일의 특성인 UTF-8 및 MS949(EUC-KR) 다중 인코딩 자동 교정 완료\n" +
-                    "- **빌드 절차**:\n" +
-                    "  1. 본 프로젝트의 종속성 외부 라이브러리 라이프사이클을 빌드 툴로 로드하십시오.\n" +
-                    "  2. 형상관리 시스템 배포 시 본 문서의 정합성 지표를 확인하십시오.\n\n" +
-                    "## 4. 주석 품질 정책 및 유지보수 규칙 (Compliance & Quality)\n" +
-                    "- 본 프로젝트 하위의 모든 핵심 컴포넌트는 Claude AI를 통해 확장자별 맞춤형 한글 주석(Java: //, XML/HTML: <!-- -->, Python: #) 보완 공정을 거쳤습니다.\n" +
-                    "- **선배 개발자 주석 보존**: 기존 소스 내부에 작성되어 있던 레거시 주석문은 100% 보존 조치되어 로직 추적이 용이합니다.\n" +
-                    "- **로직 무결성**: 실행 구조, 변수명, 비즈니스 알고리즘은 단 한 글자도 변형되지 않은 안전 자산입니다.\n\n" +
-                    "## 5. 시스템 인도 정보 (System Transfer Sign-off)\n" +
-                    "- **최종 패치 일자**: " + new java.util.Date() + "\n" +
-                    "- **시스템 인도 책임자**: 개발팀 **홍길동** (인수자 승인 시 즉시 형상 인계 가능)\n\n" +
-                    "---\n" +
-                    "*본 기술 문서는 [산출물 자동화 시스템 v5.5] 엔진에 의해 정적 코드 구조 분석 결과로 실시간 자동 발행되었습니다.*";
+            return generateProjectReadmeWithClaude(sourceCode, sourceFolderPath);
         }
-        // ===================================================================
 
         String customSpecData = loadCustomSpec(extension);
 
         if (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty()) {
-            String mockJsonResponse = generateMockResponse(fileName, extension);
-            return mergeCommentsIntoCode(sourceCode, mockJsonResponse, extension);
+            // API KEY 미설정 시 파일을 수정하지 않고 예외 발생 (원본 보호)
+            log.warn("[API KEY 미설정] 파일 처리 건너뜀: {}", fileName);
+            throw new AnalysisException(ApiErrorHandler.ErrorType.API_AUTHENTICATION,
+                new RuntimeException("Claude API KEY가 설정되지 않았습니다. application.properties를 확인하세요."));
         }
 
         WebClient webClient = WebClient.builder()
@@ -367,7 +359,7 @@ public class ClaudeServiceImpl implements ClaudeService {
                 .replace("${customSpecData}", customSpecData);
 
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", apiModel);
+        requestBody.put("model", getCurrentModel());
         requestBody.put("max_tokens", apiMaxTokens);
         requestBody.put("system", finalSystemPrompt);
 
@@ -393,6 +385,20 @@ public class ClaudeServiceImpl implements ClaudeService {
                         .header("anthropic-version", "2023-06-01")
                         .bodyValue(requestBody)
                         .retrieve()
+                        .onStatus(
+                            status -> !status.is2xxSuccessful(),
+                            clientResponse -> clientResponse.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .flatMap(body -> {
+                                    int statusCode = clientResponse.statusCode().value();
+                                    String msg = String.format("Claude API %d 오류: %s", statusCode,
+                                        body.isEmpty() ? "응답 없음" : body.substring(0, Math.min(300, body.length())));
+                                    log.error("[Claude API 응답 오류] {}", msg);
+                                    return Mono.error(new WebClientResponseException(
+                                        statusCode, msg,
+                                        clientResponse.headers().asHttpHeaders(), null, null));
+                                })
+                        )
                         .bodyToMono(Map.class)
                         .block();
 
@@ -411,31 +417,31 @@ public class ClaudeServiceImpl implements ClaudeService {
                 }
                 throw new RuntimeException("AI 응답 바디 구조 파싱 예외 공정 발생");
 
+            } catch (AnalysisException ae) {
+                // 이미 분류된 예외는 그대로 재발생
+                throw ae;
             } catch (Exception e) {
-                // 모든 예외에 대해 로깅
-                log.error("[예외 발생] 예외 타입: {}, 메시지: {}", e.getClass().getSimpleName(), e.getMessage());
-
-                // 400/401 오류인 경우 응답 바디 로깅 (디버깅용)
-                if (e instanceof org.springframework.web.reactive.function.client.WebClientResponseException) {
-                    org.springframework.web.reactive.function.client.WebClientResponseException wce =
-                        (org.springframework.web.reactive.function.client.WebClientResponseException) e;
+                // HTTP 상태 코드 추출 (WebClientResponseException인 경우)
+                int httpStatus = 0;
+                if (e instanceof WebClientResponseException wce) {
+                    httpStatus = wce.getStatusCode().value();
                     try {
-                        String responseBody = wce.getResponseBodyAsString();
-                        log.error("[API 응답 상세] statusCode={}, body={}", wce.getStatusCode(), responseBody);
-                    } catch (Exception bodyEx) {
-                        log.error("[API 응답 상세] statusCode={}, 바디 접근 실패: {}", wce.getStatusCode(), bodyEx.getMessage());
-                    }
+                        log.error("[API 응답 상세] statusCode={}, body={}",
+                            httpStatus, wce.getResponseBodyAsString());
+                    } catch (Exception ignored) {}
                 }
+                log.error("[예외 발생] 예외 타입: {}, HTTP상태: {}, 메시지: {}",
+                    e.getClass().getSimpleName(), httpStatus, e.getMessage());
 
-                // 에러 분류
-                ApiErrorHandler.ErrorType errorType = apiErrorHandler.classifyError(e, 0);
+                // 에러 분류 (HTTP 상태 코드 반영)
+                ApiErrorHandler.ErrorType errorType = apiErrorHandler.classifyError(e, httpStatus);
 
-                // 재시도 불가능한 에러는 즉시 반환
+                // 재시도 불가능한 에러는 즉시 예외 발생 (파일에 오류 텍스트 기록 방지)
                 if (!apiErrorHandler.isRetryable(errorType)) {
                     String userMsg = apiErrorHandler.getUserFriendlyMessage(errorType, fileName);
                     apiErrorHandler.logError(errorType, fileName, e, retry, false);
-                    log.error("[비복구 오류] {}", userMsg);
-                    return "/* [비복구 오류 발생 - " + errorType.name() + "]: " + e.getMessage() + " */\n" + sourceCode;
+                    log.error("[비복구 오류 - 파일 처리 중단] {}", userMsg);
+                    throw new AnalysisException(errorType, e);
                 }
 
                 // 재시도 대기 시간 계산
@@ -452,20 +458,127 @@ public class ClaudeServiceImpl implements ClaudeService {
                         Thread.sleep(retryDelay);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        break;
+                        throw new AnalysisException(ApiErrorHandler.ErrorType.UNKNOWN_ERROR, ie);
                     }
                 } else {
-                    // 최종 재시도 실패
+                    // 최종 재시도 실패 - 예외 발생 (파일에 오류 텍스트 기록 방지)
                     String userMsg = apiErrorHandler.getUserFriendlyMessage(errorType, fileName);
                     apiErrorHandler.logError(errorType, fileName, e, maxRetries, false);
-                    log.error("[최대 재시도 초과] {} | 파일: {}", userMsg, fileName);
-                    return String.format("/* [API 통신 장애 발생 - 최대 재시도 초과 (%d/%d): %s] */\n",
-                        retry + 1, maxRetries, e.getMessage()) + sourceCode;
+                    log.error("[최대 재시도 초과 - 파일 처리 중단] {} | 파일: {}", userMsg, fileName);
+                    throw new AnalysisException(errorType, e);
                 }
             }
         }
 
-        return "/* [오류] 시스템 미확인 런타임 통제 불능 에러 */\n" + sourceCode;
+        throw new AnalysisException(ApiErrorHandler.ErrorType.UNKNOWN_ERROR,
+            new RuntimeException("알 수 없는 런타임 오류: 재시도 루프 이탈"));
+    }
+
+    /**
+     * Claude AI로 프로젝트 패키지 구조를 분석하여 고객 납품용 기술 인수인계 README를 생성한다.
+     * 응답은 마크다운 텍스트로 직접 반환 (JSON 주석 배열 아님).
+     */
+    private String generateProjectReadmeWithClaude(String projectStructure, String sourceFolderPath) {
+        String projectName = "레거시 프로젝트";
+        try {
+            if (sourceFolderPath != null && !sourceFolderPath.isBlank()) {
+                java.io.File dir = new java.io.File(sourceFolderPath);
+                if (!dir.getName().isBlank()) projectName = dir.getName();
+            }
+        } catch (Exception ignored) {}
+
+        String systemPrompt =
+            "당신은 레거시 소프트웨어 시스템을 분석하는 시니어 SW 아키텍트입니다.\n" +
+            "주어진 프로젝트 패키지 구조와 파일 목록을 분석하여 고객 납품용 기술 인수인계 문서를 작성하세요.\n\n" +
+            "## 분석 원칙\n" +
+            "- 패키지명(auth, order, payment, user, product 등)에서 비즈니스 도메인을 적극적으로 유추\n" +
+            "- Controller/Service/Repository/Entity 레이어 패턴을 파악하여 아키텍처 설명\n" +
+            "- 파일명에서 처리하는 업무(주문, 결제, 인증, 재고 등)를 구체적으로 서술\n" +
+            "- 후임 개발자가 3시간 안에 시스템 전체 구조를 파악할 수 있도록 작성\n" +
+            "- 추측이 필요한 경우 '파일명 기준 유추'임을 명시\n\n" +
+            "## 필수 출력 형식 (## 헤더 사용, 서브섹션은 ### 사용)\n" +
+            "## 시스템 개요\n" +
+            "## 아키텍처 구조\n" +
+            "## 패키지별 기능 설명\n" +
+            "## 주요 컴포넌트 및 역할\n" +
+            "## 기술 스택 (파일 목록 기반 유추)\n" +
+            "## 인수인계 주요 체크리스트\n\n" +
+            "마크다운만 출력하고, 서두/인사말/추가 설명은 절대 작성하지 마세요.";
+
+        String userContent = "프로젝트명: " + projectName + "\n\n" + projectStructure;
+
+        WebClient readmeWebClient = WebClient.builder()
+            .baseUrl(apiUrl)
+            .defaultHeader("x-api-key", apiKey)
+            .defaultHeader("anthropic-version", "2023-06-01")
+            .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+            .build();
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", getCurrentModel());
+        requestBody.put("max_tokens", 4096);
+        requestBody.put("system", systemPrompt);
+
+        Map<String, String> userMsg = new HashMap<>();
+        userMsg.put("role", "user");
+        userMsg.put("content", userContent);
+        requestBody.put("messages", Collections.singletonList(userMsg));
+
+        try {
+            Map<?, ?> response = readmeWebClient.post()
+                .uri("/v1/messages")
+                .header("anthropic-version", "2023-06-01")
+                .bodyValue(requestBody)
+                .retrieve()
+                .onStatus(status -> !status.is2xxSuccessful(),
+                    cr -> cr.bodyToMono(String.class).defaultIfEmpty("")
+                        .flatMap(body -> Mono.error(new RuntimeException("README API 오류: " + body))))
+                .bodyToMono(Map.class)
+                .block();
+
+            if (response != null && response.containsKey("content")) {
+                List<?> contentList = (List<?>) response.get("content");
+                if (contentList != null && !contentList.isEmpty()) {
+                    Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
+                    String readmeText = String.valueOf(contentMap.get("text"));
+                    extractAndStoreTokenUsage(response);
+                    log.info("[README 생성 완료] 프로젝트: {}, 길이: {}자", projectName, readmeText.length());
+                    return readmeText;
+                }
+            }
+            log.warn("[README API 응답 파싱 실패] 구조 기반 폴백 사용");
+        } catch (Exception e) {
+            log.warn("[README API 호출 실패, 폴백 사용] {}", e.getMessage());
+        }
+        // API 실패 시 패키지 구조 기반 폴백 README 생성
+        return buildFallbackReadme(projectName, projectStructure);
+    }
+
+    /** API 호출 실패 시 패키지 구조 데이터로 기본 README 생성 */
+    private String buildFallbackReadme(String projectName, String projectStructure) {
+        return "## 시스템 개요\n\n" +
+            "**프로젝트명**: " + projectName + "\n\n" +
+            "본 문서는 레거시 코드 자동 분석 시스템이 수집한 프로젝트 구조 정보를 기반으로 생성된 기술 인수인계 문서입니다.\n" +
+            "(AI 분석 생성 실패 — 아래 구조 정보를 참고하세요)\n\n" +
+            "## 아키텍처 구조\n\n" +
+            "소스 파일 목록 기반으로 파악된 레이어 구조입니다.\n" +
+            "Controller / Service / Repository 패턴이 적용된 경우 각 레이어의 역할을 확인하세요.\n\n" +
+            "## 패키지별 기능 설명\n\n" +
+            projectStructure + "\n\n" +
+            "## 주요 컴포넌트 및 역할\n\n" +
+            "위 패키지 구조의 파일명을 기준으로 각 컴포넌트의 역할을 파악하세요.\n" +
+            "- `*Controller.java` : REST API 엔드포인트 (요청 수신 및 응답 처리)\n" +
+            "- `*Service.java` : 비즈니스 로직 처리\n" +
+            "- `*Repository.java` : 데이터베이스 접근 (CRUD)\n" +
+            "- `*Entity.java` / `*DTO.java` : 데이터 모델\n\n" +
+            "## 기술 스택 (파일 목록 기반 유추)\n\n" +
+            "파일 확장자 및 설정 파일 기반으로 기술 스택을 확인하세요.\n\n" +
+            "## 인수인계 주요 체크리스트\n\n" +
+            "- [ ] 소스 코드 전체 구조 파악 (위 패키지 구조 참조)\n" +
+            "- [ ] 빌드 도구 및 의존성 확인 (pom.xml / build.gradle)\n" +
+            "- [ ] 데이터베이스 연결 설정 확인 (application.properties)\n" +
+            "- [ ] 주요 비즈니스 로직 흐름 파악 (Service 계층 중심)\n" +
+            "- [ ] 외부 API 및 연동 시스템 목록 확인\n";
     }
 
     /**

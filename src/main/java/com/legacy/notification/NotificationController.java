@@ -38,10 +38,10 @@ public class NotificationController {
 
       if (unreadOnly) {
         notifications = notificationRepository
-            .findByUserIdAndIsReadFalseOrderByCreatedAtDesc(user.getId());
+            .findByUserIdAndIsReadFalseOrderByCreatedAtDesc(user.getSeq());
       } else {
         notifications = notificationRepository
-            .findByUserIdOrderByCreatedAtDesc(user.getId());
+            .findByUserIdOrderByCreatedAtDesc(user.getSeq());
       }
 
       List<Map<String, Object>> response = notifications.stream()
@@ -62,7 +62,7 @@ public class NotificationController {
   public ResponseEntity<?> getUnreadCount(Authentication authentication) {
     try {
       User user = (User) authentication.getPrincipal();
-      long unreadCount = notificationRepository.countUnreadNotifications(user.getId());
+      long unreadCount = notificationRepository.countUnreadNotifications(user.getSeq());
 
       Map<String, Object> response = new HashMap<>();
       response.put("unreadCount", unreadCount);
@@ -96,7 +96,7 @@ public class NotificationController {
   public ResponseEntity<?> markAllAsRead(Authentication authentication) {
     try {
       User user = (User) authentication.getPrincipal();
-      notificationService.markAllAsRead(user.getId());
+      notificationService.markAllAsRead(user.getSeq());
 
       return ResponseEntity.ok(Collections.singletonMap("message", "모든 알림이 읽음 처리되었습니다."));
     } catch (Exception e) {
@@ -127,7 +127,7 @@ public class NotificationController {
   public ResponseEntity<?> deleteAllNotifications(Authentication authentication) {
     try {
       User user = (User) authentication.getPrincipal();
-      notificationRepository.findByUserId(user.getId())
+      notificationRepository.findByUserId(user.getSeq())
           .forEach(notification -> notificationService.deleteNotification(notification.getId()));
 
       return ResponseEntity.ok(Collections.singletonMap("message", "모든 알림이 삭제되었습니다."));

@@ -4,7 +4,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -14,8 +13,8 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 @Configuration
 @EnableWebSecurity
@@ -61,10 +60,8 @@ public class SecurityConfig {
             // 공개 엔드포인트
             .requestMatchers("/", "/auth/login", "/h2-console/**").permitAll()
             .requestMatchers("/css/**", "/js/**", "/images/**").permitAll()
-            // 관리자 페이지는 permitAll (클라이언트에서 토큰 검증)
-            .requestMatchers("/admin/**").permitAll()
-            // SSE 엔드포인트는 permitAll (토큰은 쿼리 파라미터로 전달, 메서드 내 검증)
-            .requestMatchers("/api/analyze-folder-stream").permitAll()
+            // 관리자/사용자 페이지는 permitAll (클라이언트에서 토큰 검증)
+            .requestMatchers("/admin/**", "/my-activity").permitAll()
             // API는 역할별 보호
             .requestMatchers("/api/admin/**").hasRole("ADMIN")
             // API는 인증 필수

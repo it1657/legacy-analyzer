@@ -239,6 +239,15 @@
             background-color: #c0392b;
         }
 
+        .btn-ppt {
+            background-color: #e67e22;
+            color: white;
+        }
+
+        .btn-ppt:hover {
+            background-color: #d35400;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -400,8 +409,8 @@
                 <span>분석 이력</span>
             </div>
             <div class="nav-item" onclick="switchSection('api-usage', this)">
-                <span class="nav-icon">📈</span>
-                <span>API 사용량</span>
+                <span class="nav-icon">🗒️</span>
+                <span>API 요청 통계</span>
             </div>
             <div class="nav-item" onclick="switchSection('statistics', this)">
                 <span class="nav-icon">📊</span>
@@ -410,6 +419,10 @@
             <div class="nav-item" onclick="switchSection('audit-logs', this)">
                 <span class="nav-icon">📋</span>
                 <span>감사 로그</span>
+            </div>
+            <div class="nav-item" onclick="switchSection('my-activity', this)">
+                <span class="nav-icon">👤</span>
+                <span>내 활동</span>
             </div>
         </div>
 
@@ -452,6 +465,7 @@
                         <thead>
                             <tr>
                                 <th>사용자명</th>
+                                <th>로그인 ID</th>
                                 <th>이메일</th>
                                 <th>역할</th>
                                 <th>상태</th>
@@ -461,7 +475,7 @@
                         </thead>
                         <tbody id="usersList">
                             <tr>
-                                <td colspan="6" class="no-data">사용자 정보를 로드 중입니다...</td>
+                                <td colspan="7" class="no-data">사용자 정보를 로드 중입니다...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -484,21 +498,23 @@
                                 <th>성공</th>
                                 <th>상태</th>
                                 <th>분석 시간</th>
+                                <th>다운로드</th>
                             </tr>
                         </thead>
                         <tbody id="historyList">
                             <tr>
-                                <td colspan="6" class="no-data">분석 이력을 로드 중입니다...</td>
+                                <td colspan="7" class="no-data">분석 이력을 로드 중입니다...</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
             </div>
 
-            <!-- API 사용량 섹션 -->
+            <!-- API 요청 통계 섹션 (HTTP 요청 추적) -->
             <div id="api-usage" class="content-section">
                 <div class="page-header">
-                    <h1 class="page-title">API 사용량</h1>
+                    <h1 class="page-title">API 요청 통계</h1>
+                    <p style="color:#888; font-size:13px; margin-top:4px;">사용자별 API 엔드포인트 호출 이력</p>
                 </div>
                 <div id="apiUsageAlert" class="alert"></div>
                 <div class="table-container">
@@ -515,7 +531,7 @@
                         </thead>
                         <tbody id="apiUsageList">
                             <tr>
-                                <td colspan="6" class="no-data">API 사용량을 로드 중입니다...</td>
+                                <td colspan="6" class="no-data">감사 로그를 로드 중입니다...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -630,6 +646,68 @@
                     </table>
                 </div>
             </div>
+
+            <!-- 내 활동 섹션 (관리자 본인의 분석 이력 & 토큰 사용량) -->
+            <div id="my-activity" class="content-section">
+                <div class="page-header">
+                    <h1 class="page-title">내 활동</h1>
+                </div>
+
+                <!-- 탭 -->
+                <div style="display:flex; gap:0; border-bottom:2px solid #e0e0e0; margin-bottom:1.5rem;">
+                    <div id="myTab-history" onclick="switchMyTab('history')"
+                        style="padding:0.6rem 1.4rem; cursor:pointer; font-weight:600; color:#667eea; border-bottom:3px solid #667eea; margin-bottom:-2px;">
+                        📜 내 분석 이력
+                    </div>
+                    <div id="myTab-token" onclick="switchMyTab('token')"
+                        style="padding:0.6rem 1.4rem; cursor:pointer; font-weight:600; color:#999; border-bottom:3px solid transparent; margin-bottom:-2px;">
+                        🤖 Claude 토큰 사용량
+                    </div>
+                </div>
+
+                <!-- 내 분석 이력 탭 -->
+                <div id="myPane-history">
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:1rem; margin-bottom:1.5rem;">
+                        <div class="stat-card"><div class="stat-label">총 분석 횟수</div><div class="stat-value" id="my_sumTotal">-</div></div>
+                        <div class="stat-card"><div class="stat-label">완료</div><div class="stat-value" id="my_sumCompleted">-</div></div>
+                        <div class="stat-card"><div class="stat-label">총 처리 파일</div><div class="stat-value" id="my_sumFiles">-</div></div>
+                        <div class="stat-card"><div class="stat-label">총 추정 비용(USD)</div><div class="stat-value" id="my_sumCost">-</div></div>
+                    </div>
+                    <div class="table-container">
+                        <table class="table">
+                            <thead><tr>
+                                <th>프로젝트</th><th>총 파일</th><th>성공</th><th>실패</th>
+                                <th>모델</th><th>소요시간</th><th>비용(USD)</th><th>상태</th><th>분석 일시</th><th>다운로드</th>
+                            </tr></thead>
+                            <tbody id="my_historyList">
+                                <tr><td colspan="10" class="no-data">불러오는 중...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Claude 토큰 사용량 탭 -->
+                <div id="myPane-token" style="display:none;">
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:1rem; margin-bottom:1.5rem;">
+                        <div class="stat-card"><div class="stat-label">총 분석 횟수</div><div class="stat-value" id="my_tokenRuns">-</div></div>
+                        <div class="stat-card"><div class="stat-label">총 입력 토큰</div><div class="stat-value" id="my_tokenIn">-</div></div>
+                        <div class="stat-card"><div class="stat-label">총 출력 토큰</div><div class="stat-value" id="my_tokenOut">-</div></div>
+                        <div class="stat-card"><div class="stat-label">총 추정 비용(USD)</div><div class="stat-value" id="my_tokenCost">-</div></div>
+                    </div>
+                    <div class="table-container">
+                        <table class="table">
+                            <thead><tr>
+                                <th>사용자</th><th>프로젝트</th><th>모델</th><th>입력 토큰</th>
+                                <th>출력 토큰</th><th>총 토큰</th><th>추정 비용(USD)</th><th>분석 일시</th>
+                            </tr></thead>
+                            <tbody id="my_tokenList">
+                                <tr><td colspan="8" class="no-data">불러오는 중...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -640,8 +718,12 @@
             <div id="modalAlert" class="alert"></div>
             <form id="userForm" onsubmit="saveUser(event)">
                 <div class="form-group">
-                    <label for="username">사용자명</label>
-                    <input type="text" id="username" required placeholder="사용자명">
+                    <label for="displayName">사용자명 <span style="color:#999;font-size:12px;">(표시 이름)</span></label>
+                    <input type="text" id="displayName" required placeholder="홍길동">
+                </div>
+                <div class="form-group">
+                    <label for="newUserId">로그인 ID</label>
+                    <input type="text" id="newUserId" required placeholder="로그인에 사용할 고유 ID">
                 </div>
                 <div class="form-group">
                     <label for="email">이메일</label>
@@ -669,7 +751,7 @@
     <script>
         // 토큰 및 사용자 정보
         let token = localStorage.getItem('token');
-        let currentUsername = localStorage.getItem('username');
+        let currentUsername = localStorage.getItem('userId');
 
         // 페이지 로드
         window.addEventListener('load', () => {
@@ -708,6 +790,8 @@
                 loadStatistics();
             } else if (sectionId === 'audit-logs') {
                 loadAuditLogs();
+            } else if (sectionId === 'my-activity') {
+                loadMyActivity();
             }
         }
 
@@ -756,7 +840,8 @@
 
             tbody.innerHTML = users.map(user => `
                 <tr>
-                    <td>${user.username}</td>
+                    <td><strong>${user.displayName || user.userId}</strong></td>
+                    <td style="color:#888; font-size:12px;">${user.userId}</td>
                     <td>${user.email}</td>
                     <td>${user.roles.join(', ')}</td>
                     <td>
@@ -766,10 +851,10 @@
                     </td>
                     <td>${new Date(user.createdAt).toLocaleDateString('ko-KR')}</td>
                     <td>
-                        <button class="btn-sm btn-edit" onclick="toggleUserStatus(${user.id}, ${!user.isActive})">
+                        <button class="btn-sm btn-edit" onclick="toggleUserStatus(${user.seq}, ${!user.isActive})">
                             ${user.isActive ? '비활성화' : '활성화'}
                         </button>
-                        <button class="btn-sm btn-delete" onclick="deleteUser(${user.id})">삭제</button>
+                        <button class="btn-sm btn-delete" onclick="deleteUser(${user.seq})">삭제</button>
                     </td>
                 </tr>
             `).join('');
@@ -813,16 +898,31 @@
                 return;
             }
 
-            tbody.innerHTML = histories.map(h => `
+            tbody.innerHTML = histories.map(h => {
+                const projectName = h.sourcePath
+                    ? h.sourcePath.replace(/.*[/\\]/, '')
+                    : '-';
+                const statusClass = h.status === 'COMPLETED' ? 'badge-active' : 'badge-inactive';
+                const timeSec = h.processingTimeMs ? (h.processingTimeMs / 1000).toFixed(2) : '-';
+                const userLabel = h.displayName
+                    ? `${h.displayName} <span style="color:#aaa;font-size:11px;">(${h.userId})</span>`
+                    : (h.userId || '-');
+                return `
                 <tr>
-                    <td>사용자 ${h.userId}</td>
-                    <td>${h.sourcePath.substring(h.sourcePath.lastIndexOf('\\') + 1)}</td>
-                    <td>${h.totalFiles}</td>
-                    <td>${h.successCount}</td>
-                    <td><span class="badge badge-active">${h.status}</span></td>
-                    <td>${(h.processingTimeMs / 1000).toFixed(2)}초</td>
-                </tr>
-            `).join('');
+                    <td>${userLabel}</td>
+                    <td title="${h.sourcePath}">${projectName}</td>
+                    <td>${h.totalFiles ?? '-'}</td>
+                    <td>${h.successCount ?? '-'}</td>
+                    <td><span class="badge ${statusClass}">${h.status}</span></td>
+                    <td>${timeSec}초</td>
+                    <td>
+                        <button class="btn-sm btn-ppt" onclick="downloadPresentation(${h.id})"
+                            title="이 분석 결과를 PPT로 다운로드">
+                            📊 PPT
+                        </button>
+                    </td>
+                </tr>`;
+            }).join('');
         }
 
         // API 사용량 로드
@@ -863,7 +963,7 @@
 
                 return `
                     <tr>
-                        <td>${stat.username || '알 수 없음'}</td>
+                        <td>${stat.userId || '알 수 없음'}</td>
                         <td>${stat.email || '-'}</td>
                         <td>${stat.count || 0}</td>
                         <td>${requestKB}</td>
@@ -938,7 +1038,7 @@
 
             tbody.innerHTML = userStats.map(stat => `
                 <tr>
-                    <td>${stat.username || '-'}</td>
+                    <td>${stat.userId || '-'}</td>
                     <td>${stat.email || '-'}</td>
                     <td>${stat.totalAnalysis}</td>
                     <td>${(stat.successRate || 0).toFixed(1)}%</td>
@@ -1012,6 +1112,150 @@
             }).join('');
         }
 
+        // ── 내 활동 (관리자 본인 이력 + 전체 토큰 사용량) ──
+        let myActivityLoaded = false;
+
+        async function loadMyActivity() {
+            if (myActivityLoaded) return;
+            const token = localStorage.getItem('token');
+            try {
+                // 내 분석 이력: 본인 데이터
+                const myRes = await fetch('/api/my/analysis-history', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (myRes.ok) renderMyHistory(await myRes.json());
+                else document.getElementById('my_historyList').innerHTML =
+                    '<tr><td colspan="10" class="no-data">불러올 수 없습니다.</td></tr>';
+
+                // Claude 토큰 사용량: 전체 사용자 데이터 (관리자 권한)
+                const allRes = await fetch('/api/admin/analysis-history', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (allRes.ok) renderMyToken(await allRes.json());
+                else document.getElementById('my_tokenList').innerHTML =
+                    '<tr><td colspan="8" class="no-data">불러올 수 없습니다.</td></tr>';
+
+                myActivityLoaded = true;
+            } catch (e) {
+                console.error('[내 활동 로드 오류]', e);
+            }
+        }
+
+        function switchMyTab(tab) {
+            document.getElementById('myPane-history').style.display = tab === 'history' ? '' : 'none';
+            document.getElementById('myPane-token').style.display  = tab === 'token'   ? '' : 'none';
+            const hStyle = tab === 'history'
+                ? 'color:#667eea; border-bottom:3px solid #667eea;'
+                : 'color:#999; border-bottom:3px solid transparent;';
+            const tStyle = tab === 'token'
+                ? 'color:#667eea; border-bottom:3px solid #667eea;'
+                : 'color:#999; border-bottom:3px solid transparent;';
+            document.getElementById('myTab-history').style.cssText += hStyle;
+            document.getElementById('myTab-token').style.cssText  += tStyle;
+        }
+
+        function renderMyHistory(list) {
+            const total     = list.length;
+            const completed = list.filter(h => h.status === 'COMPLETED').length;
+            const files     = list.reduce((s, h) => s + (h.totalFiles || 0), 0);
+            const cost      = list.reduce((s, h) => s + (h.estimatedCost || 0), 0);
+            document.getElementById('my_sumTotal').textContent     = total;
+            document.getElementById('my_sumCompleted').textContent = completed;
+            document.getElementById('my_sumFiles').textContent     = files.toLocaleString();
+            document.getElementById('my_sumCost').textContent      = '$' + cost.toFixed(4);
+
+            const tbody = document.getElementById('my_historyList');
+            if (list.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="10" class="no-data">분석 이력이 없습니다.</td></tr>';
+                return;
+            }
+            const token = localStorage.getItem('token');
+            tbody.innerHTML = list.map(h => {
+                const project = h.sourcePath ? h.sourcePath.replace(/.*[/\\]/, '') : '-';
+                const timeSec = h.processingTimeMs ? (h.processingTimeMs / 1000).toFixed(1) + '초' : '-';
+                const cost    = h.estimatedCost != null ? '$' + h.estimatedCost.toFixed(4) : '-';
+                const model   = myShortModel(h.modelName);
+                const date    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
+                const stCls   = h.status === 'COMPLETED' ? 'badge-active' : 'badge-inactive';
+                const pptBtn  = h.status === 'COMPLETED'
+                    ? `<button class="btn-sm btn-primary" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📊 PPT</button>`
+                    : '-';
+                return `<tr>
+                    <td title="${h.sourcePath||''}">${project}</td>
+                    <td>${h.totalFiles??'-'}</td><td>${h.successCount??'-'}</td><td>${h.failureCount??'-'}</td>
+                    <td style="font-size:11px;">${model}</td><td>${timeSec}</td><td>${cost}</td>
+                    <td><span class="badge ${stCls}">${h.status}</span></td>
+                    <td style="font-size:11px;">${date}</td><td>${pptBtn}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        function renderMyToken(list) {
+            // 전체 사용자 중 COMPLETED이고 토큰 데이터가 있는 항목
+            const withTok  = list.filter(h => h.status === 'COMPLETED' && (h.inputTokens || h.outputTokens));
+            const runs     = withTok.length;
+            const totalIn  = withTok.reduce((s, h) => s + (h.inputTokens  || 0), 0);
+            const totalOut = withTok.reduce((s, h) => s + (h.outputTokens || 0), 0);
+            const totalCost= withTok.reduce((s, h) => s + (h.estimatedCost|| 0), 0);
+            document.getElementById('my_tokenRuns').textContent = runs.toLocaleString();
+            document.getElementById('my_tokenIn').textContent   = totalIn.toLocaleString();
+            document.getElementById('my_tokenOut').textContent  = totalOut.toLocaleString();
+            document.getElementById('my_tokenCost').textContent = '$' + totalCost.toFixed(4);
+
+            const tbody = document.getElementById('my_tokenList');
+            if (withTok.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="no-data">토큰 사용 내역이 없습니다.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = withTok.map(h => {
+                const project  = h.sourcePath ? h.sourcePath.replace(/.*[/\\]/, '') : '-';
+                const model    = myShortModel(h.modelName);
+                const inTok    = (h.inputTokens  || 0).toLocaleString();
+                const outTok   = (h.outputTokens || 0).toLocaleString();
+                const totTok   = ((h.inputTokens||0)+(h.outputTokens||0)).toLocaleString();
+                const cost     = h.estimatedCost != null ? '$' + h.estimatedCost.toFixed(4) : '-';
+                const date     = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
+                // displayName(userId) 형식
+                const userLabel = h.displayName
+                    ? `${h.displayName}<br><small style="color:#aaa;">${h.userId||''}</small>`
+                    : (h.userId || '-');
+                return `<tr>
+                    <td>${userLabel}</td>
+                    <td title="${h.sourcePath||''}">${project}</td>
+                    <td style="font-size:11px;">${model}</td>
+                    <td style="text-align:right;">${inTok}</td>
+                    <td style="text-align:right;">${outTok}</td>
+                    <td style="text-align:right;font-weight:600;">${totTok}</td>
+                    <td style="text-align:right;color:#e74c3c;">${cost}</td>
+                    <td style="font-size:11px;">${date}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        async function downloadMyPpt(historyId) {
+            const token = localStorage.getItem('token');
+            try {
+                const res = await fetch(`/api/my/download/presentation/${historyId}`, {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) { alert('PPT 다운로드 실패'); return; }
+                const blob = await res.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `analysis_result_${historyId}.pptx`;
+                document.body.appendChild(a); a.click();
+                URL.revokeObjectURL(a.href); document.body.removeChild(a);
+            } catch (e) { alert('PPT 다운로드 중 오류가 발생했습니다.'); }
+        }
+
+        function myShortModel(name) {
+            if (!name) return '-';
+            if (name.includes('sonnet')) return 'Sonnet';
+            if (name.includes('opus'))   return 'Opus';
+            if (name.includes('haiku'))  return 'Haiku';
+            return name;
+        }
+
         // 사용자 추가 모달 열기
         function openAddUserModal() {
             document.getElementById('userForm').reset();
@@ -1028,7 +1272,8 @@
         async function saveUser(e) {
             e.preventDefault();
 
-            const username = document.getElementById('username').value;
+            const displayName = document.getElementById('displayName').value;
+            const userId = document.getElementById('newUserId').value;
             const email = document.getElementById('email').value;
             const password = document.getElementById('password').value;
             const role = document.getElementById('role').value;
@@ -1040,7 +1285,7 @@
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${token}`
                     },
-                    body: JSON.stringify({ username, email, password, role })
+                    body: JSON.stringify({ displayName, userId, email, password, role })
                 });
 
                 const data = await response.json();
@@ -1129,9 +1374,49 @@
         // 로그아웃
         function logout() {
             localStorage.removeItem('token');
-            localStorage.removeItem('username');
             localStorage.removeItem('userId');
+            localStorage.removeItem('roles');
             window.location.href = '/auth/login';
+        }
+
+        // 분석 이력 ID 기반 PPT 다운로드
+        async function downloadPresentation(historyId) {
+            try {
+                const token = localStorage.getItem('token');
+                if (!token) {
+                    alert('❌ 인증 토큰이 없습니다. 다시 로그인해주세요.');
+                    return;
+                }
+
+                const response = await fetch(`/api/admin/download/presentation/${historyId}`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (response.status === 404) {
+                    alert('❌ 해당 분석 이력을 찾을 수 없습니다.');
+                    return;
+                }
+                if (!response.ok) {
+                    alert('❌ PPT 다운로드에 실패했습니다.');
+                    return;
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `analysis_result_${historyId}_${new Date().toISOString().split('T')[0]}.pptx`;
+                document.body.appendChild(link);
+                link.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(link);
+
+                console.log('✅ PPT 다운로드 완료 - historyId:', historyId);
+            } catch (error) {
+                console.error('❌ PPT 다운로드 오류:', error);
+                alert('❌ PPT 다운로드 중 오류가 발생했습니다.');
+            }
         }
     </script>
 </body>

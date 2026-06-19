@@ -2,7 +2,6 @@ package com.legacy.analysis;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
-// 분석 대상 파일명: PromptResolver.java
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 import java.io.File;

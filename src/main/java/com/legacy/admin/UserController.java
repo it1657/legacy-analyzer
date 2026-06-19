@@ -42,12 +42,12 @@ public class UserController {
     try {
       User user = (User) authentication.getPrincipal();
       Map<String, Object> response = new HashMap<>();
-      response.put("id", user.getId());
-      response.put("username", user.getUsername());
+      response.put("seq", user.getSeq());
+      response.put("userId", user.getUserId());
+      response.put("displayName", user.getDisplayName());
       response.put("email", user.getEmail());
       response.put("roles", user.getRoles().stream().map(Role::getName).toList());
       response.put("isActive", user.isActive());
-
       return ResponseEntity.ok(response);
     } catch (Exception e) {
       log.error("[사용자 조회 실패]", e);
@@ -64,9 +64,10 @@ public class UserController {
     try {
       List<Map<String, Object>> users = userRepository.findAll().stream()
           .map(user -> {
-            Map<String, Object> map = new HashMap<>();
-            map.put("id", user.getId());
-            map.put("username", user.getUsername());
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("seq", user.getSeq());
+            map.put("userId", user.getUserId());
+            map.put("displayName", user.getDisplayName());
             map.put("email", user.getEmail());
             map.put("roles", user.getRoles().stream().map(Role::getName).toList());
             map.put("isActive", user.isActive());
@@ -74,7 +75,6 @@ public class UserController {
             return map;
           })
           .toList();
-
       return ResponseEntity.ok(users);
     } catch (Exception e) {
       log.error("[사용자 목록 조회 실패]", e);
@@ -84,38 +84,41 @@ public class UserController {
   }
 
   // 사용자 활성/비활성화 (관리자만)
-  @PutMapping("/{userId}/activate")
+  @PutMapping("/{userSeq}/activate")
   @PreAuthorize("hasRole('ADMIN')")
   @ResponseBody
-  public ResponseEntity<?> toggleUserStatus(@PathVariable Long userId, @RequestBody Map<String, Boolean> request) {
+  public ResponseEntity<?> toggleUserStatus(@PathVariable Long userSeq,
+      @RequestBody Map<String, Boolean> request) {
     try {
-      User user = userRepository.findById(userId)
+      User user = userRepository.findById(userSeq)
           .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
-
       user.setActive(request.get("isActive"));
       user.setUpdatedAt(java.time.LocalDateTime.now());
       userRepository.save(user);
-
-      log.info("[사용자 활성화 변경] userId={}, isActive={}", userId, request.get("isActive"));
+      log.info("[사용자 활성화 변경] userSeq={}, isActive={}", userSeq, request.get("isActive"));
       return ResponseEntity.ok(Collections.singletonMap("message", "사용자 상태가 변경되었습니다."));
     } catch (Exception e) {
-      log.error("[사용자 활성화 변경 실패] userId={}", userId, e);
+      log.error("[사용자 활성화 변경 실패] userSeq={}", userSeq, e);
       return ResponseEntity.status(HttpStatus.BAD_REQUEST)
           .body(Collections.singletonMap("message", "사용자 상태 변경 실패: " + e.getMessage()));
     }
   }
 
   // 사용자 삭제 (관리자만)
-  @DeleteMapping("/{userId}")
+  @DeleteMapping("/{userSeq}")
   @PreAuthorize("hasRole('ADMIN')")
   @ResponseBody
-  public ResponseEntity<?> deleteUser(@PathVariable Long userId) {
+  public ResponseEntity<?> deleteUser(@PathVariable Long userSeq) {
     try {
-      userRepository.deleteById(userId);
-      log.info("[사용자 삭제] userId={}", userId);
+      User user = userRepository.findById(userSeq)
+          .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+      user.getRoles().clear();
+      userRepository.save(user);
+      userRepository.delete(user);
+      log.info("[사용자 삭제] userSeq={}", userSeq);
       return ResponseEntity.ok(Collections.singletonMap("message", "사용자가 삭제되었습니다."));
     } catch (Exception e) {
-      log.error("[사용자 삭제 실패] userId={}", userId, e);
+      log.error("[사용자 삭제 실패] userSeq={}", userSeq, e);
       return ResponseEntity.status(HttpStatus.BAD_REQUEST)
           .body(Collections.singletonMap("message", "사용자 삭제 실패: " + e.getMessage()));
     }

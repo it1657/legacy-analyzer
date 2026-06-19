@@ -2,7 +2,6 @@ package com.legacy.analysis;
 
 import java.time.LocalDateTime;
 import java.util.*;
-// 분석 대상 파일명: SessionState.java
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 
@@ -85,6 +84,15 @@ public class SessionState {
   @Transient
   @JsonProperty("metadata")
   private Map<String, Object> metadata = new HashMap<>();
+
+  // 폴링용 필드 (메모리 전용, DB 저장 안함)
+  @Transient
+  private String currentPhase = "STARTING";
+
+  @Transient
+  private final java.util.ArrayDeque<String> recentLogs = new java.util.ArrayDeque<>();
+
+  private static final int MAX_RECENT_LOGS = 300;
 
   // 기본 생성자
   public SessionState() {
@@ -319,5 +327,31 @@ public class SessionState {
 
   public void setMetadata(Map<String, Object> metadata) {
     this.metadata = metadata;
+  }
+
+  // 폴링용 메서드
+
+  public String getCurrentPhase() {
+    return currentPhase;
+  }
+
+  public void setCurrentPhase(String phase) {
+    this.currentPhase = phase;
+    this.lastUpdateTime = LocalDateTime.now();
+  }
+
+  public synchronized void addRecentLog(String log) {
+    if (log == null || log.isBlank()) return;
+    recentLogs.addLast(log.stripTrailing());
+    while (recentLogs.size() > MAX_RECENT_LOGS) {
+      recentLogs.pollFirst();
+    }
+    lastUpdateTime = LocalDateTime.now();
+  }
+
+  public synchronized List<String> getRecentLogLines(int count) {
+    List<String> all = new ArrayList<>(recentLogs);
+    if (all.size() <= count) return all;
+    return all.subList(all.size() - count, all.size());
   }
 }

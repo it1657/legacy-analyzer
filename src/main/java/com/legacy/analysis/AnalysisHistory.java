@@ -24,19 +24,19 @@ public class AnalysisHistory {
   private String outputPath;
 
   @Column(name = "total_files")
-  private int totalFiles;
+  private Integer totalFiles;
 
   @Column(name = "success_count")
-  private int successCount;
+  private Integer successCount;
 
   @Column(name = "skip_count")
-  private int skipCount;
+  private Integer skipCount;
 
   @Column(name = "failure_count")
-  private int failureCount;
+  private Integer failureCount;
 
   @Column(name = "processing_time_ms")
-  private long processingTimeMs;
+  private Long processingTimeMs;
 
   @Column(name = "status")
   private String status; // COMPLETED, FAILED, IN_PROGRESS
@@ -54,16 +54,28 @@ public class AnalysisHistory {
   private String modelName;
 
   @Column(name = "input_tokens")
-  private long inputTokens;
+  private Long inputTokens;
 
   @Column(name = "output_tokens")
-  private long outputTokens;
+  private Long outputTokens;
 
   @Column(name = "total_tokens")
-  private long totalTokens;
+  private Long totalTokens;
 
   @Column(name = "estimated_cost")
   private Double estimatedCost;
+
+  @Column(name = "readme_path")
+  private String readmePath;
+
+  @Column(name = "readme_content", columnDefinition = "TEXT")
+  private String readmeContent;
+
+  @Column(name = "claude_md_content", columnDefinition = "TEXT")
+  private String claudeMdContent;
+
+  @Column(name = "avg_time_per_file")
+  private Double avgTimePerFile;
 
   // 생성자
   public AnalysisHistory() {
@@ -119,43 +131,43 @@ public class AnalysisHistory {
     this.outputPath = outputPath;
   }
 
-  public int getTotalFiles() {
+  public Integer getTotalFiles() {
     return totalFiles;
   }
 
-  public void setTotalFiles(int totalFiles) {
+  public void setTotalFiles(Integer totalFiles) {
     this.totalFiles = totalFiles;
   }
 
-  public int getSuccessCount() {
+  public Integer getSuccessCount() {
     return successCount;
   }
 
-  public void setSuccessCount(int successCount) {
+  public void setSuccessCount(Integer successCount) {
     this.successCount = successCount;
   }
 
-  public int getSkipCount() {
+  public Integer getSkipCount() {
     return skipCount;
   }
 
-  public void setSkipCount(int skipCount) {
+  public void setSkipCount(Integer skipCount) {
     this.skipCount = skipCount;
   }
 
-  public int getFailureCount() {
+  public Integer getFailureCount() {
     return failureCount;
   }
 
-  public void setFailureCount(int failureCount) {
+  public void setFailureCount(Integer failureCount) {
     this.failureCount = failureCount;
   }
 
-  public long getProcessingTimeMs() {
+  public Long getProcessingTimeMs() {
     return processingTimeMs;
   }
 
-  public void setProcessingTimeMs(long processingTimeMs) {
+  public void setProcessingTimeMs(Long processingTimeMs) {
     this.processingTimeMs = processingTimeMs;
   }
 
@@ -199,27 +211,27 @@ public class AnalysisHistory {
     this.modelName = modelName;
   }
 
-  public long getInputTokens() {
+  public Long getInputTokens() {
     return inputTokens;
   }
 
-  public void setInputTokens(long inputTokens) {
+  public void setInputTokens(Long inputTokens) {
     this.inputTokens = inputTokens;
   }
 
-  public long getOutputTokens() {
+  public Long getOutputTokens() {
     return outputTokens;
   }
 
-  public void setOutputTokens(long outputTokens) {
+  public void setOutputTokens(Long outputTokens) {
     this.outputTokens = outputTokens;
   }
 
-  public long getTotalTokens() {
+  public Long getTotalTokens() {
     return totalTokens;
   }
 
-  public void setTotalTokens(long totalTokens) {
+  public void setTotalTokens(Long totalTokens) {
     this.totalTokens = totalTokens;
   }
 
@@ -229,5 +241,37 @@ public class AnalysisHistory {
 
   public void setEstimatedCost(Double estimatedCost) {
     this.estimatedCost = estimatedCost;
+  }
+
+  public String getReadmePath() {
+    return readmePath;
+  }
+
+  public void setReadmePath(String readmePath) {
+    this.readmePath = readmePath;
+  }
+
+  public String getReadmeContent() {
+    return readmeContent;
+  }
+
+  public void setReadmeContent(String readmeContent) {
+    this.readmeContent = readmeContent;
+  }
+
+  public String getClaudeMdContent() {
+    return claudeMdContent;
+  }
+
+  public void setClaudeMdContent(String claudeMdContent) {
+    this.claudeMdContent = claudeMdContent;
+  }
+
+  public Double getAvgTimePerFile() {
+    return avgTimePerFile;
+  }
+
+  public void setAvgTimePerFile(Double avgTimePerFile) {
+    this.avgTimePerFile = avgTimePerFile;
   }
 }

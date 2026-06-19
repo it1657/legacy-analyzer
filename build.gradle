@@ -24,9 +24,10 @@ dependencies {
     // 2. 비동기 HTTP 호출용 WebClient 패키지
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
 
-    // 3. JPA & H2 데이터베이스
+    // 3. JPA & 데이터베이스 드라이버
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
-    implementation 'com.h2database:h2:2.2.224'
+    runtimeOnly 'org.postgresql:postgresql'
+    runtimeOnly 'com.h2database:h2'
 
     // 4. Spring Security & JWT 인증
     implementation 'org.springframework.boot:spring-boot-starter-security'
@@ -40,4 +41,9 @@ dependencies {
 
     // 6. 최초 원본 스프링 기본 테스트 사양
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+
+    // 7. PowerPoint PPTX 생성 (Apache POI)
+    implementation 'org.apache.poi:poi:5.2.5'
+    implementation 'org.apache.poi:poi-ooxml:5.2.5'
+    implementation 'org.apache.xmlbeans:xmlbeans:5.1.1'
 }

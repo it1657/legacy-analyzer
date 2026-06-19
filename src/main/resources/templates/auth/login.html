@@ -147,8 +147,8 @@
 
         <form id="loginForm">
             <div class="form-group">
-                <label for="username">사용자명</label>
-                <input type="text" id="username" name="username" required placeholder="사용자명을 입력하세요">
+                <label for="username">사용자 ID</label>
+                <input type="text" id="username" name="username" required placeholder="사용자 ID를 입력하세요">
             </div>
 
             <div class="form-group">
@@ -171,7 +171,7 @@
             const password = document.getElementById('password').value;
 
             if (!username || !password) {
-                alert('사용자명과 비밀번호를 입력하세요.');
+                alert('사용자 ID와 비밀번호를 입력하세요.');
                 return;
             }
 
@@ -189,7 +189,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ username: username, password: password })
+                    body: JSON.stringify({ userId: username, password: password })
                 });
 
                 loading.style.display = 'none';
@@ -199,7 +199,6 @@
 
                     // 토큰 저장
                     localStorage.setItem('token', data.token);
-                    localStorage.setItem('username', data.username);
                     localStorage.setItem('userId', data.userId);
                     if (data.roles) {
                         localStorage.setItem('roles', JSON.stringify(data.roles));

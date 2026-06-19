@@ -1,25 +1,21 @@
 package com.legacy.api.usage;
-import com.legacy.auth.User;
 
+import com.legacy.auth.User;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
-import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import jakarta.servlet.http.HttpServletResponseWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StreamUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ContentCachingRequestWrapper;
 import org.springframework.web.util.ContentCachingResponseWrapper;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 
 @Component
 public class ApiUsageFilter extends OncePerRequestFilter {
@@ -62,7 +58,7 @@ public class ApiUsageFilter extends OncePerRequestFilter {
       Long userId = null;
       Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
       if (authentication != null && authentication.getPrincipal() instanceof User) {
-        userId = ((User) authentication.getPrincipal()).getId();
+        userId = ((User) authentication.getPrincipal()).getSeq();
       }
 
       // API 사용량 기록 (인증된 사용자만)

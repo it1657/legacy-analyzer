@@ -38,8 +38,8 @@ public class AuditLogService {
       Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
       if (authentication != null && authentication.getPrincipal() instanceof User) {
         User user = (User) authentication.getPrincipal();
-        userId = user.getId();
-        username = user.getUsername();
+        userId = user.getSeq();
+        username = user.getUserId();
       }
 
       // 변경사항을 JSON으로 변환
@@ -69,11 +69,11 @@ public class AuditLogService {
   // 사용자 생성 로그
   public void logUserCreation(User user, String ipAddress) {
     Map<String, Object> changes = new HashMap<>();
-    changes.put("username", user.getUsername());
+    changes.put("userId", user.getUserId());
     changes.put("email", user.getEmail());
     changes.put("roles", user.getRoles().stream().map(Role::getName).toList());
 
-    logAudit("CREATE", "USER", user.getId(), user.getUsername(), "SUCCESS", changes,
+    logAudit("CREATE", "USER", user.getSeq(), user.getUserId(), "SUCCESS", changes,
         "새 사용자 생성됨", ipAddress);
   }
 
@@ -81,8 +81,8 @@ public class AuditLogService {
   public void logUserModification(User oldUser, User newUser, String ipAddress) {
     Map<String, Object> changes = new HashMap<>();
 
-    if (!oldUser.getUsername().equals(newUser.getUsername())) {
-      changes.put("username", Map.of("old", oldUser.getUsername(), "new", newUser.getUsername()));
+    if (!oldUser.getUserId().equals(newUser.getUserId())) {
+      changes.put("userId", Map.of("old", oldUser.getUserId(), "new", newUser.getUserId()));
     }
 
     if (!oldUser.getEmail().equals(newUser.getEmail())) {
@@ -94,7 +94,7 @@ public class AuditLogService {
     }
 
     if (!changes.isEmpty()) {
-      logAudit("UPDATE", "USER", newUser.getId(), newUser.getUsername(), "SUCCESS", changes,
+      logAudit("UPDATE", "USER", newUser.getSeq(), newUser.getUserId(), "SUCCESS", changes,
           "사용자 정보 수정됨", ipAddress);
     }
   }
@@ -102,10 +102,10 @@ public class AuditLogService {
   // 사용자 삭제 로그
   public void logUserDeletion(User user, String ipAddress) {
     Map<String, Object> changes = new HashMap<>();
-    changes.put("username", user.getUsername());
+    changes.put("userId", user.getUserId());
     changes.put("email", user.getEmail());
 
-    logAudit("DELETE", "USER", user.getId(), user.getUsername(), "SUCCESS", changes,
+    logAudit("DELETE", "USER", user.getSeq(), user.getUserId(), "SUCCESS", changes,
         "사용자 삭제됨", ipAddress);
   }
 

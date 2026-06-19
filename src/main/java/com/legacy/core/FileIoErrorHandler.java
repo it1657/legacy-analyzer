@@ -2,7 +2,6 @@ package com.legacy.core;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-// 분석 대상 파일명: FileIoErrorHandler.java
 import org.springframework.stereotype.Component;
 
 import java.io.File;

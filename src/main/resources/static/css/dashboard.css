@@ -69,7 +69,8 @@ span.badge-green { background-color: #1cc88a; }
 .terminal-log { background-color: #1e1e1e; color: #a9b7c6; padding: 15px; border-radius: 6px; font-family: 'Consolas', monospace; font-size: 13px; flex: 1; overflow-y: auto; white-space: pre-wrap; margin-top: 5px; box-shadow: inset 0 2px 8px rgba(0,0,0,0.5); box-sizing: border-box; }
 
 .progress-container { display: none; width: 100%; background-color: #e9ecef; border-radius: 6px; overflow: hidden; margin-top: 15px; height: 16px; border: 1px solid #ced4da; }
-.progress-bar-animated { width: 100%; height: 100%; background: linear-gradient(45deg, #1cc88a 25%, #15a571 25%, #15a571 50%, #1cc88a 50%, #1cc88a 75%, #15a571 75%, #15a571); background-size: 40px 40px; animation: progress-bar-stripes 1s linear infinite; }
+.progress-bar { height: 100%; border-radius: 6px; transition: width 0.5s ease; display: flex; align-items: center; justify-content: center; font-size: 10px; color: white; font-weight: bold; overflow: hidden; white-space: nowrap; }
+.progress-bar-animated { background: linear-gradient(45deg, #1cc88a 25%, #15a571 25%, #15a571 50%, #1cc88a 50%, #1cc88a 75%, #15a571 75%, #15a571); background-size: 40px 40px; animation: progress-bar-stripes 1s linear infinite; }
 @keyframes progress-bar-stripes { 0% { background-position: 40px 0; } 100% { background-position: 0 0; } }
 
 /* ===================================================================
@@ -101,5 +102,10 @@ span.badge-green { background-color: #1cc88a; }
 }
 
 @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+    0% {
+        transform: rotate(0deg);
+    }
+    100% {
+        transform: rotate(360deg);
+    }
+}

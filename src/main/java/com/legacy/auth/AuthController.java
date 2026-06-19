@@ -39,20 +39,18 @@ public class AuthController {
     this.jwtTokenProvider = jwtTokenProvider;
   }
 
-  // 로그인 페이지 (GET)
   @GetMapping("/login")
   public String loginPage() {
     return "auth/login";
   }
 
-  // 로그인 (POST)
   @PostMapping("/login")
   @ResponseBody
   public ResponseEntity<?> login(@RequestBody AuthRequest authRequest) {
     try {
       Authentication authentication = authenticationManager.authenticate(
           new UsernamePasswordAuthenticationToken(
-              authRequest.getUsername(),
+              authRequest.getUserId(),
               authRequest.getPassword()));
 
       SecurityContextHolder.getContext().setAuthentication(authentication);
@@ -64,16 +62,13 @@ public class AuthController {
           .map(role -> role.getName())
           .toList();
 
-      log.info("[로그인 성공] username={}, roles={}", authRequest.getUsername(), roles);
-      return ResponseEntity.ok(new AuthResponse(token, user.getId(), user.getUsername(), roles));
+      log.info("[로그인 성공] userId={}, roles={}", authRequest.getUserId(), roles);
+      return ResponseEntity.ok(new AuthResponse(token, user.getSeq(), user.getUserId(), roles));
 
     } catch (Exception e) {
-      log.error("[로그인 실패] username={}, reason={}", authRequest.getUsername(),
-          e.getMessage());
+      log.error("[로그인 실패] userId={}, reason={}", authRequest.getUserId(), e.getMessage());
       return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
           .body(new AuthResponse("로그인 실패: " + e.getMessage()));
     }
   }
-
-  // 사용자 등록은 관리자 API(/api/admin/users/register)를 통해서만 가능합니다.
 }

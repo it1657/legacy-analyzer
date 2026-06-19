@@ -86,13 +86,13 @@ public class NotificationService {
   public void notifyUserCreation(User newUser) {
     try {
       String title = "계정이 생성되었습니다";
-      String message = String.format("관리자에 의해 새로운 계정이 생성되었습니다. 사용자명: %s",
-          newUser.getUsername());
+      String message = String.format("관리자에 의해 새로운 계정이 생성되었습니다. 사용자 ID: %s",
+          newUser.getUserId());
 
-      createNotification(newUser.getId(), "USER_CREATED", title, message, newUser.getId(),
+      createNotification(newUser.getSeq(), "USER_CREATED", title, message, newUser.getSeq(),
           "USER", null);
 
-      log.info("[사용자 생성 알림] userId={}", newUser.getId());
+      log.info("[사용자 생성 알림] seq={}", newUser.getSeq());
     } catch (Exception e) {
       log.error("[사용자 생성 알림 실패]", e);
     }
@@ -102,7 +102,7 @@ public class NotificationService {
   public void notifyAllUsers(String type, String title, String message) {
     try {
       userRepository.findAll().forEach(user -> {
-        createNotification(user.getId(), type, title, message);
+        createNotification(user.getSeq(), type, title, message);
       });
 
       log.info("[공지 알림 전송] type={}, title={}, 대상={}", type, title,

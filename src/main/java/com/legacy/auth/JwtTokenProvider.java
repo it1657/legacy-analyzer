@@ -27,61 +27,49 @@ public class JwtTokenProvider {
   // JWT 토큰 생성
   public String generateToken(Authentication authentication) {
     User user = (User) authentication.getPrincipal();
-    return generateToken(user.getUsername(), user.getId());
+    return generateToken(user.getUserId(), user.getSeq());
   }
 
-  public String generateToken(String username, Long userId) {
+  public String generateToken(String userId, Long seq) {
     SecretKey key = Keys.hmacShaKeyFor(secretKey.getBytes(StandardCharsets.UTF_8));
-
     return Jwts.builder()
-        .subject(username)
-        .claim("userId", userId)
+        .subject(userId)
+        .claim("seq", seq)
         .issuedAt(new Date())
         .expiration(new Date(System.currentTimeMillis() + expirationMs))
         .signWith(key, SignatureAlgorithm.HS256)
         .compact();
   }
 
-  // 토큰에서 사용자명 추출
+  // 토큰에서 userId(로그인ID) 추출
   public String getUsernameFromToken(String token) {
     try {
       SecretKey key = Keys.hmacShaKeyFor(secretKey.getBytes(StandardCharsets.UTF_8));
-      Claims claims = Jwts.parser()
-          .verifyWith(key)
-          .build()
-          .parseSignedClaims(token)
-          .getPayload();
-      return claims.getSubject();
+      return Jwts.parser().verifyWith(key).build()
+          .parseSignedClaims(token).getPayload().getSubject();
     } catch (Exception e) {
       log.error("[JWT] 토큰 파싱 실패: {}", e.getMessage());
       return null;
     }
   }
 
-  // 토큰에서 userId 추출
-  public Long getUserIdFromToken(String token) {
+  // 토큰에서 seq(DB PK) 추출
+  public Long getSeqFromToken(String token) {
     try {
       SecretKey key = Keys.hmacShaKeyFor(secretKey.getBytes(StandardCharsets.UTF_8));
-      Claims claims = Jwts.parser()
-          .verifyWith(key)
-          .build()
-          .parseSignedClaims(token)
-          .getPayload();
-      return claims.get("userId", Long.class);
+      Claims claims = Jwts.parser().verifyWith(key).build()
+          .parseSignedClaims(token).getPayload();
+      return claims.get("seq", Long.class);
     } catch (Exception e) {
-      log.error("[JWT] userId 추출 실패: {}", e.getMessage());
+      log.error("[JWT] seq 추출 실패: {}", e.getMessage());
       return null;
     }
   }
 
-  // 토큰 유효성 검사
   public boolean validateToken(String token) {
     try {
       SecretKey key = Keys.hmacShaKeyFor(secretKey.getBytes(StandardCharsets.UTF_8));
-      Jwts.parser()
-          .verifyWith(key)
-          .build()
-          .parseSignedClaims(token);
+      Jwts.parser().verifyWith(key).build().parseSignedClaims(token);
       return true;
     } catch (Exception e) {
       log.error("[JWT] 토큰 검증 실패: {}", e.getMessage());
@@ -89,15 +77,11 @@ public class JwtTokenProvider {
     }
   }
 
-  // 토큰에서 Claims 추출
   public Claims getClaimsFromToken(String token) {
     try {
       SecretKey key = Keys.hmacShaKeyFor(secretKey.getBytes(StandardCharsets.UTF_8));
-      return Jwts.parser()
-          .verifyWith(key)
-          .build()
-          .parseSignedClaims(token)
-          .getPayload();
+      return Jwts.parser().verifyWith(key).build()
+          .parseSignedClaims(token).getPayload();
     } catch (Exception e) {
       log.error("[JWT] Claims 추출 실패: {}", e.getMessage());
       return null;

@@ -58,9 +58,9 @@ public class StatisticsController {
       stats.setSuccessAnalysis(success);
       stats.setFailureAnalysis(failure);
       stats.setSkipAnalysis(skip);
-      stats.setTotalFilesAnalyzed(allAnalysis.stream().mapToLong(AnalysisHistory::getTotalFiles).sum());
+      stats.setTotalFilesAnalyzed(allAnalysis.stream().mapToLong(h -> h.getTotalFiles() != null ? h.getTotalFiles() : 0L).sum());
       stats.setTotalProcessingTimeMs(
-          allAnalysis.stream().mapToLong(AnalysisHistory::getProcessingTimeMs).sum());
+          allAnalysis.stream().mapToLong(h -> h.getProcessingTimeMs() != null ? h.getProcessingTimeMs() : 0L).sum());
 
       // API 사용량 통계
       List<ApiUsage> allApiUsages = apiUsageRepository.findAll();
@@ -121,9 +121,9 @@ public class StatisticsController {
           .limit(5)
           .forEach(entry -> {
             Map<String, Object> userTop = new HashMap<>();
-            userTop.put("userId", entry.getKey());
+            userTop.put("userSeq", entry.getKey());
             userRepository.findById(entry.getKey()).ifPresent(user -> {
-              userTop.put("username", user.getUsername());
+              userTop.put("userId", user.getUserId());
             });
             userTop.put("analysisCount", entry.getValue());
             topUsers.add(userTop);
@@ -150,12 +150,12 @@ public class StatisticsController {
       List<UserStatisticsDto> userStats = new ArrayList<>();
 
       for (User user : allUsers) {
-        UserStatisticsDto stats = new UserStatisticsDto(user.getId(), user.getUsername(),
+        UserStatisticsDto stats = new UserStatisticsDto(user.getSeq(), user.getUserId(),
             user.getEmail());
 
         // 분석 통계
         List<AnalysisHistory> userAnalysis = analysisHistoryRepository
-            .findByUserId(user.getId());
+            .findByUserId(user.getSeq());
 
         long success = userAnalysis.stream()
             .filter(a -> "COMPLETED".equals(a.getStatus()))
@@ -170,12 +170,12 @@ public class StatisticsController {
         stats.setFailureAnalysis(failure);
         stats.setSkipAnalysis(skip);
         stats.setTotalFilesAnalyzed(
-            userAnalysis.stream().mapToLong(AnalysisHistory::getTotalFiles).sum());
+            userAnalysis.stream().mapToLong(h -> h.getTotalFiles() != null ? h.getTotalFiles() : 0L).sum());
         stats.setTotalProcessingTimeMs(
-            userAnalysis.stream().mapToLong(AnalysisHistory::getProcessingTimeMs).sum());
+            userAnalysis.stream().mapToLong(h -> h.getProcessingTimeMs() != null ? h.getProcessingTimeMs() : 0L).sum());
 
         // API 사용량
-        List<ApiUsage> userApiUsage = apiUsageRepository.findByUserId(user.getId());
+        List<ApiUsage> userApiUsage = apiUsageRepository.findByUserId(user.getSeq());
         stats.setTotalApiRequests(userApiUsage.size());
         stats.setTotalDataProcessedBytes(
             userApiUsage.stream()
@@ -183,9 +183,9 @@ public class StatisticsController {
                 .sum());
 
         // 토큰 통계
-        Long userInputTokens = analysisHistoryRepository.getTotalInputTokensByUser(user.getId());
-        Long userOutputTokens = analysisHistoryRepository.getTotalOutputTokensByUser(user.getId());
-        Double userCost = analysisHistoryRepository.getTotalCostByUser(user.getId());
+        Long userInputTokens = analysisHistoryRepository.getTotalInputTokensByUser(user.getSeq());
+        Long userOutputTokens = analysisHistoryRepository.getTotalOutputTokensByUser(user.getSeq());
+        Double userCost = analysisHistoryRepository.getTotalCostByUser(user.getSeq());
 
         stats.setTotalInputTokens(userInputTokens != null ? userInputTokens : 0);
         stats.setTotalOutputTokens(userOutputTokens != null ? userOutputTokens : 0);

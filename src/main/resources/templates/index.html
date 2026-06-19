@@ -1,10 +1,7 @@
-<!-- [AI 한글 주석 보완 완료] -->
-<!-- 확장자(.html) 맞춤형 자동 생성 목업 주석 예시 1 -->
 <!DOCTYPE html>
 <html lang="ko" xmlns:th="http://thymeleaf.org">
 <head>
     <meta charset="UTF-8">
-<!-- 분석 대상 파일명: index.html -->
     <title>레거시 코드 명세 대시보드</title>
     <!-- 💡 [아키텍처 대변혁]: HTML 내부 스타일을 제거하고 타임리프 표준 외부 CSS 파일로 분리 바인딩합니다 -->
     <link th:href="@{/css/dashboard.css}" rel="stylesheet">
@@ -38,6 +35,7 @@
                 </div>
                 <button type="button" id="adminDashboardBtn" onclick="goToAdmin()" class="btn" style="background-color: #667eea; color: white; padding: 8px 16px; display: none;">👨‍💼 관리자 대시보드</button>
                 <button type="button" id="analysisBtn" onclick="goToAnalysis()" class="btn" style="background-color: #4e73df; color: white; padding: 8px 16px; display: none;">📊 분석 화면</button>
+                <button type="button" id="myActivityBtn" onclick="window.location.href='/my-activity'" class="btn" style="background-color: #27ae60; color: white; padding: 8px 16px;">📂 내 활동</button>
                 <button type="button" onclick="logout()" class="btn" style="background-color: #e74a3b; color: white; padding: 8px 16px;">로그아웃</button>
             </div>
         </div>
@@ -59,13 +57,16 @@
                 <div class="control-row">
                     <label for="outputFolderPath" style="font-weight: bold; min-width: 110px;">🎯 출력 경로:</label>
                     <input type="text" id="outputFolderPath" class="form-control" placeholder="결과물을 생성할 특정 폴더 경로">
-
-                    <div style="display: flex; align-items: center; gap: 6px; margin-right: 5px; white-space: nowrap;">
-                        <input type="checkbox" id="chkForceActive" style="width: 18px; height: 18px; cursor: pointer;">
-                        <label for="chkForceActive" style="font-size: 13px; font-weight: bold; color: #e74a3b; cursor: pointer; user-select: none;">⚠️ 용량 초과 파일도 분석</label>
-                    </div>
-
                     <button type="button" onclick="runBatchAnalysis()" class="btn btn-success">2 단계: 특정 경로에 결과 생성</button>
+                </div>
+                <div class="control-row">
+                    <label for="modelSelect" style="font-weight: bold; min-width: 110px;">🤖 AI 모델:</label>
+                    <select id="modelSelect" class="form-control" style="max-width: 360px; background: #1e2a3a; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; font-size: 13px;">
+                        <option value="claude-sonnet-4-6" selected>Claude Sonnet (권장 · $3/$15 per 1M)</option>
+                        <option value="claude-opus-4-8">Claude Opus (고품질 · $15/$75 per 1M)</option>
+                        <option value="claude-haiku-4-5-20251001">Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)</option>
+                    </select>
+                    <span style="color: #8b949e; font-size: 12px; margin-left: 8px;">입력/출력 토큰 기준</span>
                 </div>
                 <div class="control-row" id="sessionControlPanel" style="display: none; gap: 10px;">
                     <span style="font-weight: bold; color: #4e73df;">분석 중:</span>
@@ -105,7 +106,7 @@
                             <div class="sub-dashboard-title" style="color: #4e73df;">
                                 <span>🚀 실시간 모니터링 터미널</span>
                                 <span id="progressPanel" class="progress-container" style="margin: 0; width: 150px; height: 12px;">
-                                        <div class="progress-bar-animated"></div>
+                                        <div class="progress-bar progress-bar-animated" style="width: 0%;"></div>
                                     </span>
                             </div>
                             <!-- 💡 [좌측 교정]: 가로 밀림과 무한 증식을 막는 완전 격리형 스타일 주입 -->
@@ -165,6 +166,61 @@
             </div>
         </div>
     </div> <!-- .row 마감 -->
+
+    <!-- ✅ 분석 완료 결과 패널 (분석 완료 시 표시) -->
+    <div id="completionResultPanel" style="display:none; margin-top: 16px;">
+        <div class="card" style="border: 1px solid #1cc88a; background: #0d1117;">
+            <div class="card-header" style="background: linear-gradient(135deg, #1cc88a 0%, #17a673 100%); color: white; font-weight: bold; font-size: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <span>✅ 분석 완료 결과</span>
+                <button id="btnDownloadPpt" onclick="downloadCompletionPpt()" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5); color: white; padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold;" title="분석 결과 PPT 다운로드">
+                    📊 PPT 다운로드
+                </button>
+            </div>
+            <div class="card-body" style="padding: 16px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <!-- 좌측: 수치 요약 -->
+                    <div>
+                        <table style="width:100%; border-collapse:collapse; font-size:13px; font-family:'Courier New',monospace;">
+                            <tr style="border-bottom:1px solid #21262d;">
+                                <td style="color:#8b949e; padding:6px 0; width:140px;">로그인 ID</td>
+                                <td id="cr_loginId" style="color:#e6edf3; font-weight:bold;"></td>
+                            </tr>
+                            <tr style="border-bottom:1px solid #21262d;">
+                                <td style="color:#8b949e; padding:6px 0;">사용 모델</td>
+                                <td id="cr_model" style="color:#79c0ff; font-weight:bold;"></td>
+                            </tr>
+                            <tr style="border-bottom:1px solid #21262d;">
+                                <td style="color:#8b949e; padding:6px 0;">주석 성공</td>
+                                <td id="cr_success" style="color:#1cc88a; font-weight:bold; font-size:18px;"></td>
+                            </tr>
+                            <tr style="border-bottom:1px solid #21262d;">
+                                <td style="color:#8b949e; padding:6px 0;">이미 처리됨</td>
+                                <td id="cr_already" style="color:#f6c90e; font-weight:bold;"></td>
+                            </tr>
+                            <tr style="border-bottom:1px solid #21262d;">
+                                <td style="color:#8b949e; padding:6px 0;">처리 실패</td>
+                                <td id="cr_failed" style="color:#e74c3c; font-weight:bold;"></td>
+                            </tr>
+                            <tr style="border-bottom:1px solid #21262d;">
+                                <td style="color:#8b949e; padding:6px 0;">평균 처리 시간</td>
+                                <td id="cr_avgTime" style="color:#e6edf3;"></td>
+                            </tr>
+                            <tr>
+                                <td style="color:#8b949e; padding:6px 0;">결과 보고서</td>
+                                <td id="cr_readme" style="color:#58a6ff; font-size:11px; word-break:break-all;"></td>
+                            </tr>
+                        </table>
+                    </div>
+                    <!-- 우측: README.md 내용 -->
+                    <div style="display:flex; flex-direction:column;">
+                        <div style="color:#8b949e; font-size:12px; margin-bottom:6px;">📄 생성된 README.md 내용:</div>
+                        <pre id="cr_readmeContent" style="background:#161b22; padding:12px; border-radius:6px; overflow:auto; flex:1; min-height:160px; max-height:220px; white-space:pre-wrap; color:#c9d1d9; font-size:11px; border:1px solid #30363d; margin:0;"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div> <!-- .container 마감 -->
 
 <div th:replace="~{fragments/modal :: confirmModal}"></div>

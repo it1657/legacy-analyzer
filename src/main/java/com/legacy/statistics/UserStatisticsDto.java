@@ -2,8 +2,8 @@ package com.legacy.statistics;
 
 // 사용자별 분석 통계
 public class UserStatisticsDto {
-  private Long userId;
-  private String username;
+  private Long seq;
+  private String userId;
   private String email;
   private long totalAnalysis;
   private long successAnalysis;
@@ -24,9 +24,9 @@ public class UserStatisticsDto {
   public UserStatisticsDto() {
   }
 
-  public UserStatisticsDto(Long userId, String username, String email) {
+  public UserStatisticsDto(Long seq, String userId, String email) {
+    this.seq = seq;
     this.userId = userId;
-    this.username = username;
     this.email = email;
   }
 
@@ -43,20 +43,20 @@ public class UserStatisticsDto {
   }
 
   // Getter/Setter
-  public Long getUserId() {
+  public Long getSeq() {
+    return seq;
+  }
+
+  public void setSeq(Long seq) {
+    this.seq = seq;
+  }
+
+  public String getUserId() {
     return userId;
   }
 
-  public void setUserId(Long userId) {
+  public void setUserId(String userId) {
     this.userId = userId;
-  }
-
-  public String getUsername() {
-    return username;
-  }
-
-  public void setUsername(String username) {
-    this.username = username;
   }
 
   public String getEmail() {

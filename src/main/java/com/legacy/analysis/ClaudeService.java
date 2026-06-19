@@ -33,4 +33,10 @@ public interface ClaudeService {
      * @return Claude 모델명
      */
     String getCurrentModel();
+
+    /**
+     * 분석에 사용할 모델 변경 (sonnet/opus/haiku)
+     * @param model 모델 ID (예: claude-sonnet-4-6)
+     */
+    void setModel(String model);
 }

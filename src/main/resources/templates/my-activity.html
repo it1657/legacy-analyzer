@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://thymeleaf.org">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>내 활동 - 레거시 코드 분석기</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f5f7fa; color: #333; }
+
+    .navbar {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white; padding: 1rem 2rem;
+      display: flex; justify-content: space-between; align-items: center;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .navbar-title { font-size: 22px; font-weight: bold; }
+    .navbar-user { display: flex; align-items: center; gap: 1rem; }
+    .nav-btn {
+      background: rgba(255,255,255,0.2); border: 1px solid white;
+      color: white; padding: 0.5rem 1rem; border-radius: 6px;
+      cursor: pointer; font-size: 13px; transition: background 0.2s;
+    }
+    .nav-btn:hover { background: rgba(255,255,255,0.35); }
+
+    .container { max-width: 1200px; margin: 2rem auto; padding: 0 1.5rem; }
+
+    .tabs { display: flex; gap: 0; border-bottom: 2px solid #e0e0e0; margin-bottom: 2rem; }
+    .tab {
+      padding: 0.75rem 1.5rem; cursor: pointer; font-weight: 600;
+      color: #999; border-bottom: 3px solid transparent; margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+    .tab.active { color: #667eea; border-bottom-color: #667eea; }
+    .tab:hover { color: #667eea; }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem; margin-bottom: 1.5rem;
+    }
+    .summary-card {
+      background: white; padding: 1.25rem; border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.07); border-left: 4px solid #667eea;
+    }
+    .summary-card.green  { border-left-color: #27ae60; }
+    .summary-card.orange { border-left-color: #e67e22; }
+    .summary-card.red    { border-left-color: #e74c3c; }
+    .summary-label { color: #888; font-size: 12px; margin-bottom: 0.4rem; }
+    .summary-value { font-size: 26px; font-weight: bold; color: #333; }
+    .summary-sub   { font-size: 11px; color: #aaa; margin-top: 0.2rem; }
+
+    .table-wrap {
+      background: white; border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.07); overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: #f8f9fa; border-bottom: 2px solid #e0e0e0; }
+    th { padding: 0.9rem 1rem; text-align: left; font-size: 13px; color: #666; font-weight: 600; }
+    td { padding: 0.9rem 1rem; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+    tbody tr:hover { background: #fafafa; }
+    .no-data { text-align: center; color: #bbb; padding: 2.5rem; }
+
+    .badge {
+      display: inline-block; padding: 0.25rem 0.6rem;
+      border-radius: 20px; font-size: 11px; font-weight: 600;
+    }
+    .badge-ok  { background: #e8f5e9; color: #27ae60; }
+    .badge-err { background: #ffebee; color: #e74c3c; }
+    .badge-ing { background: #fff3e0; color: #e67e22; }
+
+    .btn-sm {
+      padding: 0.35rem 0.7rem; font-size: 11px; border: none;
+      border-radius: 4px; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-ppt  { background: #e67e22; color: white; }
+    .btn-ppt:hover { background: #d35400; }
+
+    .section-title { font-size: 16px; font-weight: 700; color: #444; margin-bottom: 1rem; }
+
+    .loading { text-align: center; color: #667eea; padding: 2rem; }
+  </style>
+</head>
+<body>
+
+<div class="navbar">
+  <div class="navbar-title">📂 내 활동</div>
+  <div class="navbar-user">
+    <span id="currentUser"></span>
+    <button class="nav-btn" onclick="window.location.href='/'">📊 분석 화면</button>
+    <button class="nav-btn" onclick="logout()">로그아웃</button>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- 탭 -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('history', this)">📜 내 분석 이력</div>
+    <div class="tab" onclick="switchTab('usage', this)">🤖 Claude 토큰 사용량</div>
+  </div>
+
+  <!-- 분석 이력 탭 -->
+  <div id="tab-history" class="tab-content active">
+
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-label">총 분석 횟수</div>
+        <div class="summary-value" id="sumTotal">-</div>
+      </div>
+      <div class="summary-card green">
+        <div class="summary-label">완료</div>
+        <div class="summary-value" id="sumCompleted">-</div>
+      </div>
+      <div class="summary-card orange">
+        <div class="summary-label">총 처리 파일</div>
+        <div class="summary-value" id="sumFiles">-</div>
+      </div>
+      <div class="summary-card red">
+        <div class="summary-label">총 추정 비용</div>
+        <div class="summary-value" id="sumCost">-</div>
+        <div class="summary-sub">USD</div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>프로젝트</th>
+            <th>총 파일</th>
+            <th>성공</th>
+            <th>실패</th>
+            <th>모델</th>
+            <th>소요시간</th>
+            <th>비용(USD)</th>
+            <th>상태</th>
+            <th>분석 일시</th>
+            <th>다운로드</th>
+          </tr>
+        </thead>
+        <tbody id="historyList">
+          <tr><td colspan="10" class="no-data loading">불러오는 중...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Claude 토큰 사용량 탭 -->
+  <div id="tab-usage" class="tab-content">
+
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-label">총 분석 횟수</div>
+        <div class="summary-value" id="tokenRunCount">-</div>
+        <div class="summary-sub">회</div>
+      </div>
+      <div class="summary-card green">
+        <div class="summary-label">총 입력 토큰</div>
+        <div class="summary-value" id="tokenInput">-</div>
+        <div class="summary-sub">tokens</div>
+      </div>
+      <div class="summary-card orange">
+        <div class="summary-label">총 출력 토큰</div>
+        <div class="summary-value" id="tokenOutput">-</div>
+        <div class="summary-sub">tokens</div>
+      </div>
+      <div class="summary-card red">
+        <div class="summary-label">총 추정 비용</div>
+        <div class="summary-value" id="tokenCost">-</div>
+        <div class="summary-sub">USD</div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>프로젝트</th>
+            <th>모델</th>
+            <th>입력 토큰</th>
+            <th>출력 토큰</th>
+            <th>총 토큰</th>
+            <th>추정 비용(USD)</th>
+            <th>분석 일시</th>
+          </tr>
+        </thead>
+        <tbody id="usageList">
+          <tr><td colspan="7" class="no-data">토큰 사용량 탭을 클릭하면 로드됩니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const token = localStorage.getItem('token');
+  const username = localStorage.getItem('username');
+
+  window.addEventListener('load', () => {
+    if (!token) { window.location.href = '/auth/login'; return; }
+    document.getElementById('currentUser').textContent = username || '';
+    loadHistory();
+  });
+
+  function switchTab(name, el) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('tab-' + name).classList.add('active');
+    if (name === 'usage') loadUsage();
+  }
+
+  // ── 분석 이력 ─────────────────────────────────
+  async function loadHistory() {
+    try {
+      const res = await fetch('/api/my/analysis-history', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('조회 실패');
+      const data = await res.json();
+      renderHistory(data);
+    } catch (e) {
+      document.getElementById('historyList').innerHTML =
+        '<tr><td colspan="10" class="no-data">분석 이력을 불러올 수 없습니다.</td></tr>';
+    }
+  }
+
+  function renderHistory(list) {
+    const total     = list.length;
+    const completed = list.filter(h => h.status === 'COMPLETED').length;
+    const files     = list.reduce((s, h) => s + (h.totalFiles || 0), 0);
+    const cost      = list.reduce((s, h) => s + (h.estimatedCost || 0), 0);
+
+    document.getElementById('sumTotal').textContent     = total;
+    document.getElementById('sumCompleted').textContent = completed;
+    document.getElementById('sumFiles').textContent     = files.toLocaleString();
+    document.getElementById('sumCost').textContent      = '$' + cost.toFixed(4);
+
+    const tbody = document.getElementById('historyList');
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="10" class="no-data">분석 이력이 없습니다.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = list.map(h => {
+      const project  = h.sourcePath ? h.sourcePath.replace(/.*[/\\]/, '') : '-';
+      const timeSec  = h.processingTimeMs ? (h.processingTimeMs / 1000).toFixed(1) + '초' : '-';
+      const cost     = h.estimatedCost != null ? '$' + h.estimatedCost.toFixed(4) : '-';
+      const model    = shortModel(h.modelName);
+      const dateStr  = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
+      const stCls    = h.status === 'COMPLETED' ? 'badge-ok'
+                     : h.status === 'IN_PROGRESS' ? 'badge-ing' : 'badge-err';
+      return `<tr>
+        <td title="${h.sourcePath || ''}">${project}</td>
+        <td>${h.totalFiles ?? '-'}</td>
+        <td>${h.successCount ?? '-'}</td>
+        <td>${h.failureCount ?? '-'}</td>
+        <td style="font-size:11px;">${model}</td>
+        <td>${timeSec}</td>
+        <td>${cost}</td>
+        <td><span class="badge ${stCls}">${h.status}</span></td>
+        <td style="font-size:11px;">${dateStr}</td>
+        <td>
+          ${h.status === 'COMPLETED'
+            ? `<button class="btn-sm btn-ppt" onclick="downloadProjectReport(${h.id})" title="프로젝트 구조 · 비즈니스 로직 분석 보고서">📋 보고서 PPT</button>`
+            : '-'}
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  // 고객 납품용 보고서 PPT (프로젝트 구조·패키지 구조·비즈니스 로직)
+  async function downloadProjectReport(historyId) {
+    try {
+      const res = await fetch(`/api/my/download/project-report/${historyId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.status === 403) { alert('접근 권한이 없습니다.'); return; }
+      if (!res.ok) { alert('PPT 다운로드에 실패했습니다.'); return; }
+
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      a.download = `report_${historyId}.pptx`;
+      document.body.appendChild(a);
+      a.click();
+      URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (e) {
+      alert('PPT 다운로드 중 오류가 발생했습니다.');
+    }
+  }
+
+  // ── Claude 토큰 사용량 ─────────────────────────
+  // 분석 이력 데이터에서 토큰 정보만 추출해 표시
+  async function loadUsage() {
+    try {
+      const res = await fetch('/api/my/analysis-history', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('조회 실패');
+      const data = await res.json();
+      renderUsage(data);
+    } catch (e) {
+      document.getElementById('usageList').innerHTML =
+        '<tr><td colspan="7" class="no-data">토큰 사용량을 불러올 수 없습니다.</td></tr>';
+    }
+  }
+
+  function renderUsage(list) {
+    // COMPLETED 상태이고 토큰 데이터가 있는 항목만 집계
+    const withTokens = list.filter(h => h.status === 'COMPLETED' && (h.inputTokens || h.outputTokens));
+
+    const runCount    = withTokens.length;
+    const totalInput  = withTokens.reduce((s, h) => s + (h.inputTokens  || 0), 0);
+    const totalOutput = withTokens.reduce((s, h) => s + (h.outputTokens || 0), 0);
+    const totalCost   = withTokens.reduce((s, h) => s + (h.estimatedCost || 0), 0);
+
+    document.getElementById('tokenRunCount').textContent = runCount.toLocaleString();
+    document.getElementById('tokenInput').textContent    = totalInput.toLocaleString();
+    document.getElementById('tokenOutput').textContent   = totalOutput.toLocaleString();
+    document.getElementById('tokenCost').textContent     = '$' + totalCost.toFixed(4);
+
+    const tbody = document.getElementById('usageList');
+    if (withTokens.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="no-data">토큰 사용 내역이 없습니다.<br><small style="color:#bbb;">분석 완료 후 이력이 기록됩니다.</small></td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = withTokens.map(h => {
+      const project    = h.sourcePath ? h.sourcePath.replace(/.*[/\\]/, '') : '-';
+      const model      = shortModel(h.modelName);
+      const inputTok   = (h.inputTokens  || 0).toLocaleString();
+      const outputTok  = (h.outputTokens || 0).toLocaleString();
+      const totalTok   = ((h.inputTokens || 0) + (h.outputTokens || 0)).toLocaleString();
+      const cost       = h.estimatedCost != null ? '$' + h.estimatedCost.toFixed(4) : '-';
+      const dateStr    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
+      return `<tr>
+        <td title="${h.sourcePath || ''}">${project}</td>
+        <td style="font-size:11px;">${model}</td>
+        <td style="text-align:right;">${inputTok}</td>
+        <td style="text-align:right;">${outputTok}</td>
+        <td style="text-align:right; font-weight:600;">${totalTok}</td>
+        <td style="text-align:right; color:#e74c3c;">${cost}</td>
+        <td style="font-size:11px;">${dateStr}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function shortModel(name) {
+    if (!name) return '-';
+    if (name.includes('sonnet')) return 'Sonnet';
+    if (name.includes('opus'))   return 'Opus';
+    if (name.includes('haiku'))  return 'Haiku';
+    return name;
+  }
+
+  function logout() {
+    localStorage.removeItem('token');
+    localStorage.removeItem('username');
+    localStorage.removeItem('userId');
+    window.location.href = '/auth/login';
+  }
+</script>
+</body>
+</html>

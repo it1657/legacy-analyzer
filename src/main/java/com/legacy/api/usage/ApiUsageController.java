@@ -1,20 +1,17 @@
 package com.legacy.api.usage;
-import com.legacy.auth.UserRepository;
-import com.legacy.auth.User;
 
+import com.legacy.auth.User;
+import com.legacy.auth.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
-import java.time.LocalDate;
+
 import java.time.LocalDateTime;
-import java.time.YearMonth;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 @RestController
@@ -45,7 +42,7 @@ public class ApiUsageController {
       LocalDateTime startTime = endTime.minusDays(days);
 
       List<ApiUsage> usages = apiUsageRepository
-          .findByUserIdAndTimestampBetween(user.getId(), startTime, endTime);
+          .findByUserIdAndTimestampBetween(user.getSeq(), startTime, endTime);
 
       List<Map<String, Object>> response = usages.stream()
           .map(this::convertToMap)
@@ -71,7 +68,7 @@ public class ApiUsageController {
       LocalDateTime startTime = endTime.minusDays(days);
 
       List<Map<String, Object>> stats = apiUsageRepository
-          .getUserDailyStats(user.getId(), startTime, endTime);
+          .getUserDailyStats(user.getSeq(), startTime, endTime);
 
       Map<String, Object> summary = new HashMap<>();
       summary.put("days", days);
@@ -107,7 +104,7 @@ public class ApiUsageController {
         Long userId = ((Number) stat.get("user_id")).longValue();
 
         userRepository.findById(userId).ifPresent(user -> {
-          enriched.put("username", user.getUsername());
+          enriched.put("userId", user.getUserId());
           enriched.put("email", user.getEmail());
         });
 
