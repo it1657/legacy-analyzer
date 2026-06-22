@@ -602,7 +602,7 @@ public class ClaudeServiceImpl implements ClaudeService {
             "- [ ] 외부 API 및 연동 시스템 목록 확인\n";
     }
 
-    // Javadoc 블록 안에 // 스타일이 혼합된 주석을 정규화한다.
+    // 주석 문자열을 정규화한다: 마커 누락 보완 + 혼합 스타일 통일
     private String normalizeComment(String comment) {
         if (comment == null || comment.isBlank()) return comment;
         String trimmed = comment.trim();
@@ -614,7 +614,6 @@ public class ClaudeServiceImpl implements ClaudeService {
             for (String part : parts) {
                 String p = part.trim();
                 if (p.startsWith("//")) {
-                    // // 텍스트  →   * 텍스트
                     fixed.append(" * ").append(p.substring(2).trim()).append("\n");
                 } else {
                     fixed.append(part).append("\n");
@@ -638,7 +637,21 @@ public class ClaudeServiceImpl implements ClaudeService {
             return fixed.toString().stripTrailing();
         }
 
-        return comment;
+        // // 스타일은 그대로 통과
+        if (trimmed.startsWith("//")) return comment;
+
+        // 주석 마커가 전혀 없는 순수 텍스트: // 접두어를 붙여 컴파일 에러 방지
+        String[] lines = trimmed.split("\n");
+        StringBuilder fixed = new StringBuilder();
+        for (String line : lines) {
+            String l = line.trim();
+            if (l.isEmpty()) {
+                fixed.append("//\n");
+            } else {
+                fixed.append("// ").append(l).append("\n");
+            }
+        }
+        return fixed.toString().stripTrailing();
     }
 
     /**
@@ -697,6 +710,7 @@ public class ClaudeServiceImpl implements ClaudeService {
                     if (t.startsWith("import ")) lastImportLineIdx = i;
                 }
 
+                boolean insideBlockComment = false;
                 for (int i = 0; i < lines.length; i++) {
                     int lineIdx1 = i + 1;
                     String trimmed = lines[i].trim();
@@ -711,7 +725,18 @@ public class ClaudeServiceImpl implements ClaudeService {
                         finalCode.append(lines[i]).append("\n");
                         continue;
                     }
-                    // 그 외 일반 위치: Claude 주석 삽입 허용
+
+                    // 기존 /* */ 또는 /** */ 블록 추적: 블록 안에서는 삽입 금지
+                    if (trimmed.startsWith("/**") || (trimmed.startsWith("/*") && !trimmed.startsWith("//"))) {
+                        insideBlockComment = true;
+                    }
+                    if (insideBlockComment) {
+                        finalCode.append(lines[i]).append("\n");
+                        if (trimmed.endsWith("*/")) insideBlockComment = false;
+                        continue;
+                    }
+
+                    // 일반 위치: Claude 주석 삽입 허용
                     if (commentMap.containsKey(lineIdx1)) {
                         for (String cmt : commentMap.get(lineIdx1)) {
                             finalCode.append(cmt).append("\n");
