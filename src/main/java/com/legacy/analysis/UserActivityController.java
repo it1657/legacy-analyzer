@@ -53,6 +53,7 @@ public class UserActivityController {
           .map(h -> {
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("id", h.getId());
+            map.put("sessionId", h.getSessionId());
             map.put("sourcePath", h.getSourcePath());
             map.put("outputPath", h.getOutputPath());
             map.put("totalFiles", h.getTotalFiles());

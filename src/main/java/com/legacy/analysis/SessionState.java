@@ -73,6 +73,18 @@ public class SessionState {
   @JsonProperty("resumedAt")
   private LocalDateTime resumedAt;
 
+  // 일시정지 후 처리되지 않은 파일 경로 목록 (JSON 배열, 재개용)
+  @Column(name = "pending_file_paths_json", columnDefinition = "TEXT")
+  private String pendingFilePathsJson;
+
+  // 재개 시 분석 스레드 재시작에 필요한 사용자명
+  @Column(name = "username", length = 100)
+  private String username;
+
+  // 강제 재분석 여부
+  @Column(name = "force_active")
+  private boolean forceActive = false;
+
   @Transient
   @JsonProperty("sessionSummary")
   private SessionSummaryDto sessionSummary;
@@ -84,6 +96,10 @@ public class SessionState {
   @Transient
   @JsonProperty("metadata")
   private Map<String, Object> metadata = new HashMap<>();
+
+  // 이미 처리된 파일 절대경로 집합 (메모리 전용, 파일 마커 대신 사용)
+  @Transient
+  private java.util.Set<String> patchedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
   // 폴링용 필드 (메모리 전용, DB 저장 안함)
   @Transient
@@ -253,9 +269,44 @@ public class SessionState {
     this.resumedAt = resumedAt;
   }
 
+  public String getPendingFilePathsJson() { return pendingFilePathsJson; }
+  public void setPendingFilePathsJson(String json) { this.pendingFilePathsJson = json; }
+
+  public List<String> getPendingFilePaths() {
+    if (pendingFilePathsJson == null || pendingFilePathsJson.isBlank()) return new ArrayList<>();
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      return mapper.readValue(pendingFilePathsJson,
+          new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+    } catch (Exception e) {
+      return new ArrayList<>();
+    }
+  }
+
+  public void setPendingFilePaths(List<String> paths) {
+    if (paths == null || paths.isEmpty()) {
+      this.pendingFilePathsJson = "[]";
+      return;
+    }
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      this.pendingFilePathsJson = mapper.writeValueAsString(paths);
+    } catch (Exception e) {
+      this.pendingFilePathsJson = "[]";
+    }
+  }
+
+  public java.util.Set<String> getPatchedFilePaths() { return patchedFilePaths; }
+  public void setPatchedFilePaths(java.util.Set<String> set) { this.patchedFilePaths = set; }
+
+  public String getUsername() { return username; }
+  public void setUsername(String username) { this.username = username; }
+  public boolean isForceActive() { return forceActive; }
+  public void setForceActive(boolean forceActive) { this.forceActive = forceActive; }
+
   // 분석을 중단해야 하는지 판단
   public boolean shouldStop() {
-    return isCancelled || "PAUSED".equals(status);
+    return isCancelled || "PAUSED".equals(status) || "PAUSED".equals(currentPhase);
   }
 
   // 분석 완료 상태 확인

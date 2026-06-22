@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Controller
@@ -136,8 +137,10 @@ public class MainApiController {
     SessionState session = sessionManager.createSession(sessionId, finalSourcePath,
         finalOutputPath != null ? finalOutputPath : finalSourcePath);
     session.setUserId(userSeq);
+    session.setUsername(userLoginId);
+    session.setForceActive(forceActive);
     session.setCurrentPhase("STARTING");
-    session.addRecentLog("[세션 시작] SessionID: " + sessionId);
+    session.addRecentLog("[세션 시작] 사용자: " + userLoginId);
 
     final Long finalUserId = userSeq;
     final String finalUsername = userLoginId;
@@ -242,7 +245,8 @@ public class MainApiController {
 
   @PostMapping("/api/dashboard-status")
   @ResponseBody
-  public Map<String, Object> getDashboardStatus(@RequestBody Map<String, String> request) {
+  public Map<String, Object> getDashboardStatus(@RequestBody Map<String, String> request,
+      Authentication authentication) {
     Map<String, Object> resultData = new HashMap<>();
     String folderPathStr = request.get("folderPath");
     String outputPathStr = request.get("outputPath");
@@ -262,14 +266,39 @@ public class MainApiController {
       outputPathStr = folderPathStr;
     }
 
+    // 계정별 출력 경로 계산 (runAnalysis와 동일한 규칙)
+    String safeUsername = "unknown";
+    if (authentication != null && authentication.getPrincipal() instanceof User u) {
+      safeUsername = u.getUserId().replaceAll("[^a-zA-Z0-9_\\-]", "_");
+    }
+    boolean isCopyMode = !outputPathStr.equals(folderPathStr);
+    String userOutputPathStr = isCopyMode
+        ? Path.of(outputPathStr).resolve(safeUsername).toString()
+        : outputPathStr;
+
     Path folderPath = Path.of(folderPathStr);
-    Path outputRootPath = Path.of(outputPathStr);
+    String sourceFolderName = folderPath.getFileName().toString();
+    // 파일이 실제로 복사된 위치: {outputPath}/{username}/{sourceFolderName}/
+    Path outputRootPath = isCopyMode
+        ? Path.of(userOutputPathStr).resolve(sourceFolderName)
+        : Path.of(outputPathStr);
 
     try (Stream<Path> stream = Files.walk(folderPath)) {
       List<Path> fileList = stream
           .filter(Files::isRegularFile)
           .filter(this::isSupportedFile)
           .toList();
+
+      // 추적 파일 로드 (완료 여부 확인용) - 계정별 경로 기준
+      java.util.Set<String> trackedPaths = new java.util.HashSet<>();
+      Path trackerFile = getTrackerFilePath(userOutputPathStr);
+      if (Files.exists(trackerFile)) {
+        try {
+          Files.readAllLines(trackerFile, StandardCharsets.UTF_8).stream()
+              .map(String::trim).filter(l -> !l.isEmpty())
+              .forEach(trackedPaths::add);
+        } catch (Exception ignored) {}
+      }
 
       List<Map<String, Object>> fileStatusList = new ArrayList<>();
       int completeCount = 0;
@@ -281,13 +310,16 @@ public class MainApiController {
 
         Path relativeSubPath = folderPath.relativize(path);
         Path targetPath = outputRootPath.resolve(relativeSubPath);
-        File targetFile = targetPath.toFile();
 
-        if (targetFile.exists()) {
+        // 추적 파일 기반 완료 여부 확인
+        String absTarget = targetPath.toAbsolutePath().normalize().toString();
+        if (trackedPaths.contains(absTarget)) {
+          isCompleted = true;
+        } else if (targetPath.toFile().exists()) {
+          // 하위 호환: 이전 마커 문자열 체크
           String targetContent = readFileStrictSafely(targetPath);
-          if (targetContent.contains("[AI 한글 주석 가상 시뮬레이션 완료]") ||
-              targetContent.contains("[AI 한글 주석 보완 완료]") ||
-              targetContent.contains("초대용량 특수 마킹 주석 예외")) {
+          if (targetContent.contains("[AI 한글 주석 보완 완료]") ||
+              targetContent.contains("[AI 한글 주석 가상 시뮬레이션 완료]")) {
             isCompleted = true;
           }
         }
@@ -304,9 +336,9 @@ public class MainApiController {
       resultData.put("completeCount", completeCount);
       resultData.put("waitCount", waitCount);
       resultData.put("files", fileStatusList);
-      resultData.put("outputPath", outputPathStr);
+      resultData.put("outputPath", userOutputPathStr);
       resultData.put("consoleLog",
-          "[안내] 원본 레거시 구조 스캔 완료.\n- 실시간 검증 대상 위치: [" + outputPathStr + "]");
+          "[안내] 원본 레거시 구조 스캔 완료.\n- 실시간 검증 대상 위치: [" + userOutputPathStr + "]");
 
       return resultData;
     } catch (Exception e) {
@@ -333,6 +365,7 @@ public class MainApiController {
     }
     session.setPausedAt(LocalDateTime.now());
     session.setCurrentPhase("PAUSED");
+    session.setStatus("PAUSED");
     response.put("success", true);
     response.put("message", "분석이 일시 중지되었습니다.");
     return response;
@@ -346,15 +379,38 @@ public class MainApiController {
     if (sessionId == null || sessionId.isEmpty()) {
       response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
     }
+    // DB에서도 로드 시도 (서버 재시작 후 세션이 메모리에 없는 경우 포함)
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) {
       response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
     }
+
+    List<String> pendingPaths = session.getPendingFilePaths();
+    if (pendingPaths.isEmpty()) {
+      response.put("success", false);
+      response.put("message", "재개할 파일이 없습니다. 처음부터 새로 분석해 주세요.");
+      return response;
+    }
+
+    List<Path> pendingFilePaths = pendingPaths.stream()
+        .map(Path::of)
+        .filter(Files::exists)
+        .collect(Collectors.toList());
+
     session.setResumedAt(LocalDateTime.now());
     session.setPausedAt(null);
     session.setCurrentPhase("ANALYZING");
+    session.setStatus("IN_PROGRESS");
+    session.setPendingFilePaths(new ArrayList<>());  // 재개 시작 시 pending 초기화
+
+    final String sid = sessionId;
+    final List<Path> filesToProcess = pendingFilePaths;
+    new Thread(() -> runAnalysisResume(sid, filesToProcess)).start();
+
     response.put("success", true);
-    response.put("message", "분석이 재개됩니다.");
+    response.put("message", String.format("분석을 재개합니다. (남은 파일: %d개)", pendingFilePaths.size()));
+    response.put("pendingCount", pendingFilePaths.size());
+    response.put("sessionId", sessionId);
     return response;
   }
 
@@ -394,7 +450,13 @@ public class MainApiController {
       // 경로 계산
       boolean isCopyMode = normalizedOutputPath != null && !normalizedOutputPath.isBlank()
           && !normalizedSourcePath.equals(normalizedOutputPath.trim());
-      String finalOutputPath = isCopyMode ? normalizedOutputPath.trim() : normalizedSourcePath;
+
+      // 계정별 분리: {outputPath}/{username}/
+      String safeUsername = (username != null && !username.isBlank())
+          ? username.replaceAll("[^a-zA-Z0-9_\\-]", "_") : "unknown";
+      String finalOutputPath = isCopyMode
+          ? Path.of(normalizedOutputPath.trim()).resolve(safeUsername).toString().replace("\\", "/")
+          : normalizedSourcePath;
 
       Path sourceRootPath = Path.of(normalizedSourcePath);
       String sourceFolderName = sourceRootPath.getFileName().toString();
@@ -453,10 +515,18 @@ public class MainApiController {
       }
 
       // [3단계] 파일 병렬 분석
+      // 기존에 처리된 파일 목록을 추적 파일에서 로드 (재분석 스킵용)
+      loadTrackerIntoSession(session, finalOutputPath);
+
+      claudeService.resetTokenUsage();
       AtomicInteger successCount = new AtomicInteger(0);
       AtomicInteger skipCount = new AtomicInteger(0);
       AtomicInteger alreadyProcessedCount = new AtomicInteger(0);
       AtomicInteger processedTotal = new AtomicInteger(0);
+
+      // 일시정지 감지 및 완료 파일 추적 (재개 기능용)
+      java.util.concurrent.atomic.AtomicBoolean pauseDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+      java.util.Set<String> completedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
       int actualThreadPoolSize = threadPoolSize;
       if (threadPoolSize <= 0) {
@@ -476,6 +546,7 @@ public class MainApiController {
           try {
             SessionState currentSession = sessionManager.getSession(sessionId);
             if (currentSession != null && currentSession.shouldStop()) {
+              if (currentSession != null && !currentSession.isCancelled()) pauseDetected.set(true);
               return;
             }
 
@@ -488,6 +559,8 @@ public class MainApiController {
 
             FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
                 sourceRootPath, isForceActive, finalOutPath);
+
+            completedFilePaths.add(filePath.toString());
 
             // 카운터 업데이트
             if ("SUCCESS".equals(fileState.getStatus())) {
@@ -532,6 +605,29 @@ public class MainApiController {
       log.info("[병렬 분석 완료] 성공:{}, 스킵:{}, 이미처리:{}",
           successCount.get(), skipCount.get(), alreadyProcessedCount.get());
 
+      // 일시정지로 중단된 경우 - 남은 파일 DB에 저장하고 완료 처리 생략
+      if (pauseDetected.get()) {
+        List<String> pendingPaths = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(pendingPaths);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.addRecentLog(String.format(
+            "[일시정지 완료] %d개 처리됨, %d개 대기 중. 분석 이력에서 '이어서 분석' 버튼으로 재개하세요.",
+            completedFilePaths.size(), pendingPaths.size()));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
       // [4단계] 완료 처리
       session.setCurrentPhase("FINALIZING");
       session.addRecentLog("[시스템] ✓ AI 분석 완료! 최종 보고서를 생성합니다.");
@@ -548,6 +644,136 @@ public class MainApiController {
       log.error("[분석 중 예외]", e);
       session.setCurrentPhase("FAILED");
       session.addErrorLog("분석 중 오류: " + e.getMessage());
+      sessionManager.failSession(sessionId, e.getMessage());
+    }
+  }
+
+  // ===================================================================
+  // 재개 분석 (PAUSED 세션 재시작)
+  // ===================================================================
+
+  private void runAnalysisResume(String sessionId, List<Path> fileList) {
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) { log.error("[재개 오류] 세션 없음: {}", sessionId); return; }
+
+    long startTime = System.currentTimeMillis();
+    try {
+      String normalizedSourcePath = session.getSourcePath();
+      String normalizedOutputPath = session.getOutputPath();
+      boolean isForceActive = session.isForceActive();
+
+      boolean isCopyMode = !normalizedSourcePath.equals(normalizedOutputPath);
+      Path sourceRootPath = Path.of(normalizedSourcePath);
+      Path finalProjectOutputPath = isCopyMode
+          ? Path.of(normalizedOutputPath).resolve(sourceRootPath.getFileName())
+          : sourceRootPath;
+      String finalOutPath = normalizedOutputPath;
+
+      AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
+      if (history != null) {
+        history.setStatus("IN_PROGRESS");
+        analysisHistoryRepository.save(history);
+      }
+
+      session.addRecentLog(String.format("[재개] %d개 파일 이어서 분석합니다...", fileList.size()));
+
+      AtomicInteger successCount = new AtomicInteger(session.getStatistics().getSuccessCount());
+      AtomicInteger alreadyProcessedCount = new AtomicInteger(session.getStatistics().getSkipCount());
+      AtomicInteger skipCount = new AtomicInteger(0);
+      AtomicInteger processedTotal = new AtomicInteger(session.getProcessedFiles());
+
+      java.util.concurrent.atomic.AtomicBoolean pauseDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+      java.util.Set<String> completedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+      int actualThreadPoolSize = threadPoolSize <= 0
+          ? Math.max(8, Runtime.getRuntime().availableProcessors() * 2) : threadPoolSize;
+
+      java.util.concurrent.ExecutorService executor =
+          java.util.concurrent.Executors.newFixedThreadPool(actualThreadPoolSize);
+      java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(fileList.size());
+
+      for (int i = 0; i < fileList.size(); i++) {
+        final int idx = i;
+        executor.submit(() -> {
+          try {
+            SessionState cur = sessionManager.getSession(sessionId);
+            if (cur != null && cur.shouldStop()) {
+              if (!cur.isCancelled()) pauseDetected.set(true);
+              return;
+            }
+            Path filePath = fileList.get(idx);
+            Path analysisRoot = isCopyMode ? finalProjectOutputPath : sourceRootPath;
+            Path relPath = analysisRoot.relativize(filePath);
+            Path targetPath = isCopyMode ? finalProjectOutputPath.resolve(relPath) : filePath;
+
+            FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
+                sourceRootPath, isForceActive, finalOutPath);
+
+            completedFilePaths.add(filePath.toString());
+
+            if ("SUCCESS".equals(fileState.getStatus())) {
+              session.getStatistics().setSuccessCount(successCount.incrementAndGet());
+            } else if ("SKIPPED".equals(fileState.getStatus())) {
+              if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
+                session.getStatistics().setSkipCount(alreadyProcessedCount.incrementAndGet());
+              } else { skipCount.incrementAndGet(); }
+            } else if ("FAILED".equals(fileState.getStatus())) {
+              session.getStatistics().setFailureCount(session.getStatistics().getFailureCount() + 1);
+            }
+
+            int processed = processedTotal.incrementAndGet();
+            session.setProcessedFiles(processed);
+
+            int totalFiles = session.getTotalFiles();
+            int logInterval = Math.max(1, fileList.size() / 50);
+            if (processed <= 5 || processed % logInterval == 0) {
+              int pct = totalFiles > 0 ? (int) ((processed * 100.0) / totalFiles) : 0;
+              String icon = "SUCCESS".equals(fileState.getStatus()) ? "✅" : "⏭️";
+              session.addRecentLog(String.format("[재개 진행] %s %d/%d (%d%%) - %s",
+                  icon, processed, totalFiles, pct, relPath.toString().replace("\\", "/")));
+            }
+          } catch (Exception e) {
+            log.error("[재개 파일 분석 예외 - #{}]", idx, e);
+            processedTotal.incrementAndGet();
+          } finally {
+            latch.countDown();
+          }
+        });
+      }
+
+      latch.await();
+      executor.shutdown();
+
+      if (pauseDetected.get()) {
+        List<String> newPending = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(newPending);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.addRecentLog(String.format("[일시정지] %d개 완료, %d개 대기 중.",
+            completedFilePaths.size(), newPending.size()));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      session.setCurrentPhase("FINALIZING");
+      String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName,
+          successCount.get(), alreadyProcessedCount.get(), skipCount.get(), startTime, history);
+
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      session.setCurrentPhase("FAILED");
+      sessionManager.failSession(sessionId, "인터럽트");
+    } catch (Exception e) {
+      log.error("[재개 분석 중 예외]", e);
+      session.setCurrentPhase("FAILED");
+      session.addErrorLog("재개 분석 오류: " + e.getMessage());
       sessionManager.failSession(sessionId, e.getMessage());
     }
   }
@@ -824,16 +1050,57 @@ public class MainApiController {
     }
   }
 
-  private boolean isAlreadyPatched(Path targetPath, boolean forceActive) {
+  // 추적 파일 경로 (출력 루트에 위치)
+  private static final String TRACKER_FILE_NAME = ".ai-analysis-done.txt";
+
+  private Path getTrackerFilePath(String outputRoot) {
+    return Path.of(outputRoot).resolve(TRACKER_FILE_NAME);
+  }
+
+  // 세션 시작 시 추적 파일을 읽어 patchedFilePaths Set에 로드
+  private void loadTrackerIntoSession(SessionState session, String outputRoot) {
+    try {
+      Path tracker = getTrackerFilePath(outputRoot);
+      if (!Files.exists(tracker)) return;
+      Files.readAllLines(tracker, java.nio.charset.StandardCharsets.UTF_8).stream()
+          .map(String::trim)
+          .filter(l -> !l.isEmpty())
+          .forEach(session.getPatchedFilePaths()::add);
+      log.info("[추적 파일 로드] {}개 파일 로드됨", session.getPatchedFilePaths().size());
+    } catch (Exception e) {
+      log.warn("[추적 파일 로드 실패] {}", e.getMessage());
+    }
+  }
+
+  // 처리 완료 파일을 Set과 추적 파일에 동시 기록
+  private synchronized void markFileAsPatched(Path targetPath, SessionState session, String outputRoot) {
+    String absPath = targetPath.toAbsolutePath().normalize().toString();
+    session.getPatchedFilePaths().add(absPath);
+    try {
+      Path tracker = getTrackerFilePath(outputRoot);
+      Files.writeString(tracker, absPath + "\n", java.nio.charset.StandardCharsets.UTF_8,
+          java.nio.file.StandardOpenOption.CREATE,
+          java.nio.file.StandardOpenOption.APPEND);
+    } catch (Exception e) {
+      log.warn("[추적 파일 기록 실패] {}", e.getMessage());
+    }
+  }
+
+  private boolean isAlreadyPatched(Path targetPath, boolean forceActive, String sessionId) {
     if (forceActive) return false;
     if (!Files.exists(targetPath)) return false;
+    // 세션의 메모리 Set 확인 (빠른 경로)
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session != null) {
+      String absPath = targetPath.toAbsolutePath().normalize().toString();
+      if (session.getPatchedFilePaths().contains(absPath)) return true;
+    }
+    // 하위 호환: 이전 버전에서 생성된 마커 문자열도 인식
     try {
       String content = readFileStrictSafely(targetPath);
-      return content.contains("[AI 한글 주석 가상 시뮬레이션 완료]") ||
-          content.contains("[AI 한글 주석 보완 완료]") ||
-          content.contains("초대용량 특수 마킹 주석 예외");
+      return content.contains("[AI 한글 주석 보완 완료]") ||
+             content.contains("[AI 한글 주석 가상 시뮬레이션 완료]");
     } catch (Exception e) {
-      log.error("[패치 상태 확인 실패] {}", targetPath, e);
       return false;
     }
   }
@@ -890,7 +1157,7 @@ public class MainApiController {
       String fileName = filePath.getFileName().toString();
       long fileSize = Files.size(filePath);
 
-      if (isAlreadyPatched(targetPath, forceActive)) {
+      if (isAlreadyPatched(targetPath, forceActive, sessionId)) {
         fileState.setStatus("SKIPPED");
         fileState.setErrorType("ALREADY_PATCHED");
         fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
@@ -914,6 +1181,12 @@ public class MainApiController {
         Files.writeString(targetPath, commentedCode, StandardCharsets.UTF_8);
         return null;
       });
+
+      // 처리 완료 파일을 추적 파일에 기록 (마커 주석 대체)
+      SessionState curSession = sessionManager.getSession(sessionId);
+      if (curSession != null) {
+        markFileAsPatched(targetPath, curSession, finalOutputPath);
+      }
 
       fileState.setStatus("SUCCESS");
       fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
@@ -952,55 +1225,178 @@ public class MainApiController {
     }
   }
 
+  /**
+   * 출력 폴더를 직접 스캔하여 프로젝트 구조 정보를 생성한다.
+   * (processedFilesList는 @Transient라 재시작 후 소멸하므로 파일 시스템 기반으로 처리)
+   */
   private StringBuilder buildDetailedProjectStructure(SessionState session, Path outputPath) {
     StringBuilder sb = new StringBuilder();
-    if (session == null || session.getProcessedFilesList().isEmpty()) {
-      return sb.append("분석된 파일이 없습니다.");
+
+    if (outputPath == null || !Files.exists(outputPath)) {
+      return sb.append("출력 경로를 찾을 수 없습니다: ").append(outputPath);
     }
+
+    // 빌드 도구 감지
+    String buildInfo = detectBuildTool(outputPath);
+    if (!buildInfo.isEmpty()) {
+      sb.append("### 빌드 도구\n\n").append(buildInfo).append("\n\n");
+    }
+
+    // 주요 설정 정보
+    String configInfo = extractConfigInfo(outputPath);
+    if (!configInfo.isEmpty()) {
+      sb.append("### 주요 설정 정보\n\n").append(configInfo).append("\n");
+    }
+
+    // 출력 폴더를 직접 스캔하여 파일 분류
+    Map<String, List<String>> layerFiles = new java.util.LinkedHashMap<>();
+    layerFiles.put("Controller", new ArrayList<>());
+    layerFiles.put("Service", new ArrayList<>());
+    layerFiles.put("Repository", new ArrayList<>());
+    layerFiles.put("Entity", new ArrayList<>());
+    layerFiles.put("DTO", new ArrayList<>());
+    layerFiles.put("Config", new ArrayList<>());
+    layerFiles.put("기타", new ArrayList<>());
 
     Map<String, List<String>> packageGroups = new TreeMap<>();
-    List<String> otherFiles = new ArrayList<>();
+    List<Path> webFiles = new ArrayList<>();
+    List<Path> configFiles = new ArrayList<>();
+    int[] javaCount = {0};
 
-    for (FileAnalysisState fileState : session.getProcessedFilesList().values()) {
-      if ("SUCCESS".equals(fileState.getStatus())) {
-        String filePath = fileState.getFilePath();
-        String packagePath = extractPackagePath(filePath);
-        if (packagePath != null && !packagePath.isEmpty()) {
-          packageGroups.computeIfAbsent(packagePath, k -> new ArrayList<>()).add(filePath);
-        } else {
-          otherFiles.add(filePath);
-        }
-      }
+    try (Stream<Path> stream = Files.walk(outputPath)) {
+      stream.filter(Files::isRegularFile)
+            .filter(this::isSupportedFile)
+            .forEach(path -> {
+              String name = path.getFileName().toString();
+              String lw = name.toLowerCase();
+
+              if (lw.endsWith(".java")) {
+                javaCount[0]++;
+                String simple = name.replace(".java", "");
+                if (lw.endsWith("controller.java"))                                           layerFiles.get("Controller").add(simple);
+                else if (lw.endsWith("service.java") || lw.endsWith("serviceimpl.java"))     layerFiles.get("Service").add(simple);
+                else if (lw.endsWith("repository.java"))                                      layerFiles.get("Repository").add(simple);
+                else if (lw.endsWith("entity.java"))                                          layerFiles.get("Entity").add(simple);
+                else if (lw.endsWith("dto.java") || lw.endsWith("requestdto.java") || lw.endsWith("responsedto.java")) layerFiles.get("DTO").add(simple);
+                else if (lw.endsWith("config.java") || lw.endsWith("configuration.java"))    layerFiles.get("Config").add(simple);
+                else                                                                           layerFiles.get("기타").add(simple);
+
+                String pathStr = path.toString().replace("\\", "/");
+                String pkg = extractPackagePath(pathStr);
+                if (pkg != null && !pkg.isEmpty()) {
+                  packageGroups.computeIfAbsent(pkg, k -> new ArrayList<>()).add(name);
+                }
+              } else if (lw.endsWith(".html") || lw.endsWith(".js") || lw.endsWith(".ts") || lw.endsWith(".vue") || lw.endsWith(".css")) {
+                webFiles.add(path);
+              } else if (lw.endsWith(".properties") || lw.endsWith(".yml") || lw.endsWith(".yaml") || lw.endsWith(".xml")) {
+                configFiles.add(path);
+              }
+            });
+    } catch (Exception e) {
+      log.warn("[구조 스캔 실패] {}", e.getMessage());
     }
 
-    sb.append("### 프로젝트 패키지 구조\n\n");
-    for (Map.Entry<String, List<String>> entry : packageGroups.entrySet()) {
-      sb.append("#### ").append(entry.getKey()).append(" (").append(entry.getValue().size()).append("개)\n");
-      for (String file : entry.getValue()) {
-        String fileName = new File(file).getName();
-        String role = inferFileRole(fileName);
-        sb.append("- ").append(fileName);
-        if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+    // 계층별 통계 출력
+    sb.append("### 계층별 클래스 통계\n\n");
+    layerFiles.forEach((layer, files) -> {
+      if (!files.isEmpty()) {
+        sb.append("- **").append(layer).append("** (").append(files.size()).append("개): ");
+        List<String> preview = files.subList(0, Math.min(files.size(), 8));
+        sb.append(String.join(", ", preview));
+        if (files.size() > 8) sb.append(" 외 ").append(files.size() - 8).append("개");
         sb.append("\n");
       }
-      sb.append("\n");
-    }
-    if (!otherFiles.isEmpty()) {
-      sb.append("#### 기타 파일 및 설정\n");
-      for (String file : otherFiles) {
-        String fileName = new File(file).getName();
-        sb.append("- ").append(fileName).append("\n");
+    });
+    sb.append("\n");
+
+    // 패키지 구조 출력
+    if (!packageGroups.isEmpty()) {
+      sb.append("### 프로젝트 패키지 구조\n\n");
+      for (Map.Entry<String, List<String>> entry : packageGroups.entrySet()) {
+        sb.append("#### ").append(entry.getKey()).append(" (").append(entry.getValue().size()).append("개)\n");
+        for (String fileName : entry.getValue()) {
+          String role = inferFileRole(fileName);
+          sb.append("- ").append(fileName);
+          if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+          sb.append("\n");
+        }
+        sb.append("\n");
       }
-      sb.append("\n");
     }
 
-    int totalFiles = (int) session.getProcessedFilesList().values().stream()
-        .filter(f -> "SUCCESS".equals(f.getStatus())).count();
+    // 분석 통계
     sb.append("### 분석 통계\n\n");
-    sb.append("- 총 분석 파일 수: ").append(totalFiles).append("개\n");
+    sb.append("- Java 파일: ").append(javaCount[0]).append("개\n");
+    sb.append("- 웹 파일: ").append(webFiles.size()).append("개\n");
+    sb.append("- 설정 파일: ").append(configFiles.size()).append("개\n");
     sb.append("- 패키지 수: ").append(packageGroups.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
     sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+
     return sb;
+  }
+
+  private String detectBuildTool(Path outputPath) {
+    if (outputPath == null) return "";
+    try {
+      Path pom = outputPath.resolve("pom.xml");
+      if (Files.exists(pom)) {
+        String content = Files.readString(pom, StandardCharsets.UTF_8);
+        return "Maven (pom.xml)\n- groupId: " + extractXmlTag(content, "groupId") +
+               "\n- artifactId: " + extractXmlTag(content, "artifactId") +
+               "\n- version: " + extractXmlTag(content, "version");
+      }
+      if (Files.exists(outputPath.resolve("build.gradle.kts"))) return "Gradle (Kotlin DSL, build.gradle.kts)";
+      if (Files.exists(outputPath.resolve("build.gradle")))     return "Gradle (Groovy DSL, build.gradle)";
+      if (Files.exists(outputPath.resolve("package.json")))     return "npm / Node.js (package.json)";
+    } catch (Exception e) {
+      log.warn("[빌드 도구 감지 실패] {}", e.getMessage());
+    }
+    return "";
+  }
+
+  private String extractXmlTag(String xml, String tag) {
+    String open = "<" + tag + ">";
+    int start = xml.indexOf(open);
+    if (start < 0) return "-";
+    start += open.length();
+    int end = xml.indexOf("</" + tag + ">", start);
+    return end > start ? xml.substring(start, end).trim() : "-";
+  }
+
+  private String extractConfigInfo(Path outputPath) {
+    if (outputPath == null) return "";
+    StringBuilder info = new StringBuilder();
+    Path[] candidates = {
+        outputPath.resolve("src/main/resources/application.properties"),
+        outputPath.resolve("src/main/resources/application.yml"),
+        outputPath.resolve("src/main/resources/application.yaml"),
+    };
+    for (Path configPath : candidates) {
+      if (!Files.exists(configPath)) continue;
+      try {
+        List<String> keyLines = Files.readAllLines(configPath, StandardCharsets.UTF_8).stream()
+            .filter(l -> !l.isBlank() && !l.trim().startsWith("#"))
+            .filter(l -> l.contains("server.port") || l.contains("spring.datasource") ||
+                         l.contains("spring.jpa") || l.contains("spring.profiles") ||
+                         l.contains("anthropic") || l.contains("jwt") ||
+                         l.contains("spring.application.name"))
+            .limit(10)
+            .map(l -> "  " + l.trim())
+            .collect(Collectors.toList());
+        if (!keyLines.isEmpty()) {
+          info.append(configPath.getFileName()).append(":\n");
+          keyLines.forEach(l -> info.append(l).append("\n"));
+          info.append("\n");
+        }
+      } catch (Exception e) {
+        log.warn("[설정 파일 읽기 실패] {}: {}", configPath, e.getMessage());
+      }
+      break;
+    }
+    return info.toString();
   }
 
   private String extractPackagePath(String filePath) {

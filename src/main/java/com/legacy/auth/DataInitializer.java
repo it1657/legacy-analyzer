@@ -33,6 +33,7 @@ public class DataInitializer implements CommandLineRunner {
     log.info("[데이터 초기화] 시작");
     initializeRoles();
     initializeAdminUser();
+    initializeTestUser();
     log.info("[데이터 초기화] 완료");
   }
 
@@ -50,6 +51,24 @@ public class DataInitializer implements CommandLineRunner {
       userRole.setDescription("일반 사용자 역할");
       roleRepository.save(userRole);
       log.info("[역할 생성] USER");
+    }
+  }
+
+  private void initializeTestUser() {
+    if (!userRepository.existsByUserId("test")) {
+      Role userRole = roleRepository.findByName("USER")
+          .orElseThrow(() -> new RuntimeException("USER 역할이 없습니다."));
+
+      User testUser = new User("test", "test@example.com",
+          passwordEncoder.encode("1"));
+      testUser.setDisplayName("테스트사용자");
+      testUser.setRoles(new HashSet<>(Collections.singleton(userRole)));
+      testUser.setActive(true);
+      testUser.setCreatedAt(LocalDateTime.now());
+      testUser.setUpdatedAt(LocalDateTime.now());
+
+      userRepository.save(testUser);
+      log.info("[기본 사용자 생성] userId=test (비밀번호: 1)");
     }
   }
 

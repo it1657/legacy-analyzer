@@ -10,6 +10,8 @@ import org.springframework.boot.autoconfigure.domain.EntityScan;
 @EntityScan(basePackages = "com.legacy")
 public class LegacyAnalyzerApplication {
     public static void main(String[] args) {
-        SpringApplication.run(LegacyAnalyzerApplication.class, args);
+        SpringApplication app = new SpringApplication(LegacyAnalyzerApplication.class);
+        app.addListeners(new DatasourceAutoSelector());
+        app.run(args);
     }
 }

@@ -14,7 +14,9 @@ import java.nio.file.*;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -71,6 +73,9 @@ public class PresentationGeneratorService {
 
     createProjectTitleSlide(ppt, h);
     createProjectScopeSlide(ppt, h);
+    createArchitectureSlide(ppt, h);
+    createDomainAnalysisSlide(ppt, h);
+    createLayerResponsibilitySlide(ppt, h);
     createProjectStructureSlide(ppt, h);
     createResourceStructureSlide(ppt, h);    // resources/ 설정·XML mapper 구조
     createReadmeSlides(ppt, h.getReadmeContent());
@@ -968,6 +973,235 @@ public class PresentationGeneratorService {
     addRect(slide, 40, 125, 4, H - 155, ACCENT);
     addText(slide, display.toString().trim(),
         60, 136, W - 108, H - 178, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+  }
+
+  // ── 소스 직접 파싱: Java 파일을 계층별로 분류 ──────────────
+  private Map<String, List<String>> collectJavaFilesByLayer(Path javaRoot) {
+    Map<String, List<String>> result = new java.util.LinkedHashMap<>();
+    result.put("Controller", new ArrayList<>());
+    result.put("Service",    new ArrayList<>());
+    result.put("Repository", new ArrayList<>());
+    result.put("Entity",     new ArrayList<>());
+    result.put("DTO",        new ArrayList<>());
+    result.put("Config",     new ArrayList<>());
+
+    if (!Files.exists(javaRoot)) return result;
+    try (Stream<Path> files = Files.walk(javaRoot, 10)) {
+      files.filter(p -> p.toString().endsWith(".java"))
+           .map(p -> p.getFileName().toString().replace(".java", ""))
+           .forEach(name -> {
+             String lw = name.toLowerCase();
+             if (lw.endsWith("controller"))                                   result.get("Controller").add(name);
+             else if (lw.endsWith("service") || lw.endsWith("serviceimpl"))  result.get("Service").add(name);
+             else if (lw.endsWith("repository"))                              result.get("Repository").add(name);
+             else if (lw.endsWith("entity"))                                  result.get("Entity").add(name);
+             else if (lw.endsWith("dto"))                                     result.get("DTO").add(name);
+             else if (lw.endsWith("config") || lw.endsWith("configuration")) result.get("Config").add(name);
+           });
+    } catch (IOException e) {
+      log.warn("계층별 파일 수집 실패: {}", javaRoot, e);
+    }
+    return result;
+  }
+
+  // ── 고객 납품용: 시스템 아키텍처 슬라이드 ──────────────────
+  private void createArchitectureSlide(XMLSlideShow ppt, AnalysisHistory h) {
+    XSLFSlide slide = ppt.createSlide();
+    fillBackground(slide, BG_DARK);
+    addSlideHeader(slide, "시스템 아키텍처", "System Architecture");
+
+    // 계층 흐름 다이어그램
+    String[] flowNames = {"Client",  "Controller", "Service",    "Repository",  "Database"};
+    String[] flowSubs  = {"요청/응답", "REST API",  "비즈니스 로직", "데이터 접근", "저장소"};
+    Color[]  flowBg    = {BG_CARD, BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
+    Color[]  flowTxt   = {TEXT_GRAY, TEXT_WHITE, TEXT_WHITE, TEXT_WHITE, TEXT_WHITE};
+    Color[]  flowSub   = {TEXT_GRAY, new Color(186, 230, 253), new Color(187, 247, 208),
+                          new Color(253, 230, 138), new Color(221, 214, 254)};
+
+    int bW = 124, bH = 54, aW = 34;
+    int totalBW = 5 * bW + 4 * aW;
+    int bSx = (W - totalBW) / 2;
+
+    for (int i = 0; i < 5; i++) {
+      int x = bSx + i * (bW + aW);
+      addRoundCard(slide, x, 118, bW, bH, flowBg[i]);
+      addText(slide, flowNames[i], x, 124, bW, 22, 12, true, flowTxt[i], TextParagraph.TextAlign.CENTER);
+      addText(slide, flowSubs[i],  x, 148, bW, 16,  8, false, flowSub[i], TextParagraph.TextAlign.CENTER);
+      if (i < 4) {
+        addText(slide, "→", x + bW, 118, aW, bH, 14, true, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
+      }
+    }
+    addRect(slide, 40, 182, W - 80, 1, BG_CARD);
+
+    // 계층별 클래스 현황 (4열 카드)
+    String sourcePath = h.getSourcePath();
+    if (sourcePath == null || sourcePath.isBlank()) return;
+    Path javaRoot = Paths.get(sourcePath).resolve("src").resolve("main").resolve("java");
+    Map<String, List<String>> byLayer = collectJavaFilesByLayer(javaRoot);
+
+    String[] keys  = {"Controller", "Service", "Repository", "Entity"};
+    String[] icons = {"🎮", "⚙️", "🗄️", "📦"};
+    String[] roles = {
+        "REST API 엔드포인트\n요청 수신 및 응답 처리\n입력 검증·권한 확인",
+        "비즈니스 로직 처리\n도메인 규칙·흐름 제어\n트랜잭션 경계 설정",
+        "데이터베이스 접근\nCRUD 쿼리 실행\nJPA·MyBatis 처리",
+        "도메인 모델·DTO\n엔티티 및 전송 객체\n데이터 구조 정의"
+    };
+    Color[] layerColors = {BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
+
+    int cW = (W - 100) / 4;
+    int cGap = (W - 80 - 4 * cW) / 3;
+
+    for (int i = 0; i < 4; i++) {
+      int x = 40 + i * (cW + cGap);
+      int y = 190, cH = H - y - 14;
+
+      addRoundCard(slide, x, y, cW, cH, BG_CARD);
+      addRect(slide, x, y, cW, 3, layerColors[i]);
+
+      addText(slide, icons[i] + "  " + keys[i], x + 10, y + 8, cW - 60, 22, 12, true, layerColors[i], TextParagraph.TextAlign.LEFT);
+
+      List<String> files = new ArrayList<>(byLayer.getOrDefault(keys[i], List.of()));
+      if ("Entity".equals(keys[i])) files.addAll(byLayer.getOrDefault("DTO", List.of()));
+
+      addText(slide, files.size() + "개", x + cW - 46, y + 8, 40, 22, 11, true, TEXT_WHITE, TextParagraph.TextAlign.RIGHT);
+      addText(slide, roles[i], x + 10, y + 34, cW - 20, 54, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      addRect(slide, x + 10, y + 92, cW - 20, 1, new Color(51, 65, 85));
+
+      int fy = y + 98;
+      int maxShow = Math.min(files.size(), 12);
+      for (int j = 0; j < maxShow; j++) {
+        addText(slide, "• " + files.get(j), x + 10, fy, cW - 20, 16, 8, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+        fy += 17;
+      }
+      if (files.size() > 12) {
+        addText(slide, "  외 " + (files.size() - 12) + "개 ...", x + 10, fy, cW - 20, 14, 7, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      }
+      if (files.isEmpty()) {
+        addText(slide, "(해당 없음)", x + 10, fy, cW - 20, 16, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      }
+    }
+  }
+
+  // ── 고객 납품용: 도메인별 기능 분석 슬라이드 ────────────────
+  private void createDomainAnalysisSlide(XMLSlideShow ppt, AnalysisHistory h) {
+    XSLFSlide slide = ppt.createSlide();
+    fillBackground(slide, BG_DARK);
+    addSlideHeader(slide, "도메인별 기능 분석", "Domain Function Analysis");
+
+    String sourcePath = h.getSourcePath();
+    if (sourcePath == null || sourcePath.isBlank()) {
+      addText(slide, "(소스 경로 정보 없음)", 40, 280, W - 80, 40, 14, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
+      return;
+    }
+
+    Path javaRoot = Paths.get(sourcePath).resolve("src").resolve("main").resolve("java");
+    List<String[]> packages = buildPackageList(javaRoot);
+
+    if (packages.isEmpty()) {
+      addText(slide, "Java 패키지 구조를 찾을 수 없습니다.", 40, 270, W - 80, 40, 13, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
+      return;
+    }
+
+    boolean twoCol = packages.size() > 5;
+    int half   = twoCol ? (packages.size() + 1) / 2 : packages.size();
+    int colW   = twoCol ? (W - 100) / 2 : W - 80;
+    int cardH  = 68, gap = 5, startY = 120;
+
+    for (int i = 0; i < packages.size(); i++) {
+      int col = twoCol ? i / half : 0;
+      int row = twoCol ? i % half : i;
+      int x = 40 + col * (colW + 20);
+      int y = startY + row * (cardH + gap);
+      if (y + cardH > H - 12) break;
+
+      String[] pkg = packages.get(i);
+      addRoundCard(slide, x, y, colW, cardH, BG_CARD);
+      addRect(slide, x, y, 3, cardH, ACCENT2);
+
+      // 도메인명 (좌측)
+      addText(slide, "📦  " + pkg[0], x + 12, y + 6, (colW - 24) * 2 / 3, 20, 11, true, ACCENT2, TextParagraph.TextAlign.LEFT);
+
+      // 클래스 타입 요약 (우측)
+      if (pkg[2] != null && !pkg[2].isEmpty()) {
+        addText(slide, pkg[2], x + 12 + (colW - 24) * 2 / 3, y + 6, (colW - 24) / 3, 20, 8, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
+      }
+
+      // 기능 설명
+      addText(slide, pkg[1], x + 12, y + 30, colW - 24, 32, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+    }
+  }
+
+  // ── 고객 납품용: 계층별 역할 정의 슬라이드 ──────────────────
+  private void createLayerResponsibilitySlide(XMLSlideShow ppt, AnalysisHistory h) {
+    XSLFSlide slide = ppt.createSlide();
+    fillBackground(slide, BG_DARK);
+    addSlideHeader(slide, "계층별 역할 정의", "Layer Responsibility");
+
+    String sourcePath = h.getSourcePath();
+    Path javaRoot = (sourcePath != null && !sourcePath.isBlank())
+        ? Paths.get(sourcePath).resolve("src").resolve("main").resolve("java")
+        : null;
+    Map<String, List<String>> byLayer = (javaRoot != null)
+        ? collectJavaFilesByLayer(javaRoot)
+        : new java.util.LinkedHashMap<>();
+
+    String[][] layerDef = {
+        {"🎮  Controller",
+         "HTTP 요청 수신 및 응답 처리\n• @GetMapping / @PostMapping 등 매핑\n• 입력값 검증 및 응답 포맷팅\n• 인증·인가 검사 (Spring Security)\n• Service 계층 위임 처리",
+         "Controller"},
+        {"⚙️  Service",
+         "핵심 비즈니스 로직 처리\n• 도메인 업무 규칙 구현\n• 여러 Repository 조합 처리\n• @Transactional 트랜잭션 관리\n• 도메인 이벤트 발행",
+         "Service"},
+        {"🗄️  Repository",
+         "데이터베이스 접근 처리\n• JPA / MyBatis CRUD 처리\n• 페이징·정렬 쿼리 제공\n• @Query 커스텀 쿼리 정의\n• 영속성 컨텍스트 관리",
+         "Repository"},
+        {"📦  Entity / DTO",
+         "데이터 구조 정의\n• @Entity: DB 테이블 매핑\n• 연관관계 (@OneToMany 등) 정의\n• DTO: 계층 간 데이터 전달\n• @Valid 유효성 검증 어노테이션",
+         "Entity"},
+    };
+    Color[] cardColors = {BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
+
+    int cardW = (W - 100) / 2;  // ~430
+    int cardH = (H - 130) / 2;  // ~205
+    int[][] pos = {{40, 118}, {510, 118}, {40, 118 + cardH + 10}, {510, 118 + cardH + 10}};
+
+    for (int i = 0; i < 4; i++) {
+      int x = pos[i][0], y = pos[i][1];
+      addRoundCard(slide, x, y, cardW, cardH, BG_CARD);
+      addRect(slide, x, y, cardW, 3, cardColors[i]);
+      addRect(slide, x, y, 3, cardH, cardColors[i]);
+
+      // 레이어명
+      addText(slide, layerDef[i][0], x + 14, y + 8, cardW / 2 - 10, 24, 12, true, cardColors[i], TextParagraph.TextAlign.LEFT);
+
+      // 역할 설명 (좌측 절반)
+      addText(slide, layerDef[i][1], x + 14, y + 36, cardW / 2 - 20, cardH - 50, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+
+      // 세로 구분선
+      addRect(slide, x + cardW / 2 + 4, y + 10, 1, cardH - 20, new Color(51, 65, 85));
+
+      // 실제 클래스 목록 (우측 절반)
+      List<String> files = new ArrayList<>(byLayer.getOrDefault(layerDef[i][2], List.of()));
+      if ("Entity".equals(layerDef[i][2])) files.addAll(byLayer.getOrDefault("DTO", List.of()));
+
+      int fx = x + cardW / 2 + 14, fw = cardW / 2 - 22;
+      addText(slide, "프로젝트 클래스", fx, y + 8, fw - 40, 18, 9, true, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      addText(slide, files.size() + "개", x + cardW - 14, y + 8, 30, 18, 10, true, TEXT_WHITE, TextParagraph.TextAlign.RIGHT);
+
+      int fy = y + 30;
+      int maxShow = Math.min(files.size(), 9);
+      for (int j = 0; j < maxShow; j++) {
+        addText(slide, "• " + files.get(j), fx, fy, fw, 16, 8, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+        fy += 18;
+      }
+      if (files.size() > 9) {
+        addText(slide, "  외 " + (files.size() - 9) + "개 ...", fx, fy, fw, 14, 7, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      }
+      if (files.isEmpty()) {
+        addText(slide, "(해당 없음)", fx, fy, fw, 16, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      }
+    }
   }
 
   // ── 분석 직후용: 분석 결과 요약 ─────────────────────────────

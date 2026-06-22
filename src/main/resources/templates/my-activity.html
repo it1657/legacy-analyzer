@@ -77,6 +77,8 @@
     }
     .btn-ppt  { background: #e67e22; color: white; }
     .btn-ppt:hover { background: #d35400; }
+    .btn-resume { background: #2980b9; color: white; }
+    .btn-resume:hover { background: #1a6fa3; }
 
     .section-title { font-size: 16px; font-weight: 700; color: #444; margin-bottom: 1rem; }
 
@@ -254,6 +256,12 @@
       const dateStr  = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
       const stCls    = h.status === 'COMPLETED' ? 'badge-ok'
                      : h.status === 'IN_PROGRESS' ? 'badge-ing' : 'badge-err';
+      let actionBtn = '-';
+      if (h.status === 'COMPLETED') {
+        actionBtn = `<button class="btn-sm btn-ppt" onclick="downloadProjectReport(${h.id})" title="프로젝트 구조 · 비즈니스 로직 분석 보고서">📋 보고서 PPT</button>`;
+      } else if (h.status === 'PAUSED' && h.sessionId) {
+        actionBtn = `<button class="btn-sm btn-resume" onclick="resumeAnalysis('${h.sessionId}', ${h.id})" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
+      }
       return `<tr>
         <td title="${h.sourcePath || ''}">${project}</td>
         <td>${h.totalFiles ?? '-'}</td>
@@ -264,13 +272,30 @@
         <td>${cost}</td>
         <td><span class="badge ${stCls}">${h.status}</span></td>
         <td style="font-size:11px;">${dateStr}</td>
-        <td>
-          ${h.status === 'COMPLETED'
-            ? `<button class="btn-sm btn-ppt" onclick="downloadProjectReport(${h.id})" title="프로젝트 구조 · 비즈니스 로직 분석 보고서">📋 보고서 PPT</button>`
-            : '-'}
-        </td>
+        <td>${actionBtn}</td>
       </tr>`;
     }).join('');
+  }
+
+  // 이어서 분석 (PAUSED 세션 재개)
+  async function resumeAnalysis(sessionId, historyId) {
+    if (!confirm('중단된 시점부터 이어서 분석을 재개하겠습니까?')) return;
+    try {
+      const res = await fetch('/api/session/resume', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`분석 재개됨 (남은 파일: ${data.pendingCount}개)\n메인 페이지에서 진행상황을 확인하세요.`);
+        window.location.href = `/?sessionId=${sessionId}`;
+      } else {
+        alert('재개 실패: ' + data.message);
+      }
+    } catch (e) {
+      alert('재개 요청 중 오류가 발생했습니다.');
+    }
   }
 
   // 고객 납품용 보고서 PPT (프로젝트 구조·패키지 구조·비즈니스 로직)
@@ -343,10 +368,10 @@
       return `<tr>
         <td title="${h.sourcePath || ''}">${project}</td>
         <td style="font-size:11px;">${model}</td>
-        <td style="text-align:right;">${inputTok}</td>
-        <td style="text-align:right;">${outputTok}</td>
-        <td style="text-align:right; font-weight:600;">${totalTok}</td>
-        <td style="text-align:right; color:#e74c3c;">${cost}</td>
+        <td>${inputTok}</td>
+        <td>${outputTok}</td>
+        <td style="font-weight:600;">${totalTok}</td>
+        <td style="color:#e74c3c;">${cost}</td>
         <td style="font-size:11px;">${dateStr}</td>
       </tr>`;
     }).join('');

@@ -45,9 +45,19 @@ window.onload = function() {
   const roles = JSON.parse(localStorage.getItem('roles') || '[]');
   const adminDashboardBtn = document.getElementById('adminDashboardBtn');
   if (roles.includes('ADMIN') && adminDashboardBtn) adminDashboardBtn.style.display = 'block';
-  // 어드민은 내 활동 페이지 대신 관리자 대시보드에서 확인
   const myActivityBtn = document.getElementById('myActivityBtn');
   if (myActivityBtn && roles.includes('ADMIN')) myActivityBtn.style.display = 'none';
+
+  // 이어서 분석: 분석이력에서 재개 버튼 클릭 시 sessionId 파라미터로 진입
+  const urlParams = new URLSearchParams(window.location.search);
+  const resumeSessionId = urlParams.get('sessionId');
+  if (resumeSessionId) {
+    currentSessionId = resumeSessionId;
+    const logConsole = document.getElementById('terminalLog');
+    if (logConsole) logConsole.textContent = '[재개] 이전 분석 세션을 이어서 진행합니다...\n';
+    updateSessionIdDisplay();
+    startPolling();
+  }
 };
 
 function goToAnalysis() {
@@ -231,7 +241,7 @@ async function runBatchAnalysis() {
   step2Btn.style.opacity = "0.5";
   step2Btn.style.cursor = "not-allowed";
 
-  logConsole.textContent = "[세션 시작] SessionID: " + currentSessionId + "\n";
+  logConsole.textContent = "[세션 시작] 분석을 시작합니다.\n";
   progressPanel.style.display = "block";
   document.getElementById('analysisOverlay').style.display = "flex";
 
@@ -277,6 +287,20 @@ async function runBatchAnalysis() {
   if (startResp.sessionId) currentSessionId = startResp.sessionId;
 
   // 2초 간격 폴링 시작
+  startPolling();
+}
+
+// 폴링을 시작하는 독립 함수 (이어서 분석 시에도 재사용)
+function startPolling() {
+  const logConsole = document.getElementById('terminalLog');
+  const progressPanel = document.getElementById('progressPanel');
+  if (progressPanel) progressPanel.style.display = 'block';
+  const overlay = document.getElementById('analysisOverlay');
+  if (overlay) overlay.style.display = 'flex';
+
+  if (pollingIntervalId) clearInterval(pollingIntervalId);
+  isAnalysisComplete = false;
+
   let lastLogCount = 0;
   pollingIntervalId = setInterval(async () => {
     if (isAnalysisComplete) {
@@ -574,7 +598,7 @@ function updateSessionControlPanel() {
 
   if (currentSessionId) {
     panel.style.display = 'flex';
-    if (sessionIdDisplay) sessionIdDisplay.textContent = currentSessionId;
+    if (sessionIdDisplay) sessionIdDisplay.textContent = "분석 중";
     if (resumeBtn) resumeBtn.style.display = isPausedLocally ? 'inline-block' : 'none';
     const pauseBtn = document.querySelector("button[onclick='pauseAnalysis()']");
     if (pauseBtn) pauseBtn.style.display = isPausedLocally ? 'none' : 'inline-block';

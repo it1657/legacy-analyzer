@@ -55,14 +55,16 @@ public class ApiUsageFilter extends OncePerRequestFilter {
       long executionTime = System.currentTimeMillis() - startTime;
 
       // 현재 인증된 사용자 정보 가져오기
-      Long userId = null;
+      Long userSeq = null;
+      String loginId = null;
       Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-      if (authentication != null && authentication.getPrincipal() instanceof User) {
-        userId = ((User) authentication.getPrincipal()).getSeq();
+      if (authentication != null && authentication.getPrincipal() instanceof User user) {
+        userSeq = user.getSeq();
+        loginId = user.getUserId();
       }
 
       // API 사용량 기록 (인증된 사용자만)
-      if (userId != null) {
+      if (userSeq != null) {
         try {
           byte[] requestBody = requestWrapper.getContentAsByteArray();
           byte[] responseBody = responseWrapper.getContentAsByteArray();
@@ -73,7 +75,7 @@ public class ApiUsageFilter extends OncePerRequestFilter {
           String ipAddress = getClientIpAddress(request);
 
           ApiUsage apiUsage = new ApiUsage(
-              userId,
+              userSeq,
               uri,
               request.getMethod(),
               requestSize,
@@ -85,7 +87,7 @@ public class ApiUsageFilter extends OncePerRequestFilter {
           apiUsageRepository.save(apiUsage);
 
           log.debug("[API 사용량 기록] userId={}, endpoint={}, method={}, size={}+{}bytes, time={}ms",
-              userId, uri, request.getMethod(), requestSize, responseSize, executionTime);
+              loginId, uri, request.getMethod(), requestSize, responseSize, executionTime);
         } catch (Exception e) {
           log.error("[API 사용량 기록 실패]", e);
         }

@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class ClaudeServiceImpl implements ClaudeService {
@@ -25,8 +26,10 @@ public class ClaudeServiceImpl implements ClaudeService {
     // Jackson ObjectMapper 글로벌 인스턴스 공유로 불필요한 객체 재생성 경고 차단
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    // ThreadLocal을 이용한 토큰 사용량 추적 (세션별 누적)
-    private static final ThreadLocal<TokenUsage> tokenUsageHolder = ThreadLocal.withInitial(TokenUsage::new);
+    // 스레드 풀에서 호출되므로 AtomicLong으로 스레드 안전하게 토큰 누적
+    private final AtomicLong accumulatedInputTokens = new AtomicLong(0);
+    private final AtomicLong accumulatedOutputTokens = new AtomicLong(0);
+    private volatile String lastModelName = "";
 
     @Value("${anthropic.api.key}")
     private String apiKey;
@@ -71,12 +74,16 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Override
     public TokenUsage getTotalTokenUsage() {
-        return tokenUsageHolder.get();
+        long input = accumulatedInputTokens.get();
+        long output = accumulatedOutputTokens.get();
+        TokenUsage usage = new TokenUsage(input, output, lastModelName);
+        return usage;
     }
 
     @Override
     public void resetTokenUsage() {
-        tokenUsageHolder.remove();
+        accumulatedInputTokens.set(0);
+        accumulatedOutputTokens.set(0);
     }
 
     @Override
@@ -488,22 +495,36 @@ public class ClaudeServiceImpl implements ClaudeService {
         } catch (Exception ignored) {}
 
         String systemPrompt =
-            "당신은 레거시 소프트웨어 시스템을 분석하는 시니어 SW 아키텍트입니다.\n" +
-            "주어진 프로젝트 패키지 구조와 파일 목록을 분석하여 고객 납품용 기술 인수인계 문서를 작성하세요.\n\n" +
-            "## 분석 원칙\n" +
-            "- 패키지명(auth, order, payment, user, product 등)에서 비즈니스 도메인을 적극적으로 유추\n" +
-            "- Controller/Service/Repository/Entity 레이어 패턴을 파악하여 아키텍처 설명\n" +
-            "- 파일명에서 처리하는 업무(주문, 결제, 인증, 재고 등)를 구체적으로 서술\n" +
-            "- 후임 개발자가 3시간 안에 시스템 전체 구조를 파악할 수 있도록 작성\n" +
-            "- 추측이 필요한 경우 '파일명 기준 유추'임을 명시\n\n" +
-            "## 필수 출력 형식 (## 헤더 사용, 서브섹션은 ### 사용)\n" +
+            "당신은 레거시 소프트웨어를 분석하는 시니어 SW 아키텍트입니다.\n" +
+            "제공된 프로젝트 패키지 구조와 파일 목록만으로 완전한 기술 인수인계 문서를 작성하세요.\n" +
+            "추가 정보를 요청하거나 '정보를 제공해 주세요'라는 문구는 절대 쓰지 마세요.\n" +
+            "파일명·패키지명으로 최대한 유추하여 구체적으로 작성하세요.\n\n" +
+            "## 각 섹션 작성 기준\n" +
+            "- **시스템 개요**: 프로젝트명, 추정 도메인(패키지명 기준), 주요 기능 2~3문장 요약\n" +
+            "- **아키텍처 구조**: Controller→Service→Repository→DB 레이어 흐름 설명.\n" +
+            "  각 레이어에 해당하는 실제 패키지/클래스명을 명시할 것\n" +
+            "- **도메인별 기능 분석**: 비즈니스 도메인(auth/order/payment 등)별로\n" +
+            "  무슨 업무를 처리하는지 구체적으로 설명. 실제 클래스명 언급 필수\n" +
+            "- **계층별 역할 정의**: Controller/Service/Repository/Entity 각 계층의\n" +
+            "  책임과 해당 실제 클래스 목록을 함께 작성\n" +
+            "- **기술 스택**: 파일 목록에서 실제로 확인되는 기술만 작성\n" +
+            "  (pom.xml/build.gradle/package.json/설정파일 기반)\n" +
+            "- **인수인계 체크리스트**: 이 프로젝트에 특화된 확인 항목만 작성\n" +
+            "  (일반적인 항목 금지, 실제 파일명·패키지명 포함)\n\n" +
+            "## 필수 출력 형식 (반드시 이 구조로 작성)\n" +
             "## 시스템 개요\n" +
             "## 아키텍처 구조\n" +
-            "## 패키지별 기능 설명\n" +
-            "## 주요 컴포넌트 및 역할\n" +
-            "## 기술 스택 (파일 목록 기반 유추)\n" +
+            "### 레이어 흐름\n" +
+            "### 주요 패키지 역할\n" +
+            "## 도메인별 기능 분석\n" +
+            "## 계층별 역할 정의\n" +
+            "### Controller 계층\n" +
+            "### Service 계층\n" +
+            "### Repository 계층\n" +
+            "### Entity / DTO\n" +
+            "## 기술 스택\n" +
             "## 인수인계 주요 체크리스트\n\n" +
-            "마크다운만 출력하고, 서두/인사말/추가 설명은 절대 작성하지 마세요.";
+            "마크다운만 출력하세요. 서두·인사말·추가 설명·정보 요청은 절대 금지입니다.";
 
         String userContent = "프로젝트명: " + projectName + "\n\n" + projectStructure;
 
@@ -581,6 +602,45 @@ public class ClaudeServiceImpl implements ClaudeService {
             "- [ ] 외부 API 및 연동 시스템 목록 확인\n";
     }
 
+    // Javadoc 블록 안에 // 스타일이 혼합된 주석을 정규화한다.
+    private String normalizeComment(String comment) {
+        if (comment == null || comment.isBlank()) return comment;
+        String trimmed = comment.trim();
+
+        // /** */ 블록 안에 // 스타일이 섞인 경우: // 줄을 * 줄로 변환
+        if (trimmed.startsWith("/**")) {
+            String[] parts = trimmed.split("\n");
+            StringBuilder fixed = new StringBuilder();
+            for (String part : parts) {
+                String p = part.trim();
+                if (p.startsWith("//")) {
+                    // // 텍스트  →   * 텍스트
+                    fixed.append(" * ").append(p.substring(2).trim()).append("\n");
+                } else {
+                    fixed.append(part).append("\n");
+                }
+            }
+            return fixed.toString().stripTrailing();
+        }
+
+        // /* */ 블록 안에 // 스타일이 섞인 경우도 동일 처리
+        if (trimmed.startsWith("/*") && !trimmed.startsWith("/**")) {
+            String[] parts = trimmed.split("\n");
+            StringBuilder fixed = new StringBuilder();
+            for (String part : parts) {
+                String p = part.trim();
+                if (p.startsWith("//")) {
+                    fixed.append(" * ").append(p.substring(2).trim()).append("\n");
+                } else {
+                    fixed.append(part).append("\n");
+                }
+            }
+            return fixed.toString().stripTrailing();
+        }
+
+        return comment;
+    }
+
     /**
      * [하이브리드 결합 엔진]: 반환된 JSON 주석 지도를 한 줄씩 원본 소스에 오차 없이 조립 배포합니다.
      */
@@ -620,18 +680,49 @@ public class ClaudeServiceImpl implements ClaudeService {
             for (Object obj : commentList) {
                 if (obj instanceof Map<?, ?> item) {
                     int lineNum = Integer.parseInt(String.valueOf(item.get("lineNumber")));
-                    String commentStr = String.valueOf(item.get("comment"));
+                    String commentStr = normalizeComment(String.valueOf(item.get("comment")));
                     commentMap.computeIfAbsent(lineNum, k -> new ArrayList<>()).add(commentStr);
                 }
             }
 
             StringBuilder finalCode = new StringBuilder();
 
-            String topBanner = ".py".equals(extension) ? "# [AI 한글 주석 보완 완료]\n" :
-                    isXmlFamily(extension) ? "<!-- [AI 한글 주석 보완 완료] -->\n" :
-                    "/* [AI 한글 주석 보완 완료] */\n";
-            finalCode.append(topBanner);
+            // Java 파일: package 선언이 최상단에 위치해야 하고 import 사이에 주석 삽입 금지
+            if (".java".equals(extension)) {
+                int packageLineIdx = -1;
+                int lastImportLineIdx = -1;
+                for (int i = 0; i < lines.length; i++) {
+                    String t = lines[i].trim();
+                    if (packageLineIdx < 0 && t.startsWith("package ")) packageLineIdx = i;
+                    if (t.startsWith("import ")) lastImportLineIdx = i;
+                }
 
+                for (int i = 0; i < lines.length; i++) {
+                    int lineIdx1 = i + 1;
+                    String trimmed = lines[i].trim();
+
+                    // package 선언 전: 주석 삽입 없이 그대로 출력
+                    if (i < packageLineIdx) {
+                        finalCode.append(lines[i]).append("\n");
+                        continue;
+                    }
+                    // import 구문 구간: 주석 삽입 금지 (import 행 자체만 출력)
+                    if (i <= lastImportLineIdx && (trimmed.startsWith("import ") || trimmed.isEmpty())) {
+                        finalCode.append(lines[i]).append("\n");
+                        continue;
+                    }
+                    // 그 외 일반 위치: Claude 주석 삽입 허용
+                    if (commentMap.containsKey(lineIdx1)) {
+                        for (String cmt : commentMap.get(lineIdx1)) {
+                            finalCode.append(cmt).append("\n");
+                        }
+                    }
+                    finalCode.append(lines[i]).append("\n");
+                }
+                return finalCode.toString();
+            }
+
+            // Java 외 파일: 주석만 삽입 (마커 없음)
             for (int i = 0; i < lines.length; i++) {
                 int currentLineIdx = i + 1;
                 if (commentMap.containsKey(currentLineIdx)) {
@@ -647,11 +738,7 @@ public class ClaudeServiceImpl implements ClaudeService {
         } catch (Exception e) {
             log.error("주석 지도 JSON 파일 결합 중 런타임 에러 발생", e);
 
-            String errorBanner = ".py".equals(extension) ? "# [주의] 초대용량 특수 마킹 주석 예외 자동 결합 모드\n\n" :
-                    isXmlFamily(extension) ? "<!-- [주의] 초대용량 특수 마킹 주석 예외 자동 결합 모드 -->\n\n" :
-                    "// [주의] 초대용량 특수 마킹 주석 예외 자동 결합 모드\n\n";
-
-            return errorBanner + sourceCode;
+            return sourceCode;
         }
     }
 
@@ -677,15 +764,12 @@ public class ClaudeServiceImpl implements ClaudeService {
                     outputTokens = ((Number) outputObj).longValue();
                 }
 
-                // 현재 누적 토큰 정보 조회
-                TokenUsage current = tokenUsageHolder.get();
-                current.setInputTokens(current.getInputTokens() + inputTokens);
-                current.setOutputTokens(current.getOutputTokens() + outputTokens);
-                current.setTotalTokens(current.getInputTokens() + current.getOutputTokens());
-                current.setModelName(apiModel);
+                long totalInput = accumulatedInputTokens.addAndGet(inputTokens);
+                long totalOutput = accumulatedOutputTokens.addAndGet(outputTokens);
+                lastModelName = apiModel;
 
                 log.info("[토큰 사용량] 입력: {}, 출력: {}, 누적 합계: {}",
-                        inputTokens, outputTokens, current.getTotalTokens());
+                        inputTokens, outputTokens, totalInput + totalOutput);
             }
         } catch (Exception e) {
             log.warn("[토큰 추출 실패] {}", e.getMessage());
