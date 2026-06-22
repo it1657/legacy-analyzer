@@ -4,6 +4,8 @@ import com.legacy.auth.User;
 import com.legacy.core.PresentationGeneratorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -122,12 +124,13 @@ public class UserActivityController {
 
   private ResponseEntity<byte[]> buildPptResponse(byte[] content, String type, String sourcePath, Long historyId) {
     String projectName = sourcePath != null ? sourcePath.replaceAll(".*[/\\\\]", "") : "analysis";
+    String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
     HttpHeaders headers = new HttpHeaders();
     headers.setContentType(new MediaType("application",
         "vnd.openxmlformats-officedocument.presentationml.presentation"));
     headers.setContentLength(content.length);
     headers.setContentDispositionFormData("attachment",
-        String.format("%s_%s_%d.pptx", type, projectName, historyId));
+        String.format("%s_%s_%s.pptx", type, projectName, timestamp));
     return new ResponseEntity<>(content, headers, HttpStatus.OK);
   }
 }

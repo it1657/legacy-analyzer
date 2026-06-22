@@ -18,6 +18,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @RestController
@@ -212,8 +213,9 @@ public class AdminController {
       headers.setContentType(new MediaType("application",
           "vnd.openxmlformats-officedocument.presentationml.presentation"));
       headers.setContentLength(pptxContent.length);
+      String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
       headers.setContentDispositionFormData("attachment",
-          String.format("analysis_%s_%d.pptx", projectName, historyId));
+          String.format("analysis_%s_%s.pptx", projectName, timestamp));
 
       return new ResponseEntity<>(pptxContent, headers, HttpStatus.OK);
     } catch (Exception e) {
