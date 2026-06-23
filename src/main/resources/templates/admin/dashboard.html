@@ -620,12 +620,15 @@
                                     <th>성공률</th>
                                     <th>평균 시간 (초)</th>
                                     <th>총 파일</th>
-                                    <th>API 요청</th>
+                                    <th>입력 토큰</th>
+                                    <th>출력 토큰</th>
+                                    <th>총 토큰</th>
+                                    <th>추정 비용 (USD)</th>
                                 </tr>
                             </thead>
                             <tbody id="userStatsList">
                                 <tr>
-                                    <td colspan="7" class="no-data">통계를 로드 중입니다...</td>
+                                    <td colspan="10" class="no-data">통계를 로드 중입니다...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -1214,11 +1217,16 @@
             const tbody = document.getElementById('userStatsList');
 
             if (userStats.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="no-data">통계 데이터가 없습니다.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="no-data">통계 데이터가 없습니다.</td></tr>';
                 return;
             }
 
-            tbody.innerHTML = userStats.map(stat => `
+            tbody.innerHTML = userStats.map(stat => {
+                const inTok  = (stat.totalInputTokens  || 0).toLocaleString();
+                const outTok = (stat.totalOutputTokens || 0).toLocaleString();
+                const totTok = (stat.totalTokens       || 0).toLocaleString();
+                const cost   = stat.totalApiCost != null ? '$' + stat.totalApiCost.toFixed(4) : '-';
+                return `
                 <tr>
                     <td>${stat.userId || '-'}</td>
                     <td>${stat.email || '-'}</td>
@@ -1226,9 +1234,12 @@
                     <td>${(stat.successRate || 0).toFixed(1)}%</td>
                     <td>${((stat.avgProcessingTimeMs || 0) / 1000).toFixed(2)}</td>
                     <td>${stat.totalFilesAnalyzed}</td>
-                    <td>${stat.totalApiRequests}</td>
-                </tr>
-            `).join('');
+                    <td>${inTok}</td>
+                    <td>${outTok}</td>
+                    <td style="font-weight:600;">${totTok}</td>
+                    <td style="color:#e74c3c;">${cost}</td>
+                </tr>`;
+            }).join('');
         }
 
         // 감사 로그 로드
