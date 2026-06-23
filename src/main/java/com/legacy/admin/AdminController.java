@@ -1,4 +1,5 @@
 package com.legacy.admin;
+import com.legacy.audit.AuditLogService;
 import com.legacy.auth.User;
 import com.legacy.auth.Role;
 import com.legacy.auth.UserRepository;
@@ -6,6 +7,7 @@ import com.legacy.auth.RoleRepository;
 import com.legacy.analysis.AnalysisHistory;
 import com.legacy.analysis.AnalysisHistoryRepository;
 import com.legacy.core.PresentationGeneratorService;
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +36,7 @@ public class AdminController {
   private final PasswordEncoder passwordEncoder;
   private final AnalysisHistoryRepository analysisHistoryRepository;
   private final PresentationGeneratorService presentationGeneratorService;
+  private final AuditLogService auditLogService;
 
   @Autowired
   public AdminController(
@@ -41,18 +44,21 @@ public class AdminController {
       RoleRepository roleRepository,
       PasswordEncoder passwordEncoder,
       AnalysisHistoryRepository analysisHistoryRepository,
-      PresentationGeneratorService presentationGeneratorService) {
+      PresentationGeneratorService presentationGeneratorService,
+      AuditLogService auditLogService) {
     this.userRepository = userRepository;
     this.roleRepository = roleRepository;
     this.passwordEncoder = passwordEncoder;
     this.analysisHistoryRepository = analysisHistoryRepository;
     this.presentationGeneratorService = presentationGeneratorService;
+    this.auditLogService = auditLogService;
   }
 
   // 사용자 등록 (관리자만)
   @PostMapping("/users/register")
   @ResponseBody
-  public ResponseEntity<?> registerUser(@RequestBody Map<String, String> request) {
+  public ResponseEntity<?> registerUser(@RequestBody Map<String, String> request,
+      HttpServletRequest httpRequest) {
     try {
       String userId = request.get("userId");
       String displayName = request.get("displayName");
@@ -95,6 +101,7 @@ public class AdminController {
       newUser.setCreatedAt(LocalDateTime.now());
       newUser.setUpdatedAt(LocalDateTime.now());
       userRepository.save(newUser);
+      auditLogService.logUserCreation(newUser, httpRequest.getRemoteAddr());
 
       log.info("[사용자 등록] userId={}, email={}, role={}", userId, email, roleStr);
 

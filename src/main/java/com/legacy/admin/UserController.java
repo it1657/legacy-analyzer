@@ -1,8 +1,10 @@
 package com.legacy.admin;
+import com.legacy.audit.AuditLogService;
 import com.legacy.auth.User;
 import com.legacy.auth.Role;
 import com.legacy.auth.UserRepository;
 import com.legacy.auth.RoleRepository;
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,15 +27,18 @@ public class UserController {
   private final UserRepository userRepository;
   private final RoleRepository roleRepository;
   private final PasswordEncoder passwordEncoder;
+  private final AuditLogService auditLogService;
 
   @Autowired
   public UserController(
       UserRepository userRepository,
       RoleRepository roleRepository,
-      PasswordEncoder passwordEncoder) {
+      PasswordEncoder passwordEncoder,
+      AuditLogService auditLogService) {
     this.userRepository = userRepository;
     this.roleRepository = roleRepository;
     this.passwordEncoder = passwordEncoder;
+    this.auditLogService = auditLogService;
   }
 
   // 현재 사용자 정보 조회
@@ -89,14 +94,18 @@ public class UserController {
   @PreAuthorize("hasRole('ADMIN')")
   @ResponseBody
   public ResponseEntity<?> toggleUserStatus(@PathVariable Long userSeq,
-      @RequestBody Map<String, Boolean> request) {
+      @RequestBody Map<String, Boolean> request, HttpServletRequest httpRequest) {
     try {
       User user = userRepository.findById(userSeq)
           .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
-      user.setActive(request.get("isActive"));
+      boolean newActive = Boolean.TRUE.equals(request.get("isActive"));
+      user.setActive(newActive);
       user.setUpdatedAt(java.time.LocalDateTime.now());
       userRepository.save(user);
-      log.info("[사용자 활성화 변경] userSeq={}, isActive={}", userSeq, request.get("isActive"));
+      auditLogService.logAudit("UPDATE", "USER", user.getSeq(), user.getUserId(), "SUCCESS",
+          java.util.Map.of("isActive", newActive), newActive ? "계정 활성화" : "계정 비활성화",
+          httpRequest.getRemoteAddr());
+      log.info("[사용자 활성화 변경] userSeq={}, isActive={}", userSeq, newActive);
       return ResponseEntity.ok(Collections.singletonMap("message", "사용자 상태가 변경되었습니다."));
     } catch (Exception e) {
       log.error("[사용자 활성화 변경 실패] userSeq={}", userSeq, e);
@@ -110,7 +119,7 @@ public class UserController {
   @PreAuthorize("hasRole('ADMIN')")
   @ResponseBody
   public ResponseEntity<?> updateUser(@PathVariable Long userSeq,
-      @RequestBody Map<String, String> request) {
+      @RequestBody Map<String, String> request, HttpServletRequest httpRequest) {
     try {
       User user = userRepository.findById(userSeq)
           .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
@@ -144,6 +153,8 @@ public class UserController {
 
       user.setUpdatedAt(LocalDateTime.now());
       userRepository.save(user);
+      auditLogService.logAudit("UPDATE", "USER", user.getSeq(), user.getUserId(), "SUCCESS",
+          null, "사용자 정보 수정", httpRequest.getRemoteAddr());
 
       log.info("[사용자 수정] userSeq={}, userId={}", userSeq, user.getUserId());
       return ResponseEntity.ok(Collections.singletonMap("message", "사용자 정보가 수정되었습니다."));
@@ -158,10 +169,11 @@ public class UserController {
   @DeleteMapping("/{userSeq}")
   @PreAuthorize("hasRole('ADMIN')")
   @ResponseBody
-  public ResponseEntity<?> deleteUser(@PathVariable Long userSeq) {
+  public ResponseEntity<?> deleteUser(@PathVariable Long userSeq, HttpServletRequest httpRequest) {
     try {
       User user = userRepository.findById(userSeq)
           .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+      auditLogService.logUserDeletion(user, httpRequest.getRemoteAddr());
       user.getRoles().clear();
       userRepository.save(user);
       userRepository.delete(user);
