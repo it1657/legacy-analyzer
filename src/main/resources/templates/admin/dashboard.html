@@ -714,8 +714,9 @@
     <!-- 사용자 추가/수정 모달 -->
     <div id="userModal" class="modal">
         <div class="modal-content">
-            <div class="modal-header">새 사용자 추가</div>
+            <div class="modal-header" id="modalHeader">새 사용자 추가</div>
             <div id="modalAlert" class="alert"></div>
+            <input type="hidden" id="editingUserSeq" value="">
             <form id="userForm" onsubmit="saveUser(event)">
                 <div class="form-group">
                     <label for="displayName">사용자명 <span style="color:#999;font-size:12px;">(표시 이름)</span></label>
@@ -730,8 +731,8 @@
                     <input type="email" id="email" required placeholder="이메일">
                 </div>
                 <div class="form-group">
-                    <label for="password">비밀번호</label>
-                    <input type="password" id="password" required placeholder="비밀번호">
+                    <label for="password" id="passwordLabel">비밀번호</label>
+                    <input type="password" id="password" placeholder="비밀번호">
                 </div>
                 <div class="form-group">
                     <label for="role">역할</label>
@@ -742,7 +743,7 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn-cancel" onclick="closeModal()">취소</button>
-                    <button type="submit" class="btn-submit">저장</button>
+                    <button type="submit" class="btn-submit" id="modalSubmitBtn">저장</button>
                 </div>
             </form>
         </div>
@@ -851,7 +852,8 @@
                     </td>
                     <td>${new Date(user.createdAt).toLocaleDateString('ko-KR')}</td>
                     <td>
-                        <button class="btn-sm btn-edit" onclick="toggleUserStatus(${user.seq}, ${!user.isActive})">
+                        <button class="btn-sm btn-edit" onclick="openEditUserModal(${user.seq}, '${(user.displayName||user.userId).replace(/'/g,&quot;\\'&quot;)}', '${user.userId}', '${user.email}', '${user.roles[0]||'USER'}')">수정</button>
+                        <button class="btn-sm" style="background:#6c757d;color:white;" onclick="toggleUserStatus(${user.seq}, ${!user.isActive})">
                             ${user.isActive ? '비활성화' : '활성화'}
                         </button>
                         <button class="btn-sm btn-delete" onclick="deleteUser(${user.seq})">삭제</button>
@@ -1259,6 +1261,30 @@
         // 사용자 추가 모달 열기
         function openAddUserModal() {
             document.getElementById('userForm').reset();
+            document.getElementById('editingUserSeq').value = '';
+            document.getElementById('modalHeader').textContent = '새 사용자 추가';
+            document.getElementById('newUserId').disabled = false;
+            document.getElementById('password').required = true;
+            document.getElementById('passwordLabel').textContent = '비밀번호';
+            document.getElementById('password').placeholder = '비밀번호';
+            document.getElementById('modalSubmitBtn').textContent = '추가';
+            document.getElementById('userModal').classList.add('active');
+        }
+
+        // 사용자 수정 모달 열기
+        function openEditUserModal(seq, displayName, userId, email, role) {
+            document.getElementById('userForm').reset();
+            document.getElementById('editingUserSeq').value = seq;
+            document.getElementById('modalHeader').textContent = '사용자 정보 수정';
+            document.getElementById('displayName').value = displayName;
+            document.getElementById('newUserId').value = userId;
+            document.getElementById('newUserId').disabled = true;
+            document.getElementById('email').value = email;
+            document.getElementById('role').value = role;
+            document.getElementById('password').required = false;
+            document.getElementById('passwordLabel').textContent = '비밀번호 (변경 시에만 입력)';
+            document.getElementById('password').placeholder = '변경하지 않으면 비워두세요';
+            document.getElementById('modalSubmitBtn').textContent = '수정';
             document.getElementById('userModal').classList.add('active');
         }
 
@@ -1266,38 +1292,57 @@
         function closeModal() {
             document.getElementById('userModal').classList.remove('active');
             document.getElementById('modalAlert').className = 'alert';
+            document.getElementById('newUserId').disabled = false;
         }
 
-        // 사용자 저장
+        // 사용자 저장 (추가 또는 수정)
         async function saveUser(e) {
             e.preventDefault();
 
+            const editingSeq = document.getElementById('editingUserSeq').value;
             const displayName = document.getElementById('displayName').value;
             const userId = document.getElementById('newUserId').value;
             const email = document.getElementById('email').value;
             const password = document.getElementById('password').value;
             const role = document.getElementById('role').value;
+            const isEdit = editingSeq !== '';
 
             try {
-                const response = await fetch('/api/admin/users/register', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    body: JSON.stringify({ displayName, userId, email, password, role })
-                });
+                let response;
+                if (isEdit) {
+                    // 수정 모드: PUT /api/users/{seq}
+                    const body = { displayName, email, role };
+                    if (password) body.password = password;
+                    response = await fetch(`/api/users/${editingSeq}`, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify(body)
+                    });
+                } else {
+                    // 추가 모드: POST /api/admin/users/register
+                    response = await fetch('/api/admin/users/register', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({ displayName, userId, email, password, role })
+                    });
+                }
 
                 const data = await response.json();
 
                 if (response.ok) {
-                    showAlert('modalAlert', '사용자가 성공적으로 추가되었습니다.', 'success');
+                    showAlert('modalAlert', isEdit ? '사용자 정보가 수정되었습니다.' : '사용자가 추가되었습니다.', 'success');
                     setTimeout(() => {
                         closeModal();
                         loadUsers();
                     }, 1000);
                 } else {
-                    showAlert('modalAlert', data.message || '사용자 추가 실패', 'error');
+                    showAlert('modalAlert', data.message || (isEdit ? '수정 실패' : '추가 실패'), 'error');
                 }
             } catch (error) {
                 console.error('[사용자 저장 오류]', error);

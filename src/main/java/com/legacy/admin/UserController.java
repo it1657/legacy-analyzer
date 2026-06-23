@@ -13,6 +13,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
+import java.time.LocalDateTime;
 import java.util.*;
 
 @RestController
@@ -101,6 +102,55 @@ public class UserController {
       log.error("[사용자 활성화 변경 실패] userSeq={}", userSeq, e);
       return ResponseEntity.status(HttpStatus.BAD_REQUEST)
           .body(Collections.singletonMap("message", "사용자 상태 변경 실패: " + e.getMessage()));
+    }
+  }
+
+  // 사용자 정보 수정 (관리자만) - 표시명, 이메일, 비밀번호, 역할 변경 가능
+  @PutMapping("/{userSeq}")
+  @PreAuthorize("hasRole('ADMIN')")
+  @ResponseBody
+  public ResponseEntity<?> updateUser(@PathVariable Long userSeq,
+      @RequestBody Map<String, String> request) {
+    try {
+      User user = userRepository.findById(userSeq)
+          .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+
+      String displayName = request.get("displayName");
+      String email = request.get("email");
+      String password = request.get("password");
+      String roleStr = request.get("role");
+
+      if (displayName != null && !displayName.trim().isEmpty()) {
+        user.setDisplayName(displayName.trim());
+      }
+      if (email != null && !email.trim().isEmpty()) {
+        if (!user.getEmail().equals(email.trim()) && userRepository.existsByEmail(email.trim())) {
+          return ResponseEntity.badRequest()
+              .body(Collections.singletonMap("message", "이미 존재하는 이메일입니다."));
+        }
+        user.setEmail(email.trim());
+      }
+      if (password != null && !password.trim().isEmpty()) {
+        user.setPasswordHash(passwordEncoder.encode(password));
+      }
+      if (roleStr != null && !roleStr.trim().isEmpty()) {
+        Role role = roleRepository.findByName(roleStr).orElse(null);
+        if (role == null) {
+          return ResponseEntity.badRequest()
+              .body(Collections.singletonMap("message", "유효하지 않은 역할입니다."));
+        }
+        user.setRoles(new HashSet<>(Collections.singleton(role)));
+      }
+
+      user.setUpdatedAt(LocalDateTime.now());
+      userRepository.save(user);
+
+      log.info("[사용자 수정] userSeq={}, userId={}", userSeq, user.getUserId());
+      return ResponseEntity.ok(Collections.singletonMap("message", "사용자 정보가 수정되었습니다."));
+    } catch (Exception e) {
+      log.error("[사용자 수정 실패] userSeq={}", userSeq, e);
+      return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+          .body(Collections.singletonMap("message", "사용자 수정 실패: " + e.getMessage()));
     }
   }
 
