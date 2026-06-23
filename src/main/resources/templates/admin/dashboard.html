@@ -274,6 +274,17 @@
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
         }
 
+        .modal-content-wide {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            width: 95%;
+            max-width: 960px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
         .modal-header {
             font-size: 20px;
             font-weight: bold;
@@ -711,6 +722,39 @@
         </div>
     </div>
 
+    <!-- API 사용량 상세 모달 -->
+    <div id="usageDetailModal" class="modal">
+        <div class="modal-content-wide">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+                <div>
+                    <div class="modal-header" id="usageDetailTitle" style="margin-bottom:0.25rem;">API 사용량 상세</div>
+                    <div id="usageDetailSubtitle" style="color:#888; font-size:13px;"></div>
+                </div>
+                <button type="button" class="btn-cancel" onclick="closeUsageDetailModal()">닫기</button>
+            </div>
+            <div id="usageDetailAlert" class="alert"></div>
+            <div class="table-container" style="max-height:55vh; overflow-y:auto;">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>일시</th>
+                            <th>메서드</th>
+                            <th>엔드포인트</th>
+                            <th>상태코드</th>
+                            <th>요청(KB)</th>
+                            <th>응답(KB)</th>
+                            <th>처리시간(ms)</th>
+                            <th>IP</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usageDetailList">
+                        <tr><td colspan="8" class="no-data">불러오는 중...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     <!-- 사용자 추가/수정 모달 -->
     <div id="userModal" class="modal">
         <div class="modal-content">
@@ -971,7 +1015,7 @@
                         <td>${requestKB}</td>
                         <td>${responseKB}</td>
                         <td>
-                            <button class="btn-sm btn-edit" onclick="viewDetailedUsage(${stat.user_id})">상세 보기</button>
+                            <button class="btn-sm btn-edit" onclick="viewDetailedUsage(${stat.user_id}, '${(stat.userId||'').replace(/'/g,&quot;\\'&quot;)}', '${(stat.email||'').replace(/'/g,&quot;\\'&quot;)}')">상세 보기</button>
                         </td>
                     </tr>
                 `;
@@ -979,8 +1023,55 @@
         }
 
         // 사용자 상세 API 사용량 조회 (모달로 표시)
-        async function viewDetailedUsage(userId) {
-            alert(`사용자 ${userId}의 상세 API 사용량은 향후 구현될 예정입니다.`);
+        async function viewDetailedUsage(userId, userLoginId, email) {
+            document.getElementById('usageDetailTitle').textContent =
+                `API 사용량 상세 — ${userLoginId || userId}`;
+            document.getElementById('usageDetailSubtitle').textContent = email || '';
+            document.getElementById('usageDetailList').innerHTML =
+                '<tr><td colspan="8" class="no-data">불러오는 중...</td></tr>';
+            document.getElementById('usageDetailModal').classList.add('active');
+
+            try {
+                const response = await fetch(`/api/usage/admin/users/${userId}/usage?days=30`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!response.ok) throw new Error('조회 실패');
+                const data = await response.json();
+                renderUsageDetail(data);
+            } catch (error) {
+                console.error('[상세 사용량 오류]', error);
+                document.getElementById('usageDetailList').innerHTML =
+                    '<tr><td colspan="8" class="no-data" style="color:#e74c3c;">데이터를 불러올 수 없습니다.</td></tr>';
+            }
+        }
+
+        function renderUsageDetail(list) {
+            const tbody = document.getElementById('usageDetailList');
+            if (!list || list.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="no-data">사용 이력이 없습니다.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = list.map(item => {
+                const ts = item.timestamp ? new Date(item.timestamp).toLocaleString('ko-KR') : '-';
+                const reqKB = ((item.requestSize || 0) / 1024).toFixed(2);
+                const resKB = ((item.responseSize || 0) / 1024).toFixed(2);
+                const statusColor = item.statusCode >= 400 ? '#e74c3c' : item.statusCode >= 300 ? '#e67e22' : '#27ae60';
+                return `
+                    <tr>
+                        <td style="white-space:nowrap;">${ts}</td>
+                        <td><span style="font-weight:600;">${item.method || '-'}</span></td>
+                        <td style="font-size:12px; word-break:break-all;">${item.endpoint || '-'}</td>
+                        <td><span style="color:${statusColor}; font-weight:600;">${item.statusCode || '-'}</span></td>
+                        <td>${reqKB}</td>
+                        <td>${resKB}</td>
+                        <td>${item.executionTimeMs ?? '-'}</td>
+                        <td style="font-size:12px;">${item.ipAddress || '-'}</td>
+                    </tr>`;
+            }).join('');
+        }
+
+        function closeUsageDetailModal() {
+            document.getElementById('usageDetailModal').classList.remove('active');
         }
 
         // 통계/보고서 로드
