@@ -1096,30 +1096,67 @@ public class PresentationGeneratorService {
     }
   }
 
-  // 기본: 단일 컬럼 + 계층별 색상 차등
+  // 기본: 설명 카드 + 불릿/헤더 영역 분리
   private void renderSingleColumn(XSLFSlide slide, List<String[]> segments,
       Color ac, int startY, int totalH) {
-    addRoundCard(slide, 40, startY, W - 80, totalH, BG_CARD);
-    addRect(slide, 40, startY, 4, totalH, ac);
 
-    int y = startY + 12, maxY = startY + totalH - 16;
+    // 설명 텍스트와 구조화 항목 분리
+    List<String> descs = new ArrayList<>();
+    List<String[]> items = new ArrayList<>();
     for (String[] seg : segments) {
+      if ("text".equals(seg[0])) descs.add(seg[1]);
+      else items.add(seg);
+    }
+
+    int yOff = startY;
+
+    // 설명 텍스트 강조 카드 (13pt 흰색, 밝은 배경)
+    if (!descs.isEmpty()) {
+      int descH = Math.min(descs.size() * 30 + 28, items.isEmpty() ? totalH : totalH * 2 / 5);
+      Color descBg = new Color(
+          Math.min(BG_CARD.getRed()   + 18, 255),
+          Math.min(BG_CARD.getGreen() + 18, 255),
+          Math.min(BG_CARD.getBlue()  + 18, 255));
+      addRoundCard(slide, 40, yOff, W - 80, descH, descBg);
+      addRect(slide, 40, yOff, 5, descH, ac);
+
+      int ty = yOff + 16;
+      for (String d : descs) {
+        if (ty + 26 > yOff + descH) break;
+        addText(slide, d, 58, ty, W - 116, 26, 13, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+        ty += 30;
+      }
+
+      totalH -= descH + 8;
+      yOff   += descH + 8;
+    }
+
+    if (items.isEmpty()) return;
+
+    // 불릿·헤더 카드
+    addRoundCard(slide, 40, yOff, W - 80, totalH, BG_CARD);
+    addRect(slide, 40, yOff, 4, totalH, ac);
+
+    int y = yOff + 14, maxY = yOff + totalH - 14;
+    for (String[] seg : items) {
       if (y >= maxY) {
-        addText(slide, "  ···", 56, y, W - 112, 14, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+        addText(slide, "  ···", 60, y, W - 120, 14, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
         break;
       }
       switch (seg[0]) {
         case "header" -> {
-          addText(slide, "▸  " + seg[1], 56, y, W - 112, 20, 10, true, ac, TextParagraph.TextAlign.LEFT);
-          y += 24;
+          addText(slide, "▸  " + seg[1], 56, y, W - 112, 22, 11, true, ac, TextParagraph.TextAlign.LEFT);
+          y += 26;
         }
         case "bullet" -> {
-          addText(slide, "•  " + seg[1], 60, y, W - 116, 18, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
-          y += 20;
+          // 컬러 도트
+          addRect(slide, 60, y + 7, 7, 7, ac);
+          addText(slide, seg[1], 74, y, W - 130, 22, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+          y += 24;
         }
         default -> {
-          addText(slide, seg[1], 56, y, W - 112, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
-          y += 20;
+          addText(slide, seg[1], 56, y, W - 112, 22, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+          y += 24;
         }
       }
     }
@@ -1253,32 +1290,46 @@ public class PresentationGeneratorService {
       return;
     }
 
-    boolean twoCol = packages.size() > 5;
+    // 도메인 개수에 따라 카드 크기 동적 계산
+    boolean twoCol = packages.size() > 4;
     int half   = twoCol ? (packages.size() + 1) / 2 : packages.size();
     int colW   = twoCol ? (W - 100) / 2 : W - 80;
-    int cardH  = 68, gap = 5, startY = 120;
+    int startY = 120, maxH = H - startY - 10;
+    int gap    = 6;
+    int cardH  = Math.max(78, Math.min(110, (maxH - gap * (half - 1)) / half));
+
+    // 도메인별 배지 색상 순환
+    Color[] domainColors = {ACCENT2, ACCENT, new Color(251, 146, 60),
+                            new Color(196, 181, 253), new Color(251, 191, 36), new Color(248, 113, 113)};
 
     for (int i = 0; i < packages.size(); i++) {
       int col = twoCol ? i / half : 0;
       int row = twoCol ? i % half : i;
       int x = 40 + col * (colW + 20);
       int y = startY + row * (cardH + gap);
-      if (y + cardH > H - 12) break;
+      if (y + cardH > H - 8) break;
 
       String[] pkg = packages.get(i);
+      Color dc = domainColors[i % domainColors.length];
+
+      // 카드 배경 + 좌측 컬러 바
       addRoundCard(slide, x, y, colW, cardH, BG_CARD);
-      addRect(slide, x, y, 3, cardH, ACCENT2);
+      addRect(slide, x, y, 5, cardH, dc);
 
-      // 도메인명 (좌측)
-      addText(slide, "📦  " + pkg[0], x + 12, y + 6, (colW - 24) * 2 / 3, 20, 11, true, ACCENT2, TextParagraph.TextAlign.LEFT);
+      // 도메인명 (굵게, 13pt)
+      addText(slide, pkg[0], x + 16, y + 8, colW / 2, 24, 13, true, dc, TextParagraph.TextAlign.LEFT);
 
-      // 클래스 타입 요약 (우측)
+      // 클래스 타입 요약 (우측, 10pt, 더 밝은 회색)
       if (pkg[2] != null && !pkg[2].isEmpty()) {
-        addText(slide, pkg[2], x + 12 + (colW - 24) * 2 / 3, y + 6, (colW - 24) / 3, 20, 8, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
+        addText(slide, pkg[2], x + colW / 2, y + 10, colW / 2 - 14, 20, 9, false,
+            new Color(186, 200, 220), TextParagraph.TextAlign.RIGHT);
       }
 
-      // 기능 설명
-      addText(slide, pkg[1], x + 12, y + 30, colW - 24, 32, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      // 구분선
+      addRect(slide, x + 16, y + 36, colW - 30, 1, new Color(51, 65, 85));
+
+      // 기능 설명 (11pt, 흰색)
+      addText(slide, pkg[1], x + 16, y + 42, colW - 28, cardH - 48, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
     }
   }
 
