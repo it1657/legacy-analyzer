@@ -738,9 +738,14 @@ function toggleNotifications() {
   }
 }
 
+function _authHeader() {
+  const t = localStorage.getItem('token');
+  return t ? { 'Authorization': 'Bearer ' + t } : {};
+}
+
 async function loadNotifications() {
   try {
-    const response = await fetch('/api/notifications');
+    const response = await fetch('/api/notifications', { headers: _authHeader() });
     if (!response.ok) return;
     const notifications = await response.json();
     renderNotifications(notifications);
@@ -759,10 +764,13 @@ function renderNotifications(notifications) {
   list.innerHTML = notifications.slice(0, 10).map(notif => {
     const time = new Date(notif.createdAt).toLocaleString('ko-KR');
     const bgColor = notif.isRead ? '#f9f9f9' : '#f0f0ff';
+    const icon = notif.type === 'ANALYSIS_COMPLETED' ? '✅'
+               : notif.type === 'ANALYSIS_FAILED'    ? '❌'
+               : notif.type === 'USER_CREATED'       ? '👤' : '🔔';
     return `
       <div style="padding: 1rem; border-bottom: 1px solid #f0f0f0; background-color: ${bgColor}; cursor: pointer;"
            onclick="markNotificationAsRead(${notif.id})">
-        <div style="font-weight: bold; margin-bottom: 0.25rem; color: #333;">${notif.title}</div>
+        <div style="font-weight: bold; margin-bottom: 0.25rem; color: #333;">${icon} ${notif.title}</div>
         <div style="font-size: 13px; color: #666; margin-bottom: 0.5rem;">${notif.message}</div>
         <div style="font-size: 11px; color: #999;">${time}</div>
       </div>
@@ -772,7 +780,7 @@ function renderNotifications(notifications) {
 
 async function updateUnreadCount() {
   try {
-    const response = await fetch('/api/notifications/unread-count');
+    const response = await fetch('/api/notifications/unread-count', { headers: _authHeader() });
     if (!response.ok) return;
     const data = await response.json();
     const badge = document.getElementById('notificationBadge');
@@ -789,7 +797,10 @@ async function updateUnreadCount() {
 
 async function markNotificationAsRead(notificationId) {
   try {
-    await fetch(`/api/notifications/${notificationId}/read`, { method: 'POST' });
+    await fetch(`/api/notifications/${notificationId}/read`, {
+      method: 'POST',
+      headers: _authHeader()
+    });
     loadNotifications();
   } catch (error) {
     console.error('[알림 읽음 처리 오류]', error);
@@ -799,7 +810,7 @@ async function markNotificationAsRead(notificationId) {
 async function clearAllNotifications() {
   if (!confirm('모든 알림을 삭제하시겠습니까?')) return;
   try {
-    await fetch('/api/notifications', { method: 'DELETE' });
+    await fetch('/api/notifications', { method: 'DELETE', headers: _authHeader() });
     loadNotifications();
   } catch (error) {
     console.error('[알림 삭제 오류]', error);

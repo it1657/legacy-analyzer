@@ -399,6 +399,19 @@
         <div class="navbar-title">☕ Code Analyzer - 관리자 대시보드</div>
         <div class="navbar-user">
             <span id="currentUser"></span>
+            <!-- 알림 벨 -->
+            <div style="position: relative;">
+                <button class="logout-btn" onclick="toggleAdminNotifications()" style="font-size:16px; padding:6px 12px;">🔔<span id="adminNotiBadge" style="display:none; position:absolute; top:-4px; right:-4px; background:#e74a3b; color:white; border-radius:50%; width:18px; height:18px; font-size:10px; font-weight:bold; align-items:center; justify-content:center;"></span></button>
+                <div id="adminNotiPanel" style="display:none; position:absolute; top:46px; right:0; width:340px; background:white; border:1px solid #ddd; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.18); z-index:9999; max-height:420px; overflow:hidden; flex-direction:column;">
+                    <div style="padding:0.85rem 1rem; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center;">
+                        <strong style="color:#333; font-size:14px;">알림</strong>
+                        <button onclick="clearAdminNotifications()" style="background:none; border:none; color:#667eea; cursor:pointer; font-size:12px;">모두 삭제</button>
+                    </div>
+                    <div id="adminNotiList" style="overflow-y:auto; max-height:360px;">
+                        <div style="padding:2rem; text-align:center; color:#bbb; font-size:13px;">알림이 없습니다</div>
+                    </div>
+                </div>
+            </div>
             <button class="logout-btn" onclick="window.location.href='/'">📊 분석 화면</button>
             <button class="logout-btn" onclick="logout()">로그아웃</button>
         </div>
@@ -1648,6 +1661,109 @@
                 alert('❌ PPT 다운로드 중 오류가 발생했습니다.');
             }
         }
+
+        // ── 알림 벨 ──────────────────────────────────────────────────
+        function toggleAdminNotifications() {
+            const panel = document.getElementById('adminNotiPanel');
+            const isOpen = panel.style.display === 'flex';
+            panel.style.display = isOpen ? 'none' : 'flex';
+            if (!isOpen) loadAdminNotifications();
+        }
+
+        // 패널 외부 클릭 시 닫기
+        document.addEventListener('click', function(e) {
+            const panel = document.getElementById('adminNotiPanel');
+            const bell  = panel.previousElementSibling;
+            if (!panel.contains(e.target) && !bell.contains(e.target)) {
+                panel.style.display = 'none';
+            }
+        });
+
+        async function loadAdminNotifications() {
+            try {
+                const res = await fetch('/api/notifications', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) return;
+                const list = await res.json();
+                renderAdminNotifications(list);
+                updateAdminUnreadBadge();
+            } catch (e) {
+                console.error('[알림 로드 오류]', e);
+            }
+        }
+
+        function renderAdminNotifications(list) {
+            const container = document.getElementById('adminNotiList');
+            if (!list.length) {
+                container.innerHTML = '<div style="padding:2rem; text-align:center; color:#bbb; font-size:13px;">알림이 없습니다</div>';
+                return;
+            }
+            container.innerHTML = list.slice(0, 15).map(n => {
+                const time = new Date(n.createdAt).toLocaleString('ko-KR');
+                const bg   = n.isRead ? '#fafafa' : '#f0f0ff';
+                const icon = n.type === 'ANALYSIS_COMPLETED' ? '✅'
+                           : n.type === 'ANALYSIS_FAILED'    ? '❌'
+                           : n.type === 'USER_CREATED'       ? '👤' : '🔔';
+                return `<div onclick="markAdminNotiRead(${n.id})" style="padding:0.8rem 1rem; border-bottom:1px solid #f0f0f0; cursor:pointer; background:${bg}; transition:background 0.15s;">
+                    <div style="display:flex; gap:0.5rem; align-items:flex-start;">
+                        <span style="font-size:15px; margin-top:1px;">${icon}</span>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:13px; font-weight:${n.isRead ? '400' : '600'}; color:#333; margin-bottom:2px;">${n.title}</div>
+                            <div style="font-size:12px; color:#666; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${n.message}</div>
+                            <div style="font-size:11px; color:#aaa; margin-top:3px;">${time}</div>
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        async function updateAdminUnreadBadge() {
+            try {
+                const res = await fetch('/api/notifications/unread-count', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) return;
+                const data  = await res.json();
+                const badge = document.getElementById('adminNotiBadge');
+                if (data.unreadCount > 0) {
+                    badge.textContent    = data.unreadCount > 99 ? '99+' : data.unreadCount;
+                    badge.style.display  = 'flex';
+                } else {
+                    badge.style.display  = 'none';
+                }
+            } catch (e) { /* 무시 */ }
+        }
+
+        async function markAdminNotiRead(id) {
+            try {
+                await fetch(`/api/notifications/${id}/read`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                loadAdminNotifications();
+            } catch (e) { /* 무시 */ }
+        }
+
+        async function clearAdminNotifications() {
+            if (!confirm('모든 알림을 삭제하시겠습니까?')) return;
+            try {
+                await fetch('/api/notifications', {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                loadAdminNotifications();
+                updateAdminUnreadBadge();
+            } catch (e) { /* 무시 */ }
+        }
+
+        // 페이지 로드 시 뱃지 초기화 + 30초마다 갱신
+        window.addEventListener('load', () => {
+            if (token) {
+                updateAdminUnreadBadge();
+                setInterval(updateAdminUnreadBadge, 30000);
+            }
+        });
     </script>
 </body>
 </html>
