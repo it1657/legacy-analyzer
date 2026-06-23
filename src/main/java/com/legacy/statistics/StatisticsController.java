@@ -6,12 +6,14 @@ import com.legacy.analysis.AnalysisHistory;
 import com.legacy.auth.UserRepository;
 import com.legacy.auth.User;
 
+import com.legacy.auth.User;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import java.util.*;
 
@@ -357,23 +359,20 @@ public class StatisticsController {
   // 사용자: 자신의 토큰 사용량
   @GetMapping("/my-tokens")
   @ResponseBody
-  public ResponseEntity<?> getMyTokenStatistics(
-      @RequestHeader(value = "Authorization", required = false) String authHeader) {
+  public ResponseEntity<?> getMyTokenStatistics(Authentication authentication) {
     try {
-      Long userId = extractUserIdFromAuth(authHeader);
-      if (userId == null) {
+      if (authentication == null || !(authentication.getPrincipal() instanceof User)) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
             .body(Collections.singletonMap("message", "인증되지 않은 사용자"));
       }
+      Long userId = ((User) authentication.getPrincipal()).getSeq();
 
-      Map<String, Object> stats = new HashMap<>();
-
-      // 사용자 토큰 통계
       Long inputTokens = analysisHistoryRepository.getTotalInputTokensByUser(userId);
       Long outputTokens = analysisHistoryRepository.getTotalOutputTokensByUser(userId);
       Long totalTokens = analysisHistoryRepository.getTotalTokensByUser(userId);
       Double cost = analysisHistoryRepository.getTotalCostByUser(userId);
 
+      Map<String, Object> stats = new HashMap<>();
       stats.put("input_tokens", inputTokens != null ? inputTokens : 0);
       stats.put("output_tokens", outputTokens != null ? outputTokens : 0);
       stats.put("total_tokens", totalTokens != null ? totalTokens : 0);
@@ -383,15 +382,7 @@ public class StatisticsController {
     } catch (Exception e) {
       log.error("[사용자 토큰 통계 조회 실패]", e);
       return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-          .body(Collections.singletonMap("message",
-              "토큰 통계 조회 실패: " + e.getMessage()));
+          .body(Collections.singletonMap("message", "토큰 통계 조회 실패: " + e.getMessage()));
     }
-  }
-
-  // 헬퍼: 인증 헤더에서 userId 추출
-  private Long extractUserIdFromAuth(String authHeader) {
-    // 이 메서드는 SecurityContextHolder나 다른 방식으로 userId를 가져와야 함
-    // 현재는 간단한 구현, 실제로는 Spring Security 컨텍스트 사용 권장
-    return null;
   }
 }
