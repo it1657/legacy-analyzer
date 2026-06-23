@@ -1080,19 +1080,23 @@ public class PresentationGeneratorService {
     }
 
     int cW = (W - 100) / 2;
-    int itemH = 28, gap = 4;
+    int itemH = 36, gap = 5;  // 높이 28→36: 텍스트 오버플로 방지
     int half = (bullets.size() + 1) / 2;
 
-    for (int i = 0; i < Math.min(bullets.size(), 20); i++) {
+    for (int i = 0; i < Math.min(bullets.size(), 18); i++) {
       int col = i >= half ? 1 : 0;
       int row = col == 0 ? i : i - half;
       int x = 40 + col * (cW + 20);
       int y = yOff + row * (itemH + gap);
       if (y + itemH > startY + totalH) break;
 
+      // 텍스트가 너무 길면 잘라서 한 줄 보장
+      String txt = bullets.get(i);
+      if (txt.length() > 52) txt = txt.substring(0, 50) + "…";
+
       addRoundCard(slide, x, y, cW, itemH, BG_CARD);
       addRect(slide, x, y, 3, itemH, ac);
-      addText(slide, bullets.get(i), x + 12, y + 5, cW - 22, itemH - 8, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      addText(slide, txt, x + 12, y + 8, cW - 22, itemH - 10, 10, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
     }
   }
 
@@ -1290,46 +1294,57 @@ public class PresentationGeneratorService {
       return;
     }
 
-    // 도메인 개수에 따라 카드 크기 동적 계산
+    // 카드 크기 고정: 최대 8개(2열 4행), 초과분은 생략 표시
     boolean twoCol = packages.size() > 4;
-    int half   = twoCol ? (packages.size() + 1) / 2 : packages.size();
-    int colW   = twoCol ? (W - 100) / 2 : W - 80;
-    int startY = 120, maxH = H - startY - 10;
-    int gap    = 6;
-    int cardH  = Math.max(78, Math.min(110, (maxH - gap * (half - 1)) / half));
+    int maxRows = 4;
+    int colW    = twoCol ? (W - 100) / 2 : W - 80;
+    int cardH   = 96;   // 고정 높이 (POI 텍스트 오버플로 방지)
+    int gap     = 8;
+    int startY  = 120;
+    int maxShow = twoCol ? maxRows * 2 : maxRows;
 
-    // 도메인별 배지 색상 순환
     Color[] domainColors = {ACCENT2, ACCENT, new Color(251, 146, 60),
                             new Color(196, 181, 253), new Color(251, 191, 36), new Color(248, 113, 113)};
 
-    for (int i = 0; i < packages.size(); i++) {
-      int col = twoCol ? i / half : 0;
-      int row = twoCol ? i % half : i;
+    int shown = 0;
+    for (int i = 0; i < packages.size() && shown < maxShow; i++) {
+      int col = twoCol ? shown / maxRows : 0;
+      int row = twoCol ? shown % maxRows : shown;
       int x = 40 + col * (colW + 20);
       int y = startY + row * (cardH + gap);
-      if (y + cardH > H - 8) break;
 
       String[] pkg = packages.get(i);
-      Color dc = domainColors[i % domainColors.length];
+      Color dc = domainColors[shown % domainColors.length];
 
-      // 카드 배경 + 좌측 컬러 바
+      // 카드 배경 + 좌측 컬러 바 (5px)
       addRoundCard(slide, x, y, colW, cardH, BG_CARD);
       addRect(slide, x, y, 5, cardH, dc);
 
-      // 도메인명 (굵게, 13pt)
-      addText(slide, pkg[0], x + 16, y + 8, colW / 2, 24, 13, true, dc, TextParagraph.TextAlign.LEFT);
+      // 도메인명 (12pt, bold) — 고정 Y 위치
+      addText(slide, pkg[0], x + 16, y + 10, colW - 110, 22, 12, true, dc, TextParagraph.TextAlign.LEFT);
 
-      // 클래스 타입 요약 (우측, 10pt, 더 밝은 회색)
+      // 클래스 타입 요약 (9pt, 우측) — 도메인명과 같은 행
       if (pkg[2] != null && !pkg[2].isEmpty()) {
-        addText(slide, pkg[2], x + colW / 2, y + 10, colW / 2 - 14, 20, 9, false,
-            new Color(186, 200, 220), TextParagraph.TextAlign.RIGHT);
+        String typeShort = pkg[2].length() > 28 ? pkg[2].substring(0, 26) + "…" : pkg[2];
+        addText(slide, typeShort, x + colW - 100, y + 12, 90, 18, 8, false,
+            new Color(148, 163, 184), TextParagraph.TextAlign.RIGHT);
       }
 
-      // 구분선
-      addRect(slide, x + 16, y + 36, colW - 30, 1, new Color(51, 65, 85));
+      // 구분선 — 도메인명 아래 고정
+      addRect(slide, x + 16, y + 38, colW - 30, 1, new Color(51, 65, 85));
 
-      // 기능 설명 (11pt, 흰색)
-      addText(slide, pkg[1], x + 16, y + 42, colW - 28, cardH - 48, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      // 기능 설명 (10pt, 흰색) — 구분선 아래 고정, 최대 2줄 표시
+      String desc = pkg[1] != null ? pkg[1] : "";
+      if (desc.length() > 60) desc = desc.substring(0, 58) + "…";
+      addText(slide, desc, x + 16, y + 44, colW - 28, 44, 10, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+
+      shown++;
+    }
+
+    // 잘린 패키지 수 표시
+    if (packages.size() > maxShow) {
+      addText(slide, "외 " + (packages.size() - maxShow) + "개 패키지 추가 존재",
+          40, H - 22, W - 80, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
     }
   }
 
