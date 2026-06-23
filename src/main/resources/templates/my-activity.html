@@ -409,11 +409,15 @@
       if (res.status === 403) { alert('접근 권한이 없습니다.'); return; }
       if (!res.ok) { alert('PPT 다운로드에 실패했습니다.'); return; }
 
+      const cd = res.headers.get('Content-Disposition') || '';
+      const fnMatch = cd.match(/filename="?([^";\s]+)"?/);
+      const filename = fnMatch ? fnMatch[1] : `report_${historyId}.pptx`;
+
       const blob = await res.blob();
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href = url;
-      // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       URL.revokeObjectURL(url);

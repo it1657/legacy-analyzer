@@ -944,7 +944,7 @@
                     </td>
                     <td>${new Date(user.createdAt).toLocaleDateString('ko-KR')}</td>
                     <td>
-                        <button class="btn-sm btn-edit" onclick="openEditUserModal(${user.seq}, '${(user.displayName||user.userId).replace(/'/g,&quot;\\'&quot;)}', '${user.userId}', '${user.email}', '${user.roles[0]||'USER'}')">수정</button>
+                        <button class="btn-sm btn-edit" onclick="openEditUserModal(${user.seq}, '${(user.displayName||user.userId).replace(/'/g,"\\'")}', '${user.userId}', '${user.email}', '${user.roles[0]||"USER"}')">수정</button>
                         <button class="btn-sm" style="background:#6c757d;color:white;" onclick="toggleUserStatus(${user.seq}, ${!user.isActive})">
                             ${user.isActive ? '비활성화' : '활성화'}
                         </button>
@@ -1120,7 +1120,7 @@
                         <td>${requestKB}</td>
                         <td>${responseKB}</td>
                         <td>
-                            <button class="btn-sm btn-edit" onclick="viewDetailedUsage(${stat.user_id}, '${(stat.userId||'').replace(/'/g,&quot;\\'&quot;)}', '${(stat.email||'').replace(/'/g,&quot;\\'&quot;)}')">상세 보기</button>
+                            <button class="btn-sm btn-edit" onclick="viewDetailedUsage(${stat.user_id}, '${(stat.userId||"").replace(/'/g,"\\'")}', '${(stat.email||"").replace(/'/g,"\\'")}')">상세 보기</button>
                         </td>
                     </tr>
                 `;
@@ -1439,10 +1439,13 @@
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 if (!res.ok) { alert('PPT 다운로드 실패'); return; }
+                const cd = res.headers.get('Content-Disposition') || '';
+                const fnMatch = cd.match(/filename="?([^";\s]+)"?/);
+                const filename = fnMatch ? fnMatch[1] : `analysis_${historyId}.pptx`;
                 const blob = await res.blob();
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
-                // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
+                a.download = filename;
                 document.body.appendChild(a); a.click();
                 URL.revokeObjectURL(a.href); document.body.removeChild(a);
             } catch (e) { alert('PPT 다운로드 중 오류가 발생했습니다.'); }
@@ -1645,11 +1648,14 @@
                     return;
                 }
 
+                const cd = response.headers.get('Content-Disposition') || '';
+                const fnMatch = cd.match(/filename="?([^";\s]+)"?/);
+                const filename = fnMatch ? fnMatch[1] : `analysis_${historyId}.pptx`;
                 const blob = await response.blob();
                 const url = window.URL.createObjectURL(blob);
                 const link = document.createElement('a');
                 link.href = url;
-                // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
+                link.download = filename;
                 document.body.appendChild(link);
                 link.click();
                 window.URL.revokeObjectURL(url);

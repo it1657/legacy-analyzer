@@ -1080,23 +1080,24 @@ public class PresentationGeneratorService {
     }
 
     int cW = (W - 100) / 2;
-    int itemH = 36, gap = 5;  // 높이 28→36: 텍스트 오버플로 방지
+    int itemH = 52, gap = 6;  // 2줄 텍스트 수용 높이
     int half = (bullets.size() + 1) / 2;
 
-    for (int i = 0; i < Math.min(bullets.size(), 18); i++) {
+    for (int i = 0; i < Math.min(bullets.size(), 14); i++) {
       int col = i >= half ? 1 : 0;
       int row = col == 0 ? i : i - half;
       int x = 40 + col * (cW + 20);
       int y = yOff + row * (itemH + gap);
       if (y + itemH > startY + totalH) break;
 
-      // 텍스트가 너무 길면 잘라서 한 줄 보장
       String txt = bullets.get(i);
-      if (txt.length() > 52) txt = txt.substring(0, 50) + "…";
 
       addRoundCard(slide, x, y, cW, itemH, BG_CARD);
-      addRect(slide, x, y, 3, itemH, ac);
-      addText(slide, txt, x + 12, y + 8, cW - 22, itemH - 10, 10, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      // 체크박스 아이콘: 외곽선만 있는 흰색 사각형
+      int cbX = x + 10, cbY = y + (itemH - 14) / 2;
+      addRect(slide, cbX, cbY, 14, 14, new Color(180, 180, 200));
+      addRect(slide, cbX + 2, cbY + 2, 10, 10, BG_CARD);
+      addText(slide, txt, x + 32, y + 8, cW - 42, itemH - 14, 10, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
     }
   }
 
@@ -1114,9 +1115,10 @@ public class PresentationGeneratorService {
 
     int yOff = startY;
 
-    // 설명 텍스트 강조 카드 (13pt 흰색, 밝은 배경)
+    // 설명 텍스트 강조 카드 — 줄바꿈을 고려해 행당 44px 할당
     if (!descs.isEmpty()) {
-      int descH = Math.min(descs.size() * 30 + 28, items.isEmpty() ? totalH : totalH * 2 / 5);
+      int lineH = 44;  // 13pt 한글 2줄 가능한 높이
+      int descH = Math.min(descs.size() * lineH + 20, items.isEmpty() ? totalH : totalH * 2 / 5);
       Color descBg = new Color(
           Math.min(BG_CARD.getRed()   + 18, 255),
           Math.min(BG_CARD.getGreen() + 18, 255),
@@ -1124,11 +1126,11 @@ public class PresentationGeneratorService {
       addRoundCard(slide, 40, yOff, W - 80, descH, descBg);
       addRect(slide, 40, yOff, 5, descH, ac);
 
-      int ty = yOff + 16;
+      int ty = yOff + 12;
       for (String d : descs) {
-        if (ty + 26 > yOff + descH) break;
-        addText(slide, d, 58, ty, W - 116, 26, 13, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
-        ty += 30;
+        if (ty + lineH > yOff + descH) break;
+        addText(slide, d, 58, ty, W - 116, lineH - 4, 13, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+        ty += lineH;
       }
 
       totalH -= descH + 8;
@@ -1703,12 +1705,15 @@ public class PresentationGeneratorService {
         {"⚡ 방식", "원본 파일 보존 (읽기 전용) → 출력 경로에 복사 후 주석 추가\n병렬 처리 + HTTP 폴링 진행 모니터링 (2초 간격)"},
     };
 
-    int y = 155;
+    int y = 148;
     for (String[] item : items) {
-      addRoundCard(slide, 40, y, W - 80, 80, BG_CARD);
-      addText(slide, item[0], 60, y + 10, 160, 28, 13, true, ACCENT, TextParagraph.TextAlign.LEFT);
-      addText(slide, item[1], 230, y + 10, W - 270, 60, 12, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
-      y += 98;
+      // 카드 높이를 텍스트(2줄) 크기에 맞게 산정: 12pt × 2줄 ≈ 36pt + 상하 패딩 24pt = 60pt
+      int cardH = 62;
+      addRoundCard(slide, 40, y, W - 80, cardH, BG_CARD);
+      addRect(slide, 40, y, 5, cardH, ACCENT);
+      addText(slide, item[0], 56, y + 8, 160, 22, 12, true, ACCENT, TextParagraph.TextAlign.LEFT);
+      addText(slide, item[1], 226, y + 8, W - 266, cardH - 14, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      y += cardH + 10;
     }
   }
 
