@@ -530,6 +530,8 @@ public class MainApiController {
 
       // 일시정지 감지 및 완료 파일 추적 (재개 기능용)
       java.util.concurrent.atomic.AtomicBoolean pauseDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+      // 크레딧 소진 감지 (전체 분석 중단 후 PAUSED 상태로 저장)
+      java.util.concurrent.atomic.AtomicBoolean creditExhausted = new java.util.concurrent.atomic.AtomicBoolean(false);
       java.util.Set<String> completedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
       int actualThreadPoolSize = threadPoolSize;
@@ -580,6 +582,13 @@ public class MainApiController {
             } else if ("FAILED".equals(fileState.getStatus())) {
               int fc = session.getStatistics().getFailureCount() + 1;
               session.getStatistics().setFailureCount(fc);
+              // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
+              if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
+                creditExhausted.set(true);
+                session.cancel();
+                session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다. 크레딧 충전 후 '이어서 분석'으로 재개하세요.");
+                session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
+              }
             }
 
             int processed = processedTotal.incrementAndGet();
@@ -608,6 +617,29 @@ public class MainApiController {
       executor.shutdown();
       log.info("[병렬 분석 완료] 성공:{}, 스킵:{}, 이미처리:{}",
           successCount.get(), skipCount.get(), alreadyProcessedCount.get());
+
+      // 크레딧 소진으로 중단 - PAUSED 저장하여 충전 후 재개 가능하게
+      if (creditExhausted.get()) {
+        List<String> pendingPaths = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(pendingPaths);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.setCurrentPhase("PAUSED");
+        session.addRecentLog(String.format(
+            "💳 [크레딧 소진 일시정지] %d개 완료, %d개 미처리. 충전 후 '이어서 분석'으로 재개하세요.",
+            completedFilePaths.size(), pendingPaths.size()));
+        return;
+      }
 
       // 일시정지로 중단된 경우 - 남은 파일 DB에 저장하고 완료 처리 생략
       if (pauseDetected.get()) {
@@ -911,10 +943,11 @@ public class MainApiController {
 
       // AnalysisHistory 업데이트
       if (history != null) {
-        history.setTotalFiles(successCount + alreadyProcessedCount + skipCount);
+        int curFailCount = session.getStatistics().getFailureCount();
+        history.setTotalFiles(successCount + alreadyProcessedCount + skipCount + curFailCount);
         history.setSuccessCount(successCount);
         history.setSkipCount(alreadyProcessedCount);
-        history.setFailureCount(session.getStatistics().getFailureCount());
+        history.setFailureCount(curFailCount);
         history.setStatus("COMPLETED");
         history.setCompletedAt(LocalDateTime.now());
         history.setProcessingTimeMs((long) (totalTimeSec * 1000));
@@ -980,15 +1013,17 @@ public class MainApiController {
       }
 
       // 완료 요약 메시지
+      int failureCount = session.getStatistics().getFailureCount();
       String finalSummary = String.format(
           "\n=========================================\n" +
           "🎉 [프로세스 완료] 이번 턴 작업 결과:\n" +
           "- 주석 패치 성공: %d개\n" +
           "- 이미 처리됨 (스킵): %d개\n" +
+          "- 처리 실패: %d개\n" +
           "- 용량 초과 패스: %d개\n" +
           "- 총 소요 시간: %.2f초\n" +
           "=========================================",
-          successCount, alreadyProcessedCount, skipCount, totalTimeSec);
+          successCount, alreadyProcessedCount, failureCount, skipCount, totalTimeSec);
 
       // 세션 메타데이터에 결과 저장 (폴링 엔드포인트가 반환)
       session.updateMetadata("avgTimePerFile", String.format("%.4f", avgTimePerFile));
@@ -1099,6 +1134,30 @@ public class MainApiController {
           java.nio.file.StandardOpenOption.APPEND);
     } catch (Exception e) {
       log.warn("[추적 파일 기록 실패] {}", e.getMessage());
+    }
+  }
+
+  // 분석 실패 시 tracker에서 해당 파일 경로를 제거 (이전 성공 기록 무효화)
+  private synchronized void removeFileFromTracker(Path targetPath, String sessionId, String outputRoot) {
+    String absPath = targetPath.toAbsolutePath().normalize().toString();
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session != null) {
+      session.getPatchedFilePaths().remove(absPath);
+    }
+    try {
+      Path tracker = getTrackerFilePath(outputRoot);
+      if (!Files.exists(tracker)) return;
+      List<String> lines = Files.readAllLines(tracker, StandardCharsets.UTF_8);
+      long before = lines.stream().filter(l -> l.trim().equals(absPath)).count();
+      if (before == 0) return;
+      List<String> updated = lines.stream()
+          .map(String::trim)
+          .filter(l -> !l.isEmpty() && !l.equals(absPath))
+          .collect(java.util.stream.Collectors.toList());
+      Files.write(tracker, updated, StandardCharsets.UTF_8);
+      log.debug("[추적 파일 제거] 실패 파일 미처리로 복귀: {}", absPath);
+    } catch (Exception e) {
+      log.warn("[추적 파일 제거 실패] {}", e.getMessage());
     }
   }
 
@@ -1213,12 +1272,15 @@ public class MainApiController {
       fileState.setErrorMessage(e.getMessage());
       fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
       log.error("[파일 분석 실패] {} - {}", filePath, e.getMessage());
+      // 이전 run에서 성공했던 기록이 있으면 tracker에서 제거 (미처리로 재표시)
+      removeFileFromTracker(targetPath, sessionId, finalOutputPath);
     } catch (Exception e) {
       fileState.setStatus("FAILED");
       fileState.setErrorType("UNKNOWN_ERROR");
       fileState.setErrorMessage(e.getMessage());
       fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
       log.error("[파일 분석 실패] {} - {}", filePath, e.getMessage(), e);
+      removeFileFromTracker(targetPath, sessionId, finalOutputPath);
     }
 
     return fileState;
@@ -1360,17 +1422,92 @@ public class MainApiController {
       Path pom = outputPath.resolve("pom.xml");
       if (Files.exists(pom)) {
         String content = Files.readString(pom, StandardCharsets.UTF_8);
-        return "Maven (pom.xml)\n- groupId: " + extractXmlTag(content, "groupId") +
-               "\n- artifactId: " + extractXmlTag(content, "artifactId") +
-               "\n- version: " + extractXmlTag(content, "version");
+        StringBuilder info = new StringBuilder("Maven (pom.xml)");
+        info.append("\n- groupId: ").append(extractXmlTag(content, "groupId"));
+        info.append("\n- artifactId: ").append(extractXmlTag(content, "artifactId"));
+        info.append("\n- version: ").append(extractXmlTag(content, "version"));
+
+        // <parent> 블록에서 Spring Boot / Spring Framework 버전 추출
+        String parentBlock = extractXmlBlock(content, "parent");
+        if (!parentBlock.isEmpty()) {
+          String parentArtifactId = extractXmlTag(parentBlock, "artifactId");
+          String parentVersion    = extractXmlTag(parentBlock, "version");
+          String parentGroupId    = extractXmlTag(parentBlock, "groupId");
+          if (!"-".equals(parentVersion)) {
+            String label = parentArtifactId.toLowerCase().contains("spring-boot")
+                ? "Spring Boot 버전"
+                : parentGroupId + ":" + parentArtifactId;
+            info.append("\n- ").append(label).append(": ").append(parentVersion);
+          }
+        }
+
+        // Java 버전 추출 (<java.version> 또는 <maven.compiler.source>)
+        String javaVersion = extractXmlTag(content, "java.version");
+        if ("-".equals(javaVersion)) javaVersion = extractXmlTag(content, "maven.compiler.source");
+        if (!"-".equals(javaVersion)) info.append("\n- Java 버전: ").append(javaVersion);
+
+        return info.toString();
       }
-      if (Files.exists(outputPath.resolve("build.gradle.kts"))) return "Gradle (Kotlin DSL, build.gradle.kts)";
-      if (Files.exists(outputPath.resolve("build.gradle")))     return "Gradle (Groovy DSL, build.gradle)";
-      if (Files.exists(outputPath.resolve("package.json")))     return "npm / Node.js (package.json)";
+      if (Files.exists(outputPath.resolve("build.gradle.kts"))) {
+        String content = Files.readString(outputPath.resolve("build.gradle.kts"), StandardCharsets.UTF_8);
+        return extractGradleInfo(content, "build.gradle.kts (Kotlin DSL)");
+      }
+      if (Files.exists(outputPath.resolve("build.gradle"))) {
+        String content = Files.readString(outputPath.resolve("build.gradle"), StandardCharsets.UTF_8);
+        return extractGradleInfo(content, "build.gradle (Groovy DSL)");
+      }
+      if (Files.exists(outputPath.resolve("package.json"))) {
+        String content = Files.readString(outputPath.resolve("package.json"), StandardCharsets.UTF_8);
+        return extractPackageJsonInfo(content);
+      }
     } catch (Exception e) {
       log.warn("[빌드 도구 감지 실패] {}", e.getMessage());
     }
     return "";
+  }
+
+  // XML 블록 전체 추출: <tagName>...</tagName>
+  private String extractXmlBlock(String xml, String tagName) {
+    String open  = "<" + tagName + ">";
+    String close = "</" + tagName + ">";
+    int start = xml.indexOf(open);
+    if (start < 0) return "";
+    int end = xml.indexOf(close, start);
+    return end > start ? xml.substring(start + open.length(), end).trim() : "";
+  }
+
+  // Gradle 파일에서 Spring Boot 버전과 Java 버전 추출
+  private String extractGradleInfo(String content, String label) {
+    StringBuilder info = new StringBuilder("Gradle (").append(label).append(")");
+    java.util.regex.Matcher bootMatcher = java.util.regex.Pattern
+        .compile("id[\\s(\"']+org\\.springframework\\.boot[\"'\\s)]+version[\\s\"']+([\\d.]+)")
+        .matcher(content);
+    if (bootMatcher.find()) info.append("\n- Spring Boot 버전: ").append(bootMatcher.group(1));
+
+    java.util.regex.Matcher javaMatcher = java.util.regex.Pattern
+        .compile("sourceCompatibility\\s*=\\s*[\"']?([\\d.]+)[\"']?")
+        .matcher(content);
+    if (javaMatcher.find()) info.append("\n- Java 버전: ").append(javaMatcher.group(1));
+
+    return info.toString();
+  }
+
+  // package.json에서 프로젝트명과 주요 프레임워크 버전 추출
+  private String extractPackageJsonInfo(String content) {
+    StringBuilder info = new StringBuilder("npm / Node.js (package.json)");
+    try {
+      com.fasterxml.jackson.databind.JsonNode json =
+          new com.fasterxml.jackson.databind.ObjectMapper().readTree(content);
+      if (json.has("name"))    info.append("\n- name: ").append(json.get("name").asText());
+      if (json.has("version")) info.append("\n- version: ").append(json.get("version").asText());
+      com.fasterxml.jackson.databind.JsonNode deps = json.has("dependencies") ? json.get("dependencies") : null;
+      if (deps != null) {
+        for (String fw : new String[]{"react", "next", "vue", "angular", "express"}) {
+          if (deps.has(fw)) info.append("\n- ").append(fw).append(": ").append(deps.get(fw).asText());
+        }
+      }
+    } catch (Exception ignored) {}
+    return info.toString();
   }
 
   private String extractXmlTag(String xml, String tag) {

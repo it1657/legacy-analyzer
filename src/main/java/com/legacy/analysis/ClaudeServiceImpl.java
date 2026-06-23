@@ -29,6 +29,8 @@ public class ClaudeServiceImpl implements ClaudeService {
     // 스레드 풀에서 호출되므로 AtomicLong으로 스레드 안전하게 토큰 누적
     private final AtomicLong accumulatedInputTokens = new AtomicLong(0);
     private final AtomicLong accumulatedOutputTokens = new AtomicLong(0);
+    private final AtomicLong accumulatedCacheReadTokens = new AtomicLong(0);
+    private final AtomicLong accumulatedCacheCreationTokens = new AtomicLong(0);
     private volatile String lastModelName = "";
 
     @Value("${anthropic.api.key}")
@@ -77,6 +79,8 @@ public class ClaudeServiceImpl implements ClaudeService {
         long input = accumulatedInputTokens.get();
         long output = accumulatedOutputTokens.get();
         TokenUsage usage = new TokenUsage(input, output, lastModelName);
+        usage.setCacheReadTokens(accumulatedCacheReadTokens.get());
+        usage.setCacheCreationTokens(accumulatedCacheCreationTokens.get());
         return usage;
     }
 
@@ -84,6 +88,8 @@ public class ClaudeServiceImpl implements ClaudeService {
     public void resetTokenUsage() {
         accumulatedInputTokens.set(0);
         accumulatedOutputTokens.set(0);
+        accumulatedCacheReadTokens.set(0);
+        accumulatedCacheCreationTokens.set(0);
     }
 
     @Override
@@ -354,21 +360,27 @@ public class ClaudeServiceImpl implements ClaudeService {
                 .baseUrl(apiUrl)
                 .defaultHeader("x-api-key", apiKey)
                 .defaultHeader("anthropic-version", "2023-06-01")
+                .defaultHeader("anthropic-beta", "prompt-caching-2024-07-31")
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
 
         String baseSystemPrompt = loadSystemPromptFromMd();
 
-        // 💡 단순 문자열 치환은 .replace() 표준 메서드로 사용하여 성능 인스펙션을 소독했습니다.
         String finalSystemPrompt = baseSystemPrompt
                 .replace("${fileName}", fileName)
                 .replace("${extension}", extension)
                 .replace("${customSpecData}", customSpecData);
 
+        // 프롬프트 캐싱: system을 배열 형식으로 전송하여 두 번째 호출부터 캐시 히트
+        Map<String, Object> systemBlock = new HashMap<>();
+        systemBlock.put("type", "text");
+        systemBlock.put("text", finalSystemPrompt);
+        systemBlock.put("cache_control", Collections.singletonMap("type", "ephemeral"));
+
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", getCurrentModel());
         requestBody.put("max_tokens", apiMaxTokens);
-        requestBody.put("system", finalSystemPrompt);
+        requestBody.put("system", Collections.singletonList(systemBlock));
 
         Map<String, String> userMessage = new HashMap<>();
         userMessage.put("role", "user");
@@ -619,7 +631,12 @@ public class ClaudeServiceImpl implements ClaudeService {
                     fixed.append(part).append("\n");
                 }
             }
-            return fixed.toString().stripTrailing();
+            String result = fixed.toString().stripTrailing();
+            // Claude가 */ 없이 반환한 경우 강제 닫기
+            if (!result.endsWith("*/")) {
+                result = result + " */";
+            }
+            return result;
         }
 
         // /* */ 블록 안에 // 스타일이 섞인 경우도 동일 처리
@@ -634,7 +651,12 @@ public class ClaudeServiceImpl implements ClaudeService {
                     fixed.append(part).append("\n");
                 }
             }
-            return fixed.toString().stripTrailing();
+            String result = fixed.toString().stripTrailing();
+            // Claude가 */ 없이 반환한 경우 강제 닫기
+            if (!result.endsWith("*/")) {
+                result = result + " */";
+            }
+            return result;
         }
 
         // // 스타일은 그대로 통과
@@ -776,25 +798,37 @@ public class ClaudeServiceImpl implements ClaudeService {
             if (usage != null) {
                 long inputTokens = 0;
                 long outputTokens = 0;
+                long cacheReadTokens = 0;
+                long cacheCreationTokens = 0;
 
-                // 입력 토큰 추출
                 Object inputObj = usage.get("input_tokens");
-                if (inputObj != null) {
-                    inputTokens = ((Number) inputObj).longValue();
-                }
+                if (inputObj != null) inputTokens = ((Number) inputObj).longValue();
 
-                // 출력 토큰 추출
                 Object outputObj = usage.get("output_tokens");
-                if (outputObj != null) {
-                    outputTokens = ((Number) outputObj).longValue();
-                }
+                if (outputObj != null) outputTokens = ((Number) outputObj).longValue();
+
+                Object cacheReadObj = usage.get("cache_read_input_tokens");
+                if (cacheReadObj != null) cacheReadTokens = ((Number) cacheReadObj).longValue();
+
+                Object cacheCreationObj = usage.get("cache_creation_input_tokens");
+                if (cacheCreationObj != null) cacheCreationTokens = ((Number) cacheCreationObj).longValue();
 
                 long totalInput = accumulatedInputTokens.addAndGet(inputTokens);
                 long totalOutput = accumulatedOutputTokens.addAndGet(outputTokens);
-                lastModelName = apiModel;
+                accumulatedCacheReadTokens.addAndGet(cacheReadTokens);
+                accumulatedCacheCreationTokens.addAndGet(cacheCreationTokens);
+                lastModelName = getCurrentModel();
 
-                log.info("[토큰 사용량] 입력: {}, 출력: {}, 누적 합계: {}",
+                if (cacheReadTokens > 0) {
+                    log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시히트: {} (90% 절약), 누적: {}",
+                        inputTokens, outputTokens, cacheReadTokens, totalInput + totalOutput);
+                } else if (cacheCreationTokens > 0) {
+                    log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시생성: {}, 누적: {}",
+                        inputTokens, outputTokens, cacheCreationTokens, totalInput + totalOutput);
+                } else {
+                    log.info("[토큰 사용량] 입력: {}, 출력: {}, 누적 합계: {}",
                         inputTokens, outputTokens, totalInput + totalOutput);
+                }
             }
         } catch (Exception e) {
             log.warn("[토큰 추출 실패] {}", e.getMessage());

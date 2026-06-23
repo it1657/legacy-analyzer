@@ -14,16 +14,17 @@ public class ApiErrorHandler {
   private static final Logger log = LoggerFactory.getLogger(ApiErrorHandler.class);
 
   public enum ErrorType {
-    NETWORK_TIMEOUT,      // 네트워크 타임아웃
-    CONNECT_FAILURE,      // 연결 실패
-    API_RATE_LIMIT,       // API 할당량 초과 (429)
-    API_AUTHENTICATION,   // 인증 실패 (401)
-    API_FORBIDDEN,        // 권한 없음 (403)
-    INVALID_REQUEST,      // 잘못된 요청 (400)
-    SERVER_ERROR,         // 서버 오류 (5xx)
-    FILE_READ_ERROR,      // 파일 읽기 오류
-    FILE_WRITE_ERROR,     // 파일 쓰기 오류
-    UNKNOWN_ERROR         // 미분류 오류
+    NETWORK_TIMEOUT,        // 네트워크 타임아웃
+    CONNECT_FAILURE,        // 연결 실패
+    API_RATE_LIMIT,         // API 할당량 초과 (429)
+    API_AUTHENTICATION,     // 인증 실패 (401)
+    API_FORBIDDEN,          // 권한 없음 (403)
+    INVALID_REQUEST,        // 잘못된 요청 (400)
+    INSUFFICIENT_CREDITS,   // 크레딧 부족 (400 + credit balance 메시지)
+    SERVER_ERROR,           // 서버 오류 (5xx)
+    FILE_READ_ERROR,        // 파일 읽기 오류
+    FILE_WRITE_ERROR,       // 파일 쓰기 오류
+    UNKNOWN_ERROR           // 미분류 오류
   }
 
   /**
@@ -55,6 +56,11 @@ public class ApiErrorHandler {
       return ErrorType.FILE_READ_ERROR;
     }
 
+    // 크레딧 부족 감지 (400 + "credit balance" 메시지)
+    if (exceptionMessage.contains("credit balance") || exceptionMessage.contains("too low to access")) {
+      return ErrorType.INSUFFICIENT_CREDITS;
+    }
+
     return classifyErrorByStatus(httpStatus);
   }
 
@@ -84,6 +90,7 @@ public class ApiErrorHandler {
       case API_AUTHENTICATION,     // 재시도 불가능 (인증 키 문제)
            API_FORBIDDEN,          // 재시도 불가능 (권한 문제)
            INVALID_REQUEST,        // 재시도 불가능 (요청 자체 문제)
+           INSUFFICIENT_CREDITS,   // 재시도 불가능 (크레딧 충전 필요)
            FILE_READ_ERROR,        // 재시도 불가능 (파일 접근 불가)
            FILE_WRITE_ERROR,       // 재시도 불가능 (파일 쓰기 권한)
            UNKNOWN_ERROR -> false;
@@ -132,6 +139,8 @@ public class ApiErrorHandler {
         "[권한 없음] Claude API 접근 권한이 없습니다.");
       case INVALID_REQUEST -> String.format(
         "[요청 오류] %s 분석 요청이 유효하지 않습니다.", fileName);
+      case INSUFFICIENT_CREDITS ->
+        "💳 [크레딧 부족] Claude API 크레딧이 소진되었습니다. Plans & Billing에서 충전 후 분석을 재시도하세요.";
       case SERVER_ERROR -> String.format(
         "[서버 오류] Claude 서버 일시적 오류. 자동 재시도 중...");
       case FILE_READ_ERROR -> String.format(

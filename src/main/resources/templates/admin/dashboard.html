@@ -1384,7 +1384,7 @@
                 const date    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
                 const stCls   = h.status === 'COMPLETED' ? 'badge-active' : 'badge-inactive';
                 const pptBtn  = h.status === 'COMPLETED'
-                    ? `<button class="btn-sm btn-primary" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📊 PPT</button>`
+                    ? `<button class="btn-sm btn-ppt" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📋 보고서 PPT</button>`
                     : '-';
                 return `<tr>
                     <td title="${h.sourcePath||''}">${project}</td>
@@ -1435,13 +1435,13 @@
         async function downloadMyPpt(historyId) {
             const token = localStorage.getItem('token');
             try {
-                const res = await fetch(`/api/my/download/presentation/${historyId}`, {
+                const res = await fetch(`/api/my/download/project-report/${historyId}`, {
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 if (!res.ok) { alert('PPT 다운로드 실패'); return; }
                 const cd = res.headers.get('Content-Disposition') || '';
                 const fnMatch = cd.match(/filename="?([^";\s]+)"?/);
-                const filename = fnMatch ? fnMatch[1] : `analysis_${historyId}.pptx`;
+                const filename = fnMatch ? fnMatch[1] : `report_${historyId}.pptx`;
                 const blob = await res.blob();
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
@@ -1760,6 +1760,7 @@
                 });
                 loadAdminNotifications();
                 updateAdminUnreadBadge();
+                document.getElementById('adminNotiPanel').style.display = 'none';
             } catch (e) { /* 무시 */ }
         }
 
