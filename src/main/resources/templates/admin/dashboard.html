@@ -841,11 +841,20 @@
         }
 
         // 대시보드 로드
-        function loadDashboard() {
-            // API 호출로 통계 데이터 가져오기
-            loadUsers().then(() => {
-                loadAnalysisHistory();
-            });
+        async function loadDashboard() {
+            try {
+                const response = await fetch('/api/statistics/admin/system', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!response.ok) throw new Error('통계 조회 실패');
+                const stats = await response.json();
+                document.getElementById('totalUsers').textContent = stats.totalUsers ?? '-';
+                document.getElementById('activeUsers').textContent = stats.activeUsers ?? '-';
+                document.getElementById('totalAnalysis').textContent = stats.totalAnalysis ?? '-';
+                document.getElementById('successAnalysis').textContent = stats.successAnalysis ?? '-';
+            } catch (error) {
+                console.error('[대시보드 로드 오류]', error);
+            }
         }
 
         // 사용자 목록 로드
@@ -863,11 +872,6 @@
 
                 const users = await response.json();
                 renderUsers(users);
-
-                // 대시보드 통계 업데이트
-                const activeCount = users.filter(u => u.isActive).length;
-                document.getElementById('totalUsers').textContent = users.length;
-                document.getElementById('activeUsers').textContent = activeCount;
             } catch (error) {
                 console.error('[사용자 로드 오류]', error);
                 showAlert('usersAlert', '사용자 목록을 로드할 수 없습니다.', 'error');
@@ -921,14 +925,6 @@
 
                 const histories = await response.json();
                 renderAnalysisHistory(histories);
-
-                // 대시보드 통계 업데이트
-                if (histories.length > 0) {
-                    const totalAnalysis = histories.length;
-                    const successAnalysis = histories.filter(h => h.status === 'COMPLETED').length;
-                    document.getElementById('totalAnalysis').textContent = totalAnalysis;
-                    document.getElementById('successAnalysis').textContent = successAnalysis;
-                }
             } catch (error) {
                 console.error('[분석 이력 로드 오류]', error);
                 showAlert('historyAlert', '분석 이력을 로드할 수 없습니다.', 'error');
