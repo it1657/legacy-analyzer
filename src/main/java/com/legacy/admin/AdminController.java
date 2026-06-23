@@ -17,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -194,6 +195,88 @@ public class AdminController {
       log.error("[전체 분석 히스토리 조회 실패]", e);
       return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
           .body(Collections.singletonMap("message", "분석 히스토리 조회 실패: " + e.getMessage()));
+    }
+  }
+
+  // 분석 이력 필터 조회 (사용자, 상태, 날짜 범위)
+  @GetMapping("/analysis-history/filter")
+  @ResponseBody
+  public ResponseEntity<?> filterAnalysisHistory(
+      @RequestParam(required = false) Long userSeq,
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String startDate,
+      @RequestParam(required = false) String endDate) {
+    try {
+      List<AnalysisHistory> histories = analysisHistoryRepository.findAll();
+
+      if (userSeq != null) {
+        histories = histories.stream()
+            .filter(h -> userSeq.equals(h.getUserId()))
+            .toList();
+      }
+      if (status != null && !status.isBlank()) {
+        histories = histories.stream()
+            .filter(h -> status.equals(h.getStatus()))
+            .toList();
+      }
+      if (startDate != null && !startDate.isBlank()) {
+        LocalDateTime start = LocalDate.parse(startDate).atStartOfDay();
+        histories = histories.stream()
+            .filter(h -> h.getCreatedAt() != null && !h.getCreatedAt().isBefore(start))
+            .toList();
+      }
+      if (endDate != null && !endDate.isBlank()) {
+        LocalDateTime end = LocalDate.parse(endDate).plusDays(1).atStartOfDay();
+        histories = histories.stream()
+            .filter(h -> h.getCreatedAt() != null && h.getCreatedAt().isBefore(end))
+            .toList();
+      }
+
+      List<Map<String, Object>> response = histories.stream()
+          .sorted(Comparator.comparing(AnalysisHistory::getCreatedAt,
+              Comparator.nullsLast(Comparator.reverseOrder())))
+          .map(history -> {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("id", history.getId());
+            map.put("userSeq", history.getUserId());
+            userRepository.findById(history.getUserId()).ifPresentOrElse(
+                u -> { map.put("userId", u.getUserId()); map.put("displayName", u.getDisplayName()); },
+                () -> { map.put("userId", "user_" + history.getUserId()); map.put("displayName", null); });
+            map.put("sourcePath", history.getSourcePath());
+            map.put("totalFiles", history.getTotalFiles());
+            map.put("successCount", history.getSuccessCount());
+            map.put("failureCount", history.getFailureCount());
+            map.put("processingTimeMs", history.getProcessingTimeMs());
+            map.put("status", history.getStatus());
+            map.put("createdAt", history.getCreatedAt());
+            return map;
+          })
+          .toList();
+
+      return ResponseEntity.ok(response);
+    } catch (Exception e) {
+      log.error("[분석 이력 필터 조회 실패]", e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+          .body(Collections.singletonMap("message", "조회 실패: " + e.getMessage()));
+    }
+  }
+
+  // 분석 이력 단건 삭제
+  @DeleteMapping("/analysis-history/{historyId}")
+  @ResponseBody
+  public ResponseEntity<?> deleteAnalysisHistory(@PathVariable Long historyId) {
+    try {
+      if (!analysisHistoryRepository.existsById(historyId)) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(Collections.singletonMap("message", "이력을 찾을 수 없습니다."));
+      }
+      analysisHistoryRepository.deleteById(historyId);
+      log.info("[분석 이력 삭제] historyId={}", historyId);
+      return ResponseEntity.ok(Collections.singletonMap("message", "삭제되었습니다."));
+    } catch (Exception e) {
+      log.error("[분석 이력 삭제 실패] historyId={}", historyId, e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+          .body(Collections.singletonMap("message", "삭제 실패: " + e.getMessage()));
     }
   }
 

@@ -499,6 +499,34 @@
                     <h1 class="page-title">분석 이력</h1>
                 </div>
                 <div id="historyAlert" class="alert"></div>
+                <!-- 필터 영역 -->
+                <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:flex-end; margin-bottom:1rem; padding:1rem; background:#f9f9f9; border-radius:8px; border:1px solid #e0e0e0;">
+                    <div>
+                        <label style="display:block; font-size:12px; font-weight:600; color:#555; margin-bottom:4px;">사용자</label>
+                        <select id="filterUserSeq" style="padding:0.5rem 0.75rem; border:1px solid #e0e0e0; border-radius:6px; font-size:13px; min-width:150px;">
+                            <option value="">전체</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:12px; font-weight:600; color:#555; margin-bottom:4px;">상태</label>
+                        <select id="filterStatus" style="padding:0.5rem 0.75rem; border:1px solid #e0e0e0; border-radius:6px; font-size:13px;">
+                            <option value="">전체</option>
+                            <option value="COMPLETED">완료</option>
+                            <option value="FAILED">실패</option>
+                            <option value="IN_PROGRESS">진행중</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:12px; font-weight:600; color:#555; margin-bottom:4px;">시작일</label>
+                        <input type="date" id="filterStartDate" style="padding:0.5rem 0.75rem; border:1px solid #e0e0e0; border-radius:6px; font-size:13px;">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:12px; font-weight:600; color:#555; margin-bottom:4px;">종료일</label>
+                        <input type="date" id="filterEndDate" style="padding:0.5rem 0.75rem; border:1px solid #e0e0e0; border-radius:6px; font-size:13px;">
+                    </div>
+                    <button class="btn-primary" onclick="applyHistoryFilter()" style="padding:0.5rem 1.25rem; height:fit-content;">검색</button>
+                    <button class="btn-cancel" onclick="resetHistoryFilter()" style="padding:0.5rem 1rem; height:fit-content;">초기화</button>
+                </div>
                 <div class="table-container">
                     <table class="table">
                         <thead>
@@ -509,7 +537,7 @@
                                 <th>성공</th>
                                 <th>상태</th>
                                 <th>분석 시간</th>
-                                <th>다운로드</th>
+                                <th>작업</th>
                             </tr>
                         </thead>
                         <tbody id="historyList">
@@ -910,24 +938,89 @@
             `).join('');
         }
 
-        // 분석 이력 로드
+        // 분석 이력 로드 (필터 없이 전체)
         async function loadAnalysisHistory() {
+            await fetchAndRenderHistory('/api/admin/analysis-history');
+            await populateUserFilter();
+        }
+
+        // 필터 적용 검색
+        async function applyHistoryFilter() {
+            const userSeq = document.getElementById('filterUserSeq').value;
+            const status = document.getElementById('filterStatus').value;
+            const startDate = document.getElementById('filterStartDate').value;
+            const endDate = document.getElementById('filterEndDate').value;
+
+            const params = new URLSearchParams();
+            if (userSeq) params.append('userSeq', userSeq);
+            if (status) params.append('status', status);
+            if (startDate) params.append('startDate', startDate);
+            if (endDate) params.append('endDate', endDate);
+
+            const url = params.toString()
+                ? `/api/admin/analysis-history/filter?${params}`
+                : '/api/admin/analysis-history';
+            await fetchAndRenderHistory(url);
+        }
+
+        // 필터 초기화
+        async function resetHistoryFilter() {
+            document.getElementById('filterUserSeq').value = '';
+            document.getElementById('filterStatus').value = '';
+            document.getElementById('filterStartDate').value = '';
+            document.getElementById('filterEndDate').value = '';
+            await fetchAndRenderHistory('/api/admin/analysis-history');
+        }
+
+        // 공통 이력 fetch + 렌더링
+        async function fetchAndRenderHistory(url) {
             try {
-                const response = await fetch('/api/admin/analysis-history', {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
+                const response = await fetch(url, {
+                    headers: { 'Authorization': `Bearer ${token}` }
                 });
-
-                if (!response.ok) {
-                    throw new Error('분석 이력 로드 실패');
-                }
-
+                if (!response.ok) throw new Error('분석 이력 로드 실패');
                 const histories = await response.json();
                 renderAnalysisHistory(histories);
             } catch (error) {
                 console.error('[분석 이력 로드 오류]', error);
                 showAlert('historyAlert', '분석 이력을 로드할 수 없습니다.', 'error');
+            }
+        }
+
+        // 사용자 필터 드롭다운 채우기
+        async function populateUserFilter() {
+            try {
+                const response = await fetch('/api/users', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!response.ok) return;
+                const users = await response.json();
+                const select = document.getElementById('filterUserSeq');
+                const current = select.value;
+                select.innerHTML = '<option value="">전체</option>' +
+                    users.map(u => `<option value="${u.seq}">${u.displayName || u.userId} (${u.userId})</option>`).join('');
+                select.value = current;
+            } catch (e) { /* 무시 */ }
+        }
+
+        // 분석 이력 단건 삭제
+        async function deleteHistory(historyId) {
+            if (!confirm('이 분석 이력을 삭제하시겠습니까?')) return;
+            try {
+                const response = await fetch(`/api/admin/analysis-history/${historyId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (response.ok) {
+                    showAlert('historyAlert', '이력이 삭제되었습니다.', 'success');
+                    await applyHistoryFilter();
+                } else {
+                    const data = await response.json();
+                    showAlert('historyAlert', data.message || '삭제 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[이력 삭제 오류]', error);
+                showAlert('historyAlert', '서버 연결 실패', 'error');
             }
         }
 
@@ -959,9 +1052,9 @@
                     <td>${timeSec}초</td>
                     <td>
                         <button class="btn-sm btn-ppt" onclick="downloadPresentation(${h.id})"
-                            title="이 분석 결과를 PPT로 다운로드">
-                            📊 PPT
-                        </button>
+                            title="이 분석 결과를 PPT로 다운로드">📊 PPT</button>
+                        <button class="btn-sm btn-delete" onclick="deleteHistory(${h.id})"
+                            title="이 이력 삭제">삭제</button>
                     </td>
                 </tr>`;
             }).join('');
