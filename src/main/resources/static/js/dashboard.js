@@ -815,6 +815,8 @@ async function clearAllNotifications() {
   try {
     await fetch('/api/notifications', { method: 'DELETE', headers: _authHeader() });
     loadNotifications();
+    const panel = document.getElementById('notificationPanel');
+    if (panel) panel.style.display = 'none';
   } catch (error) {
     console.error('[알림 삭제 오류]', error);
   }
