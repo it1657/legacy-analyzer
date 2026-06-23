@@ -954,25 +954,175 @@ public class PresentationGeneratorService {
   private void createReadmeSectionSlide(XMLSlideShow ppt, String title, String body, int idx) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
-    addSlideHeader(slide, title, "레거시 코드 분석 보고서  ·  " + idx);
 
-    // ▸ 로 시작하는 서브헤더 줄은 강조색으로 표시하기 위해 분리
-    String[] lines = body.split("\n");
-    StringBuilder display = new StringBuilder();
-    int lineCount = 0;
-    for (String line : lines) {
-      if (lineCount >= 22 || display.length() > 1200) {
-        display.append("  ···");
-        break;
-      }
-      display.append(line).append("\n");
-      lineCount++;
+    // 섹션마다 순환 배지 색상
+    Color[] palette = {
+        ACCENT,                       // 파랑
+        ACCENT2,                      // 초록
+        new Color(251, 146, 60),      // 주황
+        new Color(196, 181, 253),     // 보라
+        new Color(251, 191, 36),      // 노랑
+        new Color(248, 113, 113),     // 빨강
+    };
+    Color ac = palette[(idx - 1) % palette.length];
+
+    // 헤더 영역
+    addRect(slide, 0, 0, W, 100, BG_CARD);
+    addRect(slide, 0, 100, W, 3, ac);
+    addRect(slide, 40, 30, 30, 30, ac);  // 섹션 번호 배지
+    addText(slide, String.valueOf(idx), 40, 30, 30, 30, 11, true, BG_DARK, TextParagraph.TextAlign.CENTER);
+    addText(slide, title, 82, 18, W - 280, 50, 22, true, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+    addText(slide, "레거시 코드 분석 보고서", W - 200, 66, 162, 22, 9, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
+
+    // 내용 파싱: ▸ 서브헤더 / • 불릿 / 일반 텍스트 구분
+    List<String[]> segments = new ArrayList<>();
+    for (String line : body.split("\n")) {
+      String l = line.trim();
+      if (l.isEmpty()) continue;
+      if (l.startsWith("▸ "))      segments.add(new String[]{"header", l.substring(2).trim()});
+      else if (l.startsWith("• ")) segments.add(new String[]{"bullet", l.substring(2).trim()});
+      else                          segments.add(new String[]{"text",   l});
     }
 
-    addRoundCard(slide, 40, 125, W - 80, H - 155, BG_CARD);
-    addRect(slide, 40, 125, 4, H - 155, ACCENT);
-    addText(slide, display.toString().trim(),
-        60, 136, W - 108, H - 178, 11, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+    int contentY = 112, contentH = H - contentY - 12;
+    long headerCnt = segments.stream().filter(s -> "header".equals(s[0])).count();
+    long bulletCnt = segments.stream().filter(s -> "bullet".equals(s[0])).count();
+
+    if (headerCnt >= 2) {
+      renderSubsectionCards(slide, segments, ac, contentY, contentH);
+    } else if (bulletCnt >= 6) {
+      renderTwoColumnBullets(slide, segments, ac, contentY, contentH);
+    } else {
+      renderSingleColumn(slide, segments, ac, contentY, contentH);
+    }
+  }
+
+  // 서브섹션(▸) 2개 이상: 섹션별 카드 2열 레이아웃
+  private void renderSubsectionCards(XSLFSlide slide, List<String[]> segments,
+      Color ac, int startY, int totalH) {
+    List<String> preamble = new ArrayList<>();
+    List<String> hTitles = new ArrayList<>();
+    List<List<String>> hBodies = new ArrayList<>();
+    String curTitle = null;
+    List<String> curBody = null;
+
+    for (String[] seg : segments) {
+      if ("header".equals(seg[0])) {
+        if (curTitle != null) { hTitles.add(curTitle); hBodies.add(curBody); }
+        curTitle = seg[1]; curBody = new ArrayList<>();
+      } else if (curTitle == null) {
+        preamble.add(seg[1]);
+      } else {
+        curBody.add(("bullet".equals(seg[0]) ? "• " : "") + seg[1]);
+      }
+    }
+    if (curTitle != null) { hTitles.add(curTitle); hBodies.add(curBody); }
+
+    int yOff = startY;
+    if (!preamble.isEmpty()) {
+      String pre = String.join("  ", preamble);
+      addRoundCard(slide, 40, yOff, W - 80, 32, BG_CARD);
+      addRect(slide, 40, yOff, 4, 32, ac);
+      addText(slide, pre, 54, yOff + 6, W - 104, 22, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      yOff += 38; totalH -= 38;
+    }
+
+    int n = Math.min(hTitles.size(), 6);
+    boolean twoCol = n > 2;
+    int cols = twoCol ? 2 : 1;
+    int rows = twoCol ? (n + 1) / 2 : n;
+    int cW = twoCol ? (W - 100) / 2 : W - 80;
+    int cGap = twoCol ? 20 : 0;
+    int cH = Math.max(60, (totalH - (rows - 1) * 6) / rows);
+
+    for (int i = 0; i < n; i++) {
+      int col = twoCol ? i % 2 : 0;
+      int row = twoCol ? i / 2 : i;
+      int x = 40 + col * (cW + cGap);
+      int y = yOff + row * (cH + 6);
+      if (y + cH > startY + totalH + 10) break;
+
+      addRoundCard(slide, x, y, cW, cH, BG_CARD);
+      addRect(slide, x, y, cW, 3, ac);
+      addText(slide, "▸  " + hTitles.get(i), x + 12, y + 6, cW - 20, 20, 10, true, ac, TextParagraph.TextAlign.LEFT);
+
+      List<String> bodyLines = hBodies.get(i);
+      int textY = y + 30;
+      int maxLines = Math.min(bodyLines.size(), Math.max(1, (cH - 36) / 16));
+      for (int j = 0; j < maxLines; j++) {
+        String bl = bodyLines.get(j);
+        Color lc = bl.startsWith("•") ? TEXT_WHITE : TEXT_GRAY;
+        addText(slide, bl, x + 12, textY, cW - 24, 16, 8, false, lc, TextParagraph.TextAlign.LEFT);
+        textY += 16;
+      }
+      if (bodyLines.size() > maxLines) {
+        addText(slide, "···", x + 12, textY, cW - 24, 14, 7, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      }
+    }
+  }
+
+  // 불릿 6개 이상: 2열 카드 레이아웃
+  private void renderTwoColumnBullets(XSLFSlide slide, List<String[]> segments,
+      Color ac, int startY, int totalH) {
+    List<String> descLines = new ArrayList<>();
+    List<String> bullets = new ArrayList<>();
+    for (String[] seg : segments) {
+      if ("bullet".equals(seg[0]))      bullets.add(seg[1]);
+      else if ("text".equals(seg[0]))   descLines.add(seg[1]);
+    }
+
+    int yOff = startY;
+    if (!descLines.isEmpty()) {
+      String desc = String.join("  ", descLines);
+      if (desc.length() > 180) desc = desc.substring(0, 177) + "···";
+      addText(slide, desc, 40, yOff, W - 80, 28, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      yOff += 34; totalH -= 34;
+    }
+
+    int cW = (W - 100) / 2;
+    int itemH = 28, gap = 4;
+    int half = (bullets.size() + 1) / 2;
+
+    for (int i = 0; i < Math.min(bullets.size(), 20); i++) {
+      int col = i >= half ? 1 : 0;
+      int row = col == 0 ? i : i - half;
+      int x = 40 + col * (cW + 20);
+      int y = yOff + row * (itemH + gap);
+      if (y + itemH > startY + totalH) break;
+
+      addRoundCard(slide, x, y, cW, itemH, BG_CARD);
+      addRect(slide, x, y, 3, itemH, ac);
+      addText(slide, bullets.get(i), x + 12, y + 5, cW - 22, itemH - 8, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+    }
+  }
+
+  // 기본: 단일 컬럼 + 계층별 색상 차등
+  private void renderSingleColumn(XSLFSlide slide, List<String[]> segments,
+      Color ac, int startY, int totalH) {
+    addRoundCard(slide, 40, startY, W - 80, totalH, BG_CARD);
+    addRect(slide, 40, startY, 4, totalH, ac);
+
+    int y = startY + 12, maxY = startY + totalH - 16;
+    for (String[] seg : segments) {
+      if (y >= maxY) {
+        addText(slide, "  ···", 56, y, W - 112, 14, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+        break;
+      }
+      switch (seg[0]) {
+        case "header" -> {
+          addText(slide, "▸  " + seg[1], 56, y, W - 112, 20, 10, true, ac, TextParagraph.TextAlign.LEFT);
+          y += 24;
+        }
+        case "bullet" -> {
+          addText(slide, "•  " + seg[1], 60, y, W - 116, 18, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+          y += 20;
+        }
+        default -> {
+          addText(slide, seg[1], 56, y, W - 112, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+          y += 20;
+        }
+      }
+    }
   }
 
   // ── 소스 직접 파싱: Java 파일을 계층별로 분류 ──────────────
