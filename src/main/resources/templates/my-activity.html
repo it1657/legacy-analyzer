@@ -200,7 +200,7 @@
 
 <script>
   const token = localStorage.getItem('token');
-  const username = localStorage.getItem('username');
+  const username = localStorage.getItem('userId');
 
   window.addEventListener('load', () => {
     if (!token) { window.location.href = '/auth/login'; return; }
