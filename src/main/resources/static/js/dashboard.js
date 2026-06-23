@@ -489,12 +489,15 @@ function downloadCompletionPpt() {
   fetch(url, { headers: { 'Authorization': 'Bearer ' + token } })
     .then(res => {
       if (!res.ok) throw new Error('PPT 다운로드 실패 (status: ' + res.status + ')');
-      return res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const fnMatch = cd.match(/filename="?([^";\s]+)"?/);
+      const filename = fnMatch ? fnMatch[1] : `analysis_${currentHistoryId}.pptx`;
+      return res.blob().then(blob => ({ blob, filename }));
     })
-    .then(blob => {
+    .then(({ blob, filename }) => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(a.href);
     })
