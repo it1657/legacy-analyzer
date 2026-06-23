@@ -4,6 +4,7 @@ import com.legacy.auth.JwtTokenProvider;
 import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
+import com.legacy.notification.NotificationService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,7 @@ public class MainApiController {
   private final RetryHandler retryHandler;
   private final AnalysisHistoryRepository analysisHistoryRepository;
   private final JwtTokenProvider jwtTokenProvider;
+  private final NotificationService notificationService;
 
   @Value("${app.analysis.max-file-size-bytes:524288}")
   private long maxFileSizeBytes;
@@ -65,7 +67,8 @@ public class MainApiController {
       FileIoErrorHandler fileIoErrorHandler,
       RetryHandler retryHandler,
       AnalysisHistoryRepository analysisHistoryRepository,
-      JwtTokenProvider jwtTokenProvider) {
+      JwtTokenProvider jwtTokenProvider,
+      NotificationService notificationService) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -74,6 +77,7 @@ public class MainApiController {
     this.retryHandler = retryHandler;
     this.analysisHistoryRepository = analysisHistoryRepository;
     this.jwtTokenProvider = jwtTokenProvider;
+    this.notificationService = notificationService;
   }
 
   @GetMapping("/")
@@ -645,6 +649,17 @@ public class MainApiController {
       session.setCurrentPhase("FAILED");
       session.addErrorLog("분석 중 오류: " + e.getMessage());
       sessionManager.failSession(sessionId, e.getMessage());
+    } finally {
+      // FAILED 상태가 된 경우 알림 발송 (history가 있을 때만)
+      if ("FAILED".equals(session.getCurrentPhase())) {
+        AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
+        if (failedHistory != null && userId != null) {
+          failedHistory.setStatus("FAILED");
+          failedHistory.setCompletedAt(LocalDateTime.now());
+          analysisHistoryRepository.save(failedHistory);
+          notificationService.notifyAnalysisFailure(failedHistory);
+        }
+      }
     }
   }
 
@@ -919,6 +934,7 @@ public class MainApiController {
           log.warn("[토큰 저장 실패] {}", e.getMessage());
         }
         analysisHistoryRepository.save(history);
+        notificationService.notifyAnalysisCompletion(history);
       }
 
       // historyId 세션 메타데이터에 저장 (PPT 다운로드 버튼에서 사용)

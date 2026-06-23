@@ -7,6 +7,7 @@ import com.legacy.auth.RoleRepository;
 import com.legacy.analysis.AnalysisHistory;
 import com.legacy.analysis.AnalysisHistoryRepository;
 import com.legacy.core.PresentationGeneratorService;
+import com.legacy.notification.NotificationService;
 import jakarta.servlet.http.HttpServletRequest;
 
 import org.slf4j.Logger;
@@ -37,6 +38,7 @@ public class AdminController {
   private final AnalysisHistoryRepository analysisHistoryRepository;
   private final PresentationGeneratorService presentationGeneratorService;
   private final AuditLogService auditLogService;
+  private final NotificationService notificationService;
 
   @Autowired
   public AdminController(
@@ -45,13 +47,15 @@ public class AdminController {
       PasswordEncoder passwordEncoder,
       AnalysisHistoryRepository analysisHistoryRepository,
       PresentationGeneratorService presentationGeneratorService,
-      AuditLogService auditLogService) {
+      AuditLogService auditLogService,
+      NotificationService notificationService) {
     this.userRepository = userRepository;
     this.roleRepository = roleRepository;
     this.passwordEncoder = passwordEncoder;
     this.analysisHistoryRepository = analysisHistoryRepository;
     this.presentationGeneratorService = presentationGeneratorService;
     this.auditLogService = auditLogService;
+    this.notificationService = notificationService;
   }
 
   // 사용자 등록 (관리자만)
@@ -102,6 +106,7 @@ public class AdminController {
       newUser.setUpdatedAt(LocalDateTime.now());
       userRepository.save(newUser);
       auditLogService.logUserCreation(newUser, httpRequest.getRemoteAddr());
+      notificationService.notifyUserCreation(newUser);
 
       log.info("[사용자 등록] userId={}, email={}, role={}", userId, email, roleStr);
 
