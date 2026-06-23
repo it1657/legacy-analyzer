@@ -1,6 +1,8 @@
 package com.legacy.auth;
 
+import com.legacy.api.usage.ApiUsageFilter;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -46,9 +48,21 @@ public class SecurityConfig {
     return config.getAuthenticationManager();
   }
 
+  // @Component 로 등록된 ApiUsageFilter가 서블릿 컨테이너에 중복 등록되는 것을 방지.
+  // Security 필터 체인 내에서 JWT 이후에 명시적으로 등록하므로 여기서는 비활성화.
+  @Bean
+  public FilterRegistrationBean<ApiUsageFilter> disableApiUsageAutoRegistration(
+      ApiUsageFilter filter) {
+    FilterRegistrationBean<ApiUsageFilter> reg = new FilterRegistrationBean<>(filter);
+    reg.setEnabled(false);
+    return reg;
+  }
+
   // SecurityFilterChain 설정
   @Bean
-  public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthenticationFilter jwtAuthenticationFilter) throws Exception {
+  public SecurityFilterChain filterChain(HttpSecurity http,
+      JwtAuthenticationFilter jwtAuthenticationFilter,
+      ApiUsageFilter apiUsageFilter) throws Exception {
     http
         .csrf(csrf -> csrf
             .ignoringRequestMatchers("/h2-console/**")
@@ -74,7 +88,9 @@ public class SecurityConfig {
         .exceptionHandling(exception -> exception
             .authenticationEntryPoint(new LoginUrlAuthenticationEntryPoint("/auth/login"))
         )
-        .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+        // JWT 처리 후 API 사용량 기록 순서 보장
+        .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
+        .addFilterAfter(apiUsageFilter, JwtAuthenticationFilter.class);
 
     // H2 콘솔을 위한 헤더 설정
     http.headers(headers -> headers.frameOptions(frameOptions -> frameOptions.disable()));
