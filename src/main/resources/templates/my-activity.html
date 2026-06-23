@@ -311,7 +311,7 @@
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href = url;
-      a.download = `report_${historyId}.pptx`;
+      // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
       document.body.appendChild(a);
       a.click();
       URL.revokeObjectURL(url);

@@ -494,7 +494,7 @@ function downloadCompletionPpt() {
     .then(blob => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `analysis_result_${currentHistoryId}.pptx`;
+      // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
       a.click();
       URL.revokeObjectURL(a.href);
     })

@@ -1242,7 +1242,7 @@
                 const blob = await res.blob();
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
-                a.download = `analysis_result_${historyId}.pptx`;
+                // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
                 document.body.appendChild(a); a.click();
                 URL.revokeObjectURL(a.href); document.body.removeChild(a);
             } catch (e) { alert('PPT 다운로드 중 오류가 발생했습니다.'); }
@@ -1406,7 +1406,7 @@
                 const url = window.URL.createObjectURL(blob);
                 const link = document.createElement('a');
                 link.href = url;
-                link.download = `analysis_result_${historyId}_${new Date().toISOString().split('T')[0]}.pptx`;
+                // 파일명은 서버 Content-Disposition 헤더 사용 (년월일시분초 형식)
                 document.body.appendChild(link);
                 link.click();
                 window.URL.revokeObjectURL(url);
