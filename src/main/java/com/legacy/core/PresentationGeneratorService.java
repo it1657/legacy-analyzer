@@ -1090,7 +1090,8 @@ public class PresentationGeneratorService {
       int y = yOff + row * (itemH + gap);
       if (y + itemH > startY + totalH) break;
 
-      String txt = bullets.get(i);
+      // AI 생성 텍스트에 포함된 [ ] 체크박스 접두어 제거 (시각적 아이콘으로 대체)
+      String txt = bullets.get(i).replaceAll("^\\[\\s*[xX ]?\\s*\\]\\s*", "");
 
       addRoundCard(slide, x, y, cW, itemH, BG_CARD);
       // 체크박스 아이콘: 외곽선만 있는 흰색 사각형
@@ -1115,10 +1116,10 @@ public class PresentationGeneratorService {
 
     int yOff = startY;
 
-    // 설명 텍스트 강조 카드 — 줄바꿈을 고려해 행당 44px 할당
+    // 설명 텍스트 강조 카드 — 항목이 없으면 전체 높이, 있으면 최대 2/5
     if (!descs.isEmpty()) {
       int lineH = 44;  // 13pt 한글 2줄 가능한 높이
-      int descH = Math.min(descs.size() * lineH + 20, items.isEmpty() ? totalH : totalH * 2 / 5);
+      int descH = items.isEmpty() ? totalH : Math.min(descs.size() * lineH + 20, totalH * 2 / 5);
       Color descBg = new Color(
           Math.min(BG_CARD.getRed()   + 18, 255),
           Math.min(BG_CARD.getGreen() + 18, 255),
