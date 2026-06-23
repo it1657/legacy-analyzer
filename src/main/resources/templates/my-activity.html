@@ -83,6 +83,23 @@
     .section-title { font-size: 16px; font-weight: 700; color: #444; margin-bottom: 1rem; }
 
     .loading { text-align: center; color: #667eea; padding: 2rem; }
+
+    /* 프로필 모달 */
+    .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center; }
+    .modal-overlay.active { display:flex; }
+    .modal-box { background:white; border-radius:12px; padding:2rem; width:420px; max-width:95vw; box-shadow:0 10px 40px rgba(0,0,0,0.2); }
+    .modal-title { font-size:18px; font-weight:700; margin-bottom:1.5rem; color:#333; }
+    .modal-field { margin-bottom:1rem; }
+    .modal-field label { display:block; font-size:13px; color:#666; margin-bottom:0.35rem; font-weight:600; }
+    .modal-field input { width:100%; padding:0.6rem 0.8rem; border:1px solid #ddd; border-radius:6px; font-size:14px; }
+    .modal-field input:focus { outline:none; border-color:#667eea; }
+    .modal-actions { display:flex; gap:0.75rem; justify-content:flex-end; margin-top:1.5rem; }
+    .btn-save { background:#667eea; color:white; border:none; padding:0.6rem 1.4rem; border-radius:6px; cursor:pointer; font-size:14px; font-weight:600; }
+    .btn-save:hover { background:#5a67d8; }
+    .btn-cancel { background:#f0f0f0; color:#555; border:none; padding:0.6rem 1.2rem; border-radius:6px; cursor:pointer; font-size:14px; }
+    .modal-msg { font-size:13px; margin-top:0.75rem; padding:0.5rem 0.75rem; border-radius:6px; display:none; }
+    .modal-msg.ok  { background:#e8f5e9; color:#27ae60; display:block; }
+    .modal-msg.err { background:#ffebee; color:#e74c3c; display:block; }
   </style>
 </head>
 <body>
@@ -91,6 +108,7 @@
   <div class="navbar-title">📂 내 활동</div>
   <div class="navbar-user">
     <span id="currentUser"></span>
+    <button class="nav-btn" onclick="openProfileModal()">⚙️ 내 프로필</button>
     <button class="nav-btn" onclick="window.location.href='/'">📊 분석 화면</button>
     <button class="nav-btn" onclick="logout()">로그아웃</button>
   </div>
@@ -196,6 +214,39 @@
     </div>
   </div>
 
+</div>
+
+<!-- 프로필 수정 모달 -->
+<div id="profileModal" class="modal-overlay">
+  <div class="modal-box">
+    <div class="modal-title">⚙️ 내 프로필 수정</div>
+    <div class="modal-field">
+      <label>로그인 ID (변경 불가)</label>
+      <input type="text" id="profileUserId" disabled style="background:#f5f5f5; color:#999;">
+    </div>
+    <div class="modal-field">
+      <label>표시 이름</label>
+      <input type="text" id="profileDisplayName" placeholder="표시 이름">
+    </div>
+    <div class="modal-field">
+      <label>이메일</label>
+      <input type="email" id="profileEmail" placeholder="이메일">
+    </div>
+    <hr style="margin:1.2rem 0; border-color:#f0f0f0;">
+    <div class="modal-field">
+      <label>현재 비밀번호 <span style="color:#999;font-size:11px;">(비밀번호 변경 시에만 입력)</span></label>
+      <input type="password" id="profileCurrentPw" placeholder="현재 비밀번호">
+    </div>
+    <div class="modal-field">
+      <label>새 비밀번호</label>
+      <input type="password" id="profileNewPw" placeholder="새 비밀번호 (변경하지 않으면 비워두세요)">
+    </div>
+    <div id="profileMsg" class="modal-msg"></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeProfileModal()">취소</button>
+      <button class="btn-save" onclick="saveProfile()">저장</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -384,6 +435,75 @@
     if (name.includes('haiku'))  return 'Haiku';
     return name;
   }
+
+  // ── 프로필 수정 ─────────────────────────────────
+  async function openProfileModal() {
+    try {
+      const res = await fetch('/api/users/me', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('조회 실패');
+      const data = await res.json();
+      document.getElementById('profileUserId').value      = data.userId || '';
+      document.getElementById('profileDisplayName').value = data.displayName || '';
+      document.getElementById('profileEmail').value       = data.email || '';
+      document.getElementById('profileCurrentPw').value   = '';
+      document.getElementById('profileNewPw').value       = '';
+      const msg = document.getElementById('profileMsg');
+      msg.className = 'modal-msg'; msg.textContent = '';
+    } catch (e) {
+      console.error('[프로필 조회 오류]', e);
+    }
+    document.getElementById('profileModal').classList.add('active');
+  }
+
+  function closeProfileModal() {
+    document.getElementById('profileModal').classList.remove('active');
+  }
+
+  async function saveProfile() {
+    const displayName   = document.getElementById('profileDisplayName').value.trim();
+    const email         = document.getElementById('profileEmail').value.trim();
+    const currentPw     = document.getElementById('profileCurrentPw').value;
+    const newPw         = document.getElementById('profileNewPw').value;
+    const msg           = document.getElementById('profileMsg');
+
+    if (newPw && !currentPw) {
+      msg.className = 'modal-msg err';
+      msg.textContent = '비밀번호를 변경하려면 현재 비밀번호를 입력해주세요.';
+      return;
+    }
+
+    try {
+      const body = {};
+      if (displayName) body.displayName = displayName;
+      if (email)       body.email       = email;
+      if (newPw)       { body.newPassword = newPw; body.currentPassword = currentPw; }
+
+      const res = await fetch('/api/users/me', {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        msg.className = 'modal-msg ok';
+        msg.textContent = data.message || '저장되었습니다.';
+        document.getElementById('currentUser').textContent = data.displayName || username;
+      } else {
+        msg.className = 'modal-msg err';
+        msg.textContent = data.message || '저장에 실패했습니다.';
+      }
+    } catch (e) {
+      msg.className = 'modal-msg err';
+      msg.textContent = '오류가 발생했습니다.';
+    }
+  }
+
+  // 모달 외부 클릭 시 닫기
+  document.getElementById('profileModal').addEventListener('click', function(e) {
+    if (e.target === this) closeProfileModal();
+  });
 
   function logout() {
     localStorage.removeItem('token');

@@ -62,6 +62,58 @@ public class UserController {
     }
   }
 
+  // 본인 프로필 수정 (표시명, 이메일, 비밀번호)
+  @PutMapping("/me")
+  @ResponseBody
+  public ResponseEntity<?> updateMyProfile(
+      @RequestBody Map<String, String> request,
+      Authentication authentication) {
+    try {
+      User principal = (User) authentication.getPrincipal();
+      User user = userRepository.findById(principal.getSeq())
+          .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+
+      String displayName  = request.get("displayName");
+      String email        = request.get("email");
+      String newPassword  = request.get("newPassword");
+      String currentPassword = request.get("currentPassword");
+
+      if (displayName != null && !displayName.trim().isEmpty()) {
+        user.setDisplayName(displayName.trim());
+      }
+      if (email != null && !email.trim().isEmpty()) {
+        String trimmed = email.trim();
+        if (!user.getEmail().equals(trimmed) && userRepository.existsByEmail(trimmed)) {
+          return ResponseEntity.badRequest()
+              .body(Collections.singletonMap("message", "이미 사용 중인 이메일입니다."));
+        }
+        user.setEmail(trimmed);
+      }
+      if (newPassword != null && !newPassword.trim().isEmpty()) {
+        if (currentPassword == null || !passwordEncoder.matches(currentPassword, user.getPasswordHash())) {
+          return ResponseEntity.badRequest()
+              .body(Collections.singletonMap("message", "현재 비밀번호가 올바르지 않습니다."));
+        }
+        user.setPasswordHash(passwordEncoder.encode(newPassword));
+      }
+
+      user.setUpdatedAt(LocalDateTime.now());
+      userRepository.save(user);
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("message", "프로필이 수정되었습니다.");
+      response.put("displayName", user.getDisplayName());
+      response.put("email", user.getEmail());
+
+      log.info("[프로필 수정] userId={}", user.getUserId());
+      return ResponseEntity.ok(response);
+    } catch (Exception e) {
+      log.error("[프로필 수정 실패]", e);
+      return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+          .body(Collections.singletonMap("message", "프로필 수정 실패: " + e.getMessage()));
+    }
+  }
+
   // 모든 사용자 조회 (관리자만)
   @GetMapping
   @PreAuthorize("hasRole('ADMIN')")
