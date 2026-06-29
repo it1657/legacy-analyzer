@@ -130,7 +130,16 @@ public class ClaudeServiceImpl implements ClaudeService {
                 4. 예외 처리 (대응 방법)
 
                 규칙: 기존 주석 100% 보존, 새 주석은 하단/옆에 추가
-                언어별: Java(/,/**), JS(//), JSX({/**/}), XML(<!---->)
+
+                ⚠️ 파일별 주석 형식 (매우 중요):
+                - Java: // 또는 /** */
+                - JavaScript: // 또는 /* */
+                - Python: #
+                - HTML:
+                  * <script>...</script> 내부: // 또는 /* */
+                  * <style>...</style> 내부: /* */
+                  * HTML 본문(태그 사이): <!-- --> (절대 // 금지)
+                - XML/JSX: <!-- -->
 
                 응답: 반드시 JSON 배열 형식으로만 응답. 각 객체는 반드시 lineNumber와 comment를 포함:
                 [
@@ -619,6 +628,53 @@ public class ClaudeServiceImpl implements ClaudeService {
         if (comment == null || comment.isBlank()) return comment;
         String trimmed = comment.trim();
 
+        // HTML/XML 블록 주석 처리: // <!--로 시작하는 경우 올바른 HTML 형식으로 변환
+        if (trimmed.startsWith("// <!--")) {
+            // "// <!--" 또는 "// -->" 같은 잘못된 형식을 "<!--" 또는 "-->"로 정정
+            String fixed = trimmed.replaceAll("^// <!--", "<!--")
+                                    .replaceAll("\n// <!--", "\n<!--")
+                                    .replaceAll("// -->$", "-->");
+            return fixed;
+        }
+
+        // <!-- --> 블록은 그대로 통과
+        if (trimmed.startsWith("<!--")) {
+            return comment;
+        }
+
+        // JavaScript/CSS 블록 내 // 주석으로 시작하는 HTML 블록 처리
+        if (trimmed.startsWith("//") && trimmed.contains("<!--")) {
+            // <style>, <script> 블록 내 실수로 작성된 // <!-- 형식 정정
+            String fixed = trimmed.replaceAll("^// <!--", "<!--")
+                                    .replaceAll("\n// <!--", "\n<!--");
+            return fixed;
+        }
+
+        // HTML/XML 본문에서 발견된 // 주석 → HTML 주석으로 변환
+        // (HTML 파일의 경우 <script>, <style> 태그 외부에서는 // 주석이 유효하지 않음)
+        if (trimmed.startsWith("//") && !trimmed.startsWith("// <!--")) {
+            // 여러 줄의 // 주석을 <!-- --> 형식으로 변환
+            String[] lines = trimmed.split("\n");
+            if (lines.length == 1) {
+                // 한 줄: // 주석 → <!-- 주석 -->
+                return "<!-- " + trimmed.substring(2).trim() + " -->";
+            } else {
+                // 여러 줄: <!-- 형식으로 변환
+                StringBuilder fixed = new StringBuilder();
+                fixed.append("<!--\n");
+                for (String line : lines) {
+                    String l = line.trim();
+                    if (l.startsWith("//")) {
+                        fixed.append(l.substring(2).trim()).append("\n");
+                    } else {
+                        fixed.append(l).append("\n");
+                    }
+                }
+                fixed.append("-->");
+                return fixed.toString();
+            }
+        }
+
         // /** */ 블록 안에 // 스타일이 섞인 경우: // 줄을 * 줄로 변환
         if (trimmed.startsWith("/**")) {
             String[] parts = trimmed.split("\n");
@@ -674,6 +730,37 @@ public class ClaudeServiceImpl implements ClaudeService {
             }
         }
         return fixed.toString().stripTrailing();
+    }
+
+    /**
+     * HTML/XML 파일에서 각 라인이 <script>, <style> 태그 내부인지 확인
+     */
+    private boolean isLineInsideScriptTag(String[] lines, int lineIndex) {
+        boolean insideScript = false;
+        for (int i = 0; i <= lineIndex && i < lines.length; i++) {
+            String trimmed = lines[i].trim().toLowerCase();
+            if (trimmed.contains("<script")) {
+                insideScript = true;
+            }
+            if (trimmed.contains("</script>")) {
+                insideScript = false;
+            }
+        }
+        return insideScript && !lines[lineIndex].trim().toLowerCase().contains("</script>");
+    }
+
+    private boolean isLineInsideStyleTag(String[] lines, int lineIndex) {
+        boolean insideStyle = false;
+        for (int i = 0; i <= lineIndex && i < lines.length; i++) {
+            String trimmed = lines[i].trim().toLowerCase();
+            if (trimmed.contains("<style")) {
+                insideStyle = true;
+            }
+            if (trimmed.contains("</style>")) {
+                insideStyle = false;
+            }
+        }
+        return insideStyle && !lines[lineIndex].trim().toLowerCase().contains("</style>");
     }
 
     /**
@@ -770,10 +857,56 @@ public class ClaudeServiceImpl implements ClaudeService {
             }
 
             // Java 외 파일: 주석만 삽입 (마커 없음)
+            // HTML/XML 파일은 특별히 처리: 위치에 따라 올바른 주석 형식 적용
             for (int i = 0; i < lines.length; i++) {
                 int currentLineIdx = i + 1;
                 if (commentMap.containsKey(currentLineIdx)) {
                     for (String cmt : commentMap.get(currentLineIdx)) {
+                        // HTML/XML 파일의 경우: 위치에 따라 주석 형식 결정
+                        if (isXmlFamily(extension)) {
+                            // <script> 또는 <style> 태그 내부인지 확인
+                            boolean inScript = isLineInsideScriptTag(lines, i);
+                            boolean inStyle = isLineInsideStyleTag(lines, i);
+
+                            if (inScript) {
+                                // <script> 내부: // 또는 /* */ 주석 유지 (변환 불필요)
+                                // 그대로 통과
+                            } else if (inStyle) {
+                                // <style> 내부: /* */ 주석 사용
+                                // // 주석이 있으면 /* */로 변환
+                                if (cmt.startsWith("//")) {
+                                    cmt = "/* " + cmt.substring(2).trim() + " */";
+                                }
+                            } else {
+                                // HTML 본문: <!-- --> 형식만 사용
+                                // 1. // <!--로 시작하는 경우
+                                cmt = cmt.replaceAll("^// <!--", "<!--")
+                                        .replaceAll("\n// <!--", "\n<!--");
+
+                                // 2. 단순 //로 시작하는 경우 (<!-- -->로 변환)
+                                if (cmt.startsWith("//") && !cmt.startsWith("<!--")) {
+                                    String[] cmtLines = cmt.split("\n");
+                                    if (cmtLines.length == 1) {
+                                        // 한 줄: // 내용 → <!-- 내용 -->
+                                        cmt = "<!-- " + cmt.substring(2).trim() + " -->";
+                                    } else {
+                                        // 여러 줄
+                                        StringBuilder cmtFixed = new StringBuilder();
+                                        cmtFixed.append("<!--\n");
+                                        for (String line : cmtLines) {
+                                            String l = line.trim();
+                                            if (l.startsWith("//")) {
+                                                cmtFixed.append(l.substring(2).trim()).append("\n");
+                                            } else {
+                                                cmtFixed.append(l).append("\n");
+                                            }
+                                        }
+                                        cmtFixed.append("-->");
+                                        cmt = cmtFixed.toString();
+                                    }
+                                }
+                            }
+                        }
                         finalCode.append(cmt).append("\n");
                     }
                 }
