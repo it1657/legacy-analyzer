@@ -624,9 +624,36 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     // 주석 문자열을 정규화한다: 마커 누락 보완 + 혼합 스타일 통일
-    private String normalizeComment(String comment) {
+    private String normalizeComment(String comment, String extension) {
         if (comment == null || comment.isBlank()) return comment;
         String trimmed = comment.trim();
+
+        // Python 파일: # 주석 형식만 사용
+        if (".py".equals(extension)) {
+            if (trimmed.startsWith("#")) return comment;
+            // //, /*, /** 등 다른 언어 스타일은 # 스타일로 변환
+            String[] pyLines = trimmed.split("\n");
+            StringBuilder fixed = new StringBuilder();
+            for (String line : pyLines) {
+                String l = line.trim();
+                if (l.startsWith("//")) {
+                    fixed.append("# ").append(l.substring(2).trim()).append("\n");
+                } else if (l.startsWith("/**") || l.startsWith("/*")) {
+                    String content = l.replaceFirst("^/\\*+\\s*", "").replaceFirst("\\s*\\*/$", "").trim();
+                    if (!content.isEmpty()) fixed.append("# ").append(content).append("\n");
+                } else if (l.startsWith("*")) {
+                    String content = l.replaceFirst("^\\*+/?\\s*", "").trim();
+                    if (!content.isEmpty()) fixed.append("# ").append(content).append("\n");
+                } else if (l.startsWith("#")) {
+                    fixed.append(l).append("\n");
+                } else if (!l.isEmpty()) {
+                    fixed.append("# ").append(l).append("\n");
+                } else {
+                    fixed.append("#\n");
+                }
+            }
+            return fixed.toString().stripTrailing();
+        }
 
         // HTML/XML 블록 주석 처리: // <!--로 시작하는 경우 올바른 HTML 형식으로 변환
         if (trimmed.startsWith("// <!--")) {
@@ -802,7 +829,7 @@ public class ClaudeServiceImpl implements ClaudeService {
             for (Object obj : commentList) {
                 if (obj instanceof Map<?, ?> item) {
                     int lineNum = Integer.parseInt(String.valueOf(item.get("lineNumber")));
-                    String commentStr = normalizeComment(String.valueOf(item.get("comment")));
+                    String commentStr = normalizeComment(String.valueOf(item.get("comment")), extension);
                     commentMap.computeIfAbsent(lineNum, k -> new ArrayList<>()).add(commentStr);
                 }
             }
