@@ -664,9 +664,20 @@ public class ClaudeServiceImpl implements ClaudeService {
             return fixed;
         }
 
-        // <!-- --> 블록은 그대로 통과
+        // <!-- --> 블록: HTML/XML 파일에서만 허용, 그 외(Java 등)는 // 스타일로 변환
         if (trimmed.startsWith("<!--")) {
-            return comment;
+            if (isXmlFamily(extension)) {
+                return comment;
+            }
+            // Java 등 비-XML 파일에서 잘못된 <!-- --> 형식 → // 로 변환
+            String innerContent = trimmed.replaceFirst("^<!--\\s*", "").replaceFirst("\\s*-->$", "").trim();
+            String[] innerLines = innerContent.split("\n");
+            StringBuilder fixed = new StringBuilder();
+            for (String line : innerLines) {
+                String l = line.trim();
+                fixed.append(l.isEmpty() ? "//\n" : "// " + l + "\n");
+            }
+            return fixed.toString().stripTrailing();
         }
 
         // JavaScript/CSS 블록 내 // 주석으로 시작하는 HTML 블록 처리
