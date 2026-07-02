@@ -1089,7 +1089,7 @@ public class MainApiController {
         name.endsWith(".xml") || name.endsWith(".json") ||
         name.endsWith(".properties") || name.endsWith(".yml") || name.endsWith(".yaml") ||
         name.endsWith(".gradle") || name.endsWith(".maven") ||
-        name.endsWith(".md") || name.endsWith(".txt") ||
+        name.endsWith(".txt") ||
         name.endsWith(".sql") || name.endsWith(".sh") || name.endsWith(".bat") ||
         name.equals("dockerfile") || name.equals("dockerfile.prod") ||
         name.endsWith(".dockerfile");
