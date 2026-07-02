@@ -83,7 +83,7 @@ C:\project\legacy-analyzer\FINAL_PROJECT_REPORT_Presentation.pptx
 
 2. 관리자 대시보드 접속
    ```
-   http://localhost:8080/admin/dashboard
+   http://localhost:8082/admin/dashboard
    ```
 
 3. 로그인
@@ -156,7 +156,7 @@ PowerPoint가 설치되어 있지 않습니다.
 
 - `docs/presentations/FINAL_PROJECT_REPORT_Presentation.html` - HTML 프레젠테이션
 - `docs/guides/PowerPoint_변환가이드.md` - 변환 방법 상세 가이드
-- `FINAL_PROJECT_REPORT.md` - 프로젝트 최종 보고서
+- `docs/README.md` - 문서 디렉터리 안내
 
 ---
 

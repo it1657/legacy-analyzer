@@ -85,9 +85,8 @@ docs/
 ## 📌 문서 사용 가이드
 
 ### 프로젝트 이해
-1. **루트 README.md** 읽기 → 프로젝트 전체 개요
-2. **FINAL_PROJECT_REPORT.md** 읽기 → 상세 보고서
-3. **HTML 프레젠테이션** 보기 → 시각적 이해
+1. **docs/README.md** 읽기 → 문서 디렉터리 전체 개요
+2. **HTML 프레젠테이션** 보기 → 시각적 이해
 
 ### 기술 심화
 1. **technical/** 문서 읽기 → 시스템 설계
@@ -104,10 +103,8 @@ docs/
 ## 🔗 문서 간 연관성
 
 ```
-README.md (메인)
-    ↓
-FINAL_PROJECT_REPORT.md (상세 보고서)
-    ↓
+docs/README.md (문서 인덱스)
+    │
     ├─→ presentations/ (시각화)
     │   └─→ FINAL_PROJECT_REPORT_Presentation.html
     │
@@ -125,8 +122,7 @@ FINAL_PROJECT_REPORT.md (상세 보고서)
 
 | 문서 | 위치 | 설명 |
 |------|------|------|
-| 프로젝트 README | 루트 | 프로젝트 전체 소개 |
-| 최종 보고서 | 루트 | 프로젝트 완료 보고서 |
+| 문서 인덱스 | docs/ | 문서 디렉터리 전체 안내 |
 | 스크립트 가이드 | scripts/ | 자동화 스크립트 사용법 |
 | HTML 프레젠테이션 | docs/presentations/ | 웹 기반 슬라이드 |
 | 변환 가이드 | docs/guides/ | 포맷 변환 방법 |
@@ -165,9 +161,9 @@ FINAL_PROJECT_REPORT.md (상세 보고서)
 **Q: 어느 문서부터 읽어야 하나?**
 ```
 A: 프로젝트에 처음 온 경우
-1. 루트 README.md
-2. FINAL_PROJECT_REPORT.md
-3. HTML 프레젠테이션 보기
+1. docs/README.md (이 파일)
+2. HTML 프레젠테이션 보기
+3. docs/technical/ 기술 문서 확인
 ```
 
 **Q: PPT는 어떻게 얻나?**
