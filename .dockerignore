@@ -1,0 +1,11 @@
+.git
+.gradle
+.idea
+build
+out
+data
+logs
+*.log
+.analysis-sessions
+docs
+.claude

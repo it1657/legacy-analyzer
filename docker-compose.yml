@@ -12,6 +12,47 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analyzer -d analyzer_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: legacy-analyzer-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      # postgres 컨테이너는 같은 compose 네트워크 안에서 서비스명(postgres)으로 접근 가능
+      # (localhost로 접근 시 앱 자신을 가리키게 되어 접속 실패)
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/analyzer_db
+      SPRING_DATASOURCE_USERNAME: analyzer
+      SPRING_DATASOURCE_PASSWORD: analyzer123
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      TZ: Asia/Seoul
+    ports:
+      - "8082:8082"
+    volumes:
+      - session_data:/app/.analysis-sessions
+
+  nginx:
+    image: nginx:alpine
+    container_name: legacy-analyzer-nginx
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
 
 volumes:
   postgres_data:
+  session_data:

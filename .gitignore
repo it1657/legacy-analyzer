@@ -55,3 +55,13 @@ data/*.trace.db
 ### IDE ###
 .idea/
 *.xml
+
+### 환경변수 (Docker Compose용 비밀키 등) ###
+.env
+
+### 브라우저 폴더 업로드 분석 임시 저장소 ###
+.uploads/
+
+### HTTPS 자체 서명 인증서 (머신별로 재생성 필요, 개인키 포함) ###
+nginx/certs/*.crt
+nginx/certs/*.key
