@@ -389,7 +389,11 @@ function startPolling() {
         isAnalysisComplete = true;
         clearInterval(pollingIntervalId);
         pollingIntervalId = null;
-        handleAnalysisCompletion(status);
+        if (status.phase === 'PAUSED') {
+          handleAnalysisPaused(status);
+        } else {
+          handleAnalysisCompletion(status);
+        }
       }
     } catch (err) {
       console.warn("[폴링 오류]", err.message);
@@ -417,7 +421,8 @@ function updateUiFromStatus(status, logConsole, progressPanel) {
         'FINALIZING': '📄 보고서 생성 중...',
         'COMPLETED': '✅ 분석 완료!',
         'FAILED': '❌ 분석 실패',
-        'CANCELLED': '⚠️ 분석 취소됨'
+        'CANCELLED': '⚠️ 분석 취소됨',
+        'PAUSED': '⏸️ 일시정지됨'
       };
       statusDiv.textContent = phaseText[status.phase] || '처리 중...';
     }
@@ -461,6 +466,41 @@ function updateUiFromStatus(status, logConsole, progressPanel) {
       logConsole.scrollTop = logConsole.scrollHeight;
     }
   }
+}
+
+// ===================================================================
+// 분석 일시정지 처리 (크레딧 소진, 사용자 일시정지 등)
+// COMPLETED와 달리 성공 결과가 없을 수 있으므로 완료 패널을 띄우지 않고,
+// 스피너/진행바만 끄고 왜 멈췄는지 안내한 뒤 '이어서 분석'을 기다린다.
+// ===================================================================
+function handleAnalysisPaused(status) {
+  isAnalysisComplete = true;
+  if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+
+  const progressPanel = document.getElementById('progressPanel');
+  const overlay = document.getElementById('analysisOverlay');
+  const sessionControlPanel = document.getElementById('sessionControlPanel');
+  const logConsole = document.getElementById('terminalLog');
+
+  if (progressPanel) progressPanel.style.display = "none";
+  if (overlay) overlay.style.display = "none";
+  if (sessionControlPanel) sessionControlPanel.style.display = "none";
+
+  if (logConsole) {
+    appendTerminalLine(logConsole,
+        `⏸️ [일시정지] 분석이 중단됐습니다.${status.errorMessage ? ' 사유: ' + status.errorMessage : ''} 분석 이력 화면에서 '이어서 분석' 버튼으로 재개하세요.`);
+  }
+
+  setLocalPathControlsDisabled(false);
+  setUploadControlsDisabled(false);
+
+  // 업로드 분석 중 일시정지된 경우: 아직 분석이 끝난 게 아니므로 write-back/서버 정리는 하지 않는다.
+  // (재개 시 서버가 같은 업로드 폴더를 계속 써야 함)
+  isUploadModeSession = false;
+
+  clearSessionFromStorage();
+  currentSessionId = null;
+  updateSessionControlPanel();
 }
 
 // ===================================================================
@@ -638,6 +678,20 @@ function resetDashboard() {
   if (step2Btn) { step2Btn.disabled = true; step2Btn.style.opacity = "0.5"; step2Btn.style.cursor = "not-allowed"; }
   const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
   if (step1Btn) { step1Btn.disabled = false; step1Btn.style.opacity = "1"; step1Btn.style.cursor = "pointer"; }
+
+  // 원격 업로드 쪽에서 선택해둔 폴더도 같이 초기화 (안 그러면 화면은 비었는데
+  // uploadSourceHandle은 그대로 남아 있어 다음 분석 시작 시 예전 폴더가 그대로 쓰임)
+  isUploadPreviewMode = false;
+  uploadSourceHandle = null;
+  uploadOutputHandle = null;
+  const uploadSourceFolderName = document.getElementById('uploadSourceFolderName');
+  const uploadOutputFolderName = document.getElementById('uploadOutputFolderName');
+  if (uploadSourceFolderName) uploadSourceFolderName.textContent = '선택된 폴더 없음 (다른 PC/서버의 폴더를 직접 선택)';
+  if (uploadOutputFolderName) uploadOutputFolderName.textContent = '미선택 시 원본 폴더에 결과를 덮어씀';
+  const runUploadBtn = document.getElementById('runUploadBtn');
+  if (runUploadBtn) runUploadBtn.disabled = true;
+  const writeBackFailuresPanel = document.getElementById('writeBackFailuresPanel');
+  if (writeBackFailuresPanel) writeBackFailuresPanel.style.display = 'none';
 }
 
 function getEmptyMessageHtml(paddingTop, text) {

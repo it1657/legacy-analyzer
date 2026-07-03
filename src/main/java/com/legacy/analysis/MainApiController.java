@@ -411,10 +411,13 @@ public class MainApiController {
     dto.setRecentLogs(session.getRecentLogLines(logLines));
     dto.setLoginId(loginId);
 
-    boolean isDone = "COMPLETED".equals(phase) || "FAILED".equals(phase) || "CANCELLED".equals(phase);
+    // PAUSED(사용자 일시정지 또는 크레딧 소진 등)도 폴링을 멈춰야 하는 종료 상태다.
+    // 여기 빠져있으면 서버는 이미 멈췄는데 화면은 계속 "처리 중" 스피너를 돌리게 된다.
+    boolean isDone = "COMPLETED".equals(phase) || "FAILED".equals(phase)
+        || "CANCELLED".equals(phase) || "PAUSED".equals(phase);
     dto.setCompleted(isDone);
 
-    if ("FAILED".equals(phase) || "CANCELLED".equals(phase)) {
+    if ("FAILED".equals(phase) || "CANCELLED".equals(phase) || "PAUSED".equals(phase)) {
       List<String> errors = session.getErrorLog();
       if (!errors.isEmpty()) {
         dto.setErrorMessage(errors.get(errors.size() - 1));
@@ -806,11 +809,15 @@ public class MainApiController {
               int fc = session.getStatistics().getFailureCount() + 1;
               session.getStatistics().setFailureCount(fc);
               // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
+              // 병렬 처리 중이라 여러 스레드가 동시에 크레딧 소진을 만날 수 있으므로,
+              // 로그/에러기록은 가장 먼저 발견한 스레드 1회만 남긴다.
               if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
-                creditExhausted.set(true);
+                boolean firstDetection = creditExhausted.compareAndSet(false, true);
                 session.cancel();
-                session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다. 크레딧 충전 후 '이어서 분석'으로 재개하세요.");
-                session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
+                if (firstDetection) {
+                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다. 크레딧 충전 후 '이어서 분석'으로 재개하세요.");
+                  session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
+                }
               }
             }
 
@@ -980,6 +987,7 @@ public class MainApiController {
       AtomicInteger processedTotal = new AtomicInteger(session.getProcessedFiles());
 
       java.util.concurrent.atomic.AtomicBoolean pauseDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+      java.util.concurrent.atomic.AtomicBoolean creditExhausted = new java.util.concurrent.atomic.AtomicBoolean(false);
       java.util.Set<String> completedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
       int actualThreadPoolSize = threadPoolSize <= 0
@@ -1016,6 +1024,14 @@ public class MainApiController {
               } else { skipCount.incrementAndGet(); }
             } else if ("FAILED".equals(fileState.getStatus())) {
               session.getStatistics().setFailureCount(session.getStatistics().getFailureCount() + 1);
+              if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
+                boolean firstDetection = creditExhausted.compareAndSet(false, true);
+                session.cancel();
+                if (firstDetection) {
+                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다. 크레딧 충전 후 '이어서 분석'으로 재개하세요.");
+                  session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
+                }
+              }
             }
 
             int processed = processedTotal.incrementAndGet();
