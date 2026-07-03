@@ -1040,6 +1040,16 @@
             }
         }
 
+        // 원격 업로드 분석(sourcePath가 서버 내부 임시 저장소 .uploads/ 하위)인 경우,
+        // 세션ID가 섞인 컨테이너 내부 경로를 그대로 노출하지 않고 안내 문구로 대체한다.
+        function sourcePathTooltip(sourcePath) {
+            if (!sourcePath) return '';
+            if (sourcePath.includes('/.uploads/') || sourcePath.includes('\\.uploads\\')) {
+                return '원격 업로드 분석 (브라우저에서 직접 업로드된 소스)';
+            }
+            return sourcePath;
+        }
+
         // 분석 이력 렌더링
         function renderAnalysisHistory(histories) {
             const tbody = document.getElementById('historyList');
@@ -1058,17 +1068,21 @@
                 const userLabel = h.displayName
                     ? `${h.displayName} <span style="color:#aaa;font-size:11px;">(${h.userId})</span>`
                     : (h.userId || '-');
+                const pptBtn = h.status === 'COMPLETED'
+                    ? `<button class="btn-sm btn-ppt" onclick="downloadPresentation(${h.id})"
+                            title="이 분석 결과를 PPT로 다운로드">📊 PPT</button>`
+                    : `<button class="btn-sm btn-ppt" disabled style="opacity:0.4; cursor:not-allowed;"
+                            title="분석이 완료되지 않아 다운로드할 수 없습니다 (상태: ${h.status})">📊 PPT</button>`;
                 return `
                 <tr>
                     <td>${userLabel}</td>
-                    <td title="${h.sourcePath}">${projectName}</td>
+                    <td title="${sourcePathTooltip(h.sourcePath)}">${projectName}</td>
                     <td>${h.totalFiles ?? '-'}</td>
                     <td>${h.successCount ?? '-'}</td>
                     <td><span class="badge ${statusClass}">${h.status}</span></td>
                     <td>${timeSec}초</td>
                     <td>
-                        <button class="btn-sm btn-ppt" onclick="downloadPresentation(${h.id})"
-                            title="이 분석 결과를 PPT로 다운로드">📊 PPT</button>
+                        ${pptBtn}
                         <button class="btn-sm btn-delete" onclick="deleteHistory(${h.id})"
                             title="이 이력 삭제">삭제</button>
                     </td>
@@ -1387,7 +1401,7 @@
                     ? `<button class="btn-sm btn-ppt" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📋 보고서 PPT</button>`
                     : '-';
                 return `<tr>
-                    <td title="${h.sourcePath||''}">${project}</td>
+                    <td title="${sourcePathTooltip(h.sourcePath)}">${project}</td>
                     <td>${h.totalFiles??'-'}</td><td>${h.successCount??'-'}</td><td>${h.failureCount??'-'}</td>
                     <td style="font-size:11px;">${model}</td><td>${timeSec}</td><td>${cost}</td>
                     <td><span class="badge ${stCls}">${h.status}</span></td>
@@ -1421,7 +1435,7 @@
                 const cost    = h.estimatedCost != null ? '$' + h.estimatedCost.toFixed(4) : '-';
                 const date    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
                 return `<tr>
-                    <td title="${h.sourcePath||''}">${project}</td>
+                    <td title="${sourcePathTooltip(h.sourcePath)}">${project}</td>
                     <td style="font-size:11px;">${model}</td>
                     <td>${inTok}</td>
                     <td>${outTok}</td>

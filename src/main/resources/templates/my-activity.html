@@ -365,7 +365,7 @@
         actionBtn = `<button class="btn-sm btn-resume" onclick="resumeAnalysis('${h.sessionId}', ${h.id})" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
       }
       return `<tr>
-        <td title="${h.sourcePath || ''}">${project}</td>
+        <td title="${sourcePathTooltip(h.sourcePath)}">${project}</td>
         <td>${h.totalFiles ?? '-'}</td>
         <td>${h.successCount ?? '-'}</td>
         <td>${h.failureCount ?? '-'}</td>
@@ -472,7 +472,7 @@
       const cost       = h.estimatedCost != null ? '$' + h.estimatedCost.toFixed(4) : '-';
       const dateStr    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
       return `<tr>
-        <td title="${h.sourcePath || ''}">${project}</td>
+        <td title="${sourcePathTooltip(h.sourcePath)}">${project}</td>
         <td style="font-size:11px;">${model}</td>
         <td>${inputTok}</td>
         <td>${outputTok}</td>
@@ -489,6 +489,16 @@
     if (name.includes('opus'))   return 'Opus';
     if (name.includes('haiku'))  return 'Haiku';
     return name;
+  }
+
+  // 원격 업로드 분석(sourcePath가 서버 내부 임시 저장소 .uploads/ 하위)인 경우,
+  // 세션ID가 섞인 컨테이너 내부 경로를 그대로 노출하지 않고 안내 문구로 대체한다.
+  function sourcePathTooltip(sourcePath) {
+    if (!sourcePath) return '';
+    if (sourcePath.includes('/.uploads/') || sourcePath.includes('\\.uploads\\')) {
+      return '원격 업로드 분석 (브라우저에서 직접 업로드된 소스)';
+    }
+    return sourcePath;
   }
 
   // ── 알림 벨 ─────────────────────────────────────

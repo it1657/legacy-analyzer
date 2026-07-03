@@ -25,6 +25,45 @@ let isPausedLocally = false;
 let isAnalysisComplete = false;
 let currentHistoryId = null;    // 완료된 분석의 DB historyId (PPT 다운로드용)
 
+// 원격 업로드 분석(File System Access API) 상태
+let uploadSourceHandle = null;      // 분석 대상 폴더 핸들 (write-back 대상 기본값)
+let uploadOutputHandle = null;      // 별도 출력 폴더 핸들 (선택 시에만 사용)
+let isUploadModeSession = false;    // 현재 폴링 중인 세션이 업로드 분석인지 구분
+let uploadSessionIdForWriteback = null; // 완료 후 write-back에 사용할 세션 ID (핸들 초기화 전에 백업)
+let isUploadPreviewMode = false;    // 파일 그리드가 업로드 미리보기 목록을 보여주고 있는지 여부 (클릭 시 경로 복사 동작 분기용)
+const UPLOAD_EXCLUDED_DIRS = ['.git', '.gradle', '.idea', '.vscode', '.claude',
+  'node_modules', 'build', 'target', 'out', 'bin'];
+
+// 로컬 경로 입력 방식(1/2단계 버튼)과 원격 업로드 방식은 동시에 실행될 수 없으므로,
+// 한쪽이 진행 중일 때는 다른 쪽 버튼을 잠가 두 분석이 세션/파일을 동시에 건드리지 않게 한다.
+function setLocalPathControlsDisabled(disabled) {
+  const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
+  const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
+  [step1Btn, step2Btn].forEach(btn => {
+    if (!btn) return;
+    btn.disabled = disabled;
+    btn.style.opacity = disabled ? "0.5" : "1";
+    btn.style.cursor = disabled ? "not-allowed" : "pointer";
+  });
+}
+
+function setUploadControlsDisabled(disabled) {
+  const section = document.getElementById('uploadAnalysisSection');
+  if (!section) return;
+  section.querySelectorAll('button').forEach(btn => {
+    if (btn.id === 'runUploadBtn') return; // 시작 버튼은 폴더 선택 여부로 별도 제어
+    btn.disabled = disabled;
+    btn.style.opacity = disabled ? "0.5" : "1";
+    btn.style.cursor = disabled ? "not-allowed" : "pointer";
+  });
+  const runBtn = document.getElementById('runUploadBtn');
+  if (runBtn) {
+    runBtn.disabled = disabled ? true : !uploadSourceHandle;
+    runBtn.style.opacity = disabled ? "0.5" : "1";
+    runBtn.style.cursor = disabled ? "not-allowed" : "pointer";
+  }
+}
+
 // 페이지 최초 로드
 window.onload = function() {
   clearSessionFromStorage();
@@ -48,6 +87,10 @@ window.onload = function() {
   const myActivityBtn = document.getElementById('myActivityBtn');
   if (myActivityBtn && roles.includes('ADMIN')) myActivityBtn.style.display = 'none';
 
+  // 서버 경로 직접 지정 분석은 관리자 전용 (서버 자신의 파일시스템을 임의로 읽고 쓸 수 있어 보안상 제한)
+  const localPathAnalysisSection = document.getElementById('localPathAnalysisSection');
+  if (roles.includes('ADMIN') && localPathAnalysisSection) localPathAnalysisSection.style.display = 'flex';
+
   // 이어서 분석: 분석이력에서 재개 버튼 클릭 시 sessionId 파라미터로 진입
   const urlParams = new URLSearchParams(window.location.search);
   const resumeSessionId = urlParams.get('sessionId');
@@ -58,10 +101,30 @@ window.onload = function() {
     updateSessionIdDisplay();
     startPolling();
   }
+
+  // 원격 업로드 분석 지원 여부 감지 (Chrome/Edge + HTTPS 또는 localhost 필요)
+  const uploadSupported = typeof window.showDirectoryPicker === 'function' && window.isSecureContext;
+  const uploadAnalysisSection = document.getElementById('uploadAnalysisSection');
+  const uploadUnsupportedNote = document.getElementById('uploadAnalysisUnsupportedNote');
+  if (uploadSupported) {
+    if (uploadAnalysisSection) uploadAnalysisSection.style.display = 'flex';
+  } else {
+    if (uploadUnsupportedNote) uploadUnsupportedNote.style.display = 'block';
+  }
 };
 
 function goToAnalysis() {
   window.location.href = '/';
+}
+
+// 관리자 전용 "서버 경로 직접 지정" 섹션 아코디언 토글
+function toggleLocalPathSection() {
+  const content = document.getElementById('localPathAnalysisContent');
+  const icon = document.getElementById('localPathToggleIcon');
+  if (!content) return;
+  const isOpen = content.style.display === 'flex';
+  content.style.display = isOpen ? 'none' : 'flex';
+  if (icon) icon.textContent = isOpen ? '▶' : '▼';
 }
 
 // ===================================================================
@@ -74,6 +137,7 @@ async function loadDashboard() {
   const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
 
   document.getElementById('uiSearchInput').value = "";
+  isUploadPreviewMode = false;
   if (!path.trim()) { alert('원본 소스 경로를 지정해 주세요!'); return; }
 
   const txtTotalTime = document.getElementById("txtTotalTime");
@@ -152,11 +216,16 @@ function renderDividedGrid(filesArray) {
     fileDiv.appendChild(badgeSpan);
 
     fileDiv.onclick = function() {
-      const sep = outPath.endsWith('\\') || outPath.endsWith('/') ? "" : "\\";
-      const absolutePath = outPath + sep + file.fileName.replaceAll('/', '\\').replaceAll('#', '\\');
-      navigator.clipboard.writeText(absolutePath).then(() => {
+      // 업로드 미리보기는 서버 절대경로가 없는 로컬 파일이므로 상대경로만 복사
+      const textToCopy = isUploadPreviewMode
+          ? file.fileName
+          : (() => {
+              const sep = outPath.endsWith('\\') || outPath.endsWith('/') ? "" : "\\";
+              return outPath + sep + file.fileName.replaceAll('/', '\\').replaceAll('#', '\\');
+            })();
+      navigator.clipboard.writeText(textToCopy).then(() => {
         const logConsole = document.getElementById('terminalLog');
-        logConsole.textContent = `[경로 복사 완료] 주소창에 붙여넣기(Ctrl+V) 하세요:\n${absolutePath}`;
+        logConsole.textContent = `[경로 복사 완료] ${isUploadPreviewMode ? '' : '주소창에 붙여넣기(Ctrl+V) 하세요:\n'}${textToCopy}`;
         logConsole.scrollTop = logConsole.scrollHeight;
       }).catch(err => console.error("복사 실패: ", err));
     };
@@ -240,6 +309,7 @@ async function runBatchAnalysis() {
   step1Btn.style.cursor = "not-allowed";
   step2Btn.style.opacity = "0.5";
   step2Btn.style.cursor = "not-allowed";
+  setUploadControlsDisabled(true); // 로컬 경로 분석 중에는 원격 업로드 분석 시작 불가
 
   logConsole.textContent = "[세션 시작] 분석을 시작합니다.\n";
   progressPanel.style.display = "block";
@@ -425,17 +495,35 @@ function handleAnalysisCompletion(finalData) {
     if (txtAvgSpeed) txtAvgSpeed.textContent = finalData.avgTimePerFile;
   }
 
-  // 버튼 활성화
+  // 버튼 활성화 - 로컬 경로 버튼은 항상 재활성화.
+  // 업로드 버튼은 이 분석 자체가 업로드 분석이었다면 write-back이 끝날 때까지 잠긴 채로 둔다.
   if (step1Btn) { step1Btn.disabled = false; step1Btn.style.opacity = "1"; step1Btn.style.cursor = "pointer"; }
   if (step2Btn) { step2Btn.disabled = false; step2Btn.style.opacity = "1"; step2Btn.style.cursor = "pointer"; }
+  if (!isUploadModeSession) setUploadControlsDisabled(false);
 
   // 완료 결과 패널 표시
   showCompletionResult(finalData);
+
+  // 업로드 분석이었다면 write-back(원본/출력 폴더에 결과 반영) 진행
+  if (isUploadModeSession) {
+    performWriteBack();
+  }
 
   // 세션 정리
   clearSessionFromStorage();
   currentSessionId = null;
   updateSessionControlPanel();
+}
+
+// 원격 업로드 분석은 readmePath가 서버 내부 임시 저장소 경로라 사용자에게 의미 없는 절대경로다.
+// write-back으로 결과 파일 자체는 이미 원본(또는 지정한) 폴더에 반영되므로, 경로 대신 안내 문구로 대체한다.
+function formatReadmePathForDisplay(readmePath) {
+  if (!readmePath) return '(생성 중 또는 없음)';
+  if (readmePath.includes('/.uploads/') || readmePath.includes('\\.uploads\\')) {
+    const fileName = readmePath.split(/[/\\]/).pop();
+    return `${fileName} (write-back으로 원본 폴더에 저장됨)`;
+  }
+  return readmePath;
 }
 
 // 완료 결과 패널 렌더링 (HTML에 이미 있는 패널에 데이터만 채움)
@@ -451,7 +539,7 @@ function showCompletionResult(data) {
   const failed = data.failedCount || 0;
   const loginId = data.loginId || localStorage.getItem('userId') || '-';
   const avgTime = data.avgTimePerFile ? `${data.avgTimePerFile}초/파일` : '-';
-  const readmePath = data.readmePath || '(생성 중 또는 없음)';
+  const readmePath = formatReadmePathForDisplay(data.readmePath);
   const readmeContent = data.readmeContent || '(README.md 생성 중 또는 없음)';
 
   const usedModel = document.getElementById('modelSelect')?.value || 'claude-sonnet-4-6';
@@ -565,17 +653,315 @@ function stopAnalysis() {
   if (progressPanel) progressPanel.style.display = "none";
   if (overlay) overlay.style.display = "none";
 
-  const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
-  const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
-  if (step1Btn) { step1Btn.disabled = false; step1Btn.style.opacity = "1"; step1Btn.style.cursor = "pointer"; }
-  if (step2Btn) { step2Btn.disabled = false; step2Btn.style.opacity = "1"; step2Btn.style.cursor = "pointer"; }
+  setLocalPathControlsDisabled(false);
+  setUploadControlsDisabled(false);
+}
+
+// ===================================================================
+// 원격 업로드 분석 (File System Access API + write-back)
+// 소스가 이 서버가 아닌 다른 PC/서버에 있을 때, 브라우저가 로컬 폴더를
+// 직접 읽어 서버로 업로드하고, 분석이 끝나면 결과를 같은(또는 지정한) 폴더에
+// 다시 써넣는다. Chrome/Edge + HTTPS(또는 localhost)에서만 동작한다.
+// ===================================================================
+
+// isSupportedFile() (MainApiController.java)과 동일한 확장자 기준. 서버가 실제로 분석할 파일 수와
+// 미리보기 개수가 어긋나지 않도록 같은 규칙을 프론트에도 유지한다.
+const UPLOAD_EXCLUDED_EXTENSIONS = ['.class', '.jar', '.war', '.exe', '.dll', '.so',
+  '.png', '.jpg', '.gif', '.zip', '.tar', '.gz', '.pdf', '.doc', '.docx'];
+const UPLOAD_SUPPORTED_EXTENSIONS = ['.java', '.vue', '.js', '.jsx', '.ts', '.tsx', '.xfdl', '.py',
+  '.html', '.css', '.xml', '.json', '.properties', '.yml', '.yaml', '.gradle', '.txt',
+  '.sql', '.sh', '.bat', '.dockerfile'];
+
+function isUploadFileSupported(relPath) {
+  const name = relPath.toLowerCase().split('/').pop();
+  if (UPLOAD_EXCLUDED_EXTENSIONS.some(ext => name.endsWith(ext))) return false;
+  if (name === 'dockerfile' || name === 'dockerfile.prod') return true;
+  return UPLOAD_SUPPORTED_EXTENSIONS.some(ext => name.endsWith(ext));
+}
+
+// 폴더 선택 직후 브라우저에서 바로 스캔해서, 로컬 경로 방식의 "1단계 파일 상태 조회"처럼
+// 서버 업로드 없이 분석 대상 파일 수/목록을 미리 보여준다.
+async function previewUploadFolder() {
+  if (!uploadSourceHandle) return;
+  const logConsole = document.getElementById('terminalLog');
+  document.getElementById('uiSearchInput').value = "";
+  logConsole.textContent = "[안내] 선택한 폴더 구조를 조사 중...";
+
+  let entries;
+  try {
+    entries = await collectFilesFromDirectoryHandle(uploadSourceHandle);
+  } catch (err) {
+    logConsole.textContent = `[오류] 폴더 읽기 실패: ${err.message}`;
+    return;
+  }
+
+  isUploadPreviewMode = true;
+  const supported = entries.filter(e => isUploadFileSupported(e.relPath));
+  globalFilesCache = supported.map(e => ({ fileName: e.relPath, isCompleted: false }));
+  renderDividedGrid(globalFilesCache);
+  logConsole.textContent =
+      `[안내] 분석 대상 파일 ${globalFilesCache.length}개 확인 (제외 파일 포함 전체 ${entries.length}개 중 필터링됨)`;
+}
+
+async function pickUploadSourceFolder() {
+  try {
+    uploadSourceHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    document.getElementById('uploadSourceFolderName').textContent = `📂 ${uploadSourceHandle.name}`;
+    document.getElementById('runUploadBtn').disabled = false;
+    await previewUploadFolder();
+  } catch (err) {
+    if (err.name !== 'AbortError') alert('폴더 선택 실패: ' + err.message);
+  }
+}
+
+async function pickUploadOutputFolder() {
+  try {
+    uploadOutputHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    document.getElementById('uploadOutputFolderName').textContent = `🎯 ${uploadOutputHandle.name}`;
+  } catch (err) {
+    if (err.name !== 'AbortError') alert('폴더 선택 실패: ' + err.message);
+  }
+}
+
+// 디렉터리 핸들을 재귀적으로 순회하며 {relPath, handle} 목록을 수집 (제외 폴더는 건너뜀)
+async function collectFilesFromDirectoryHandle(dirHandle, prefix = '') {
+  const results = [];
+  for await (const [name, handle] of dirHandle.entries()) {
+    const relPath = prefix ? `${prefix}/${name}` : name;
+    if (handle.kind === 'directory') {
+      if (UPLOAD_EXCLUDED_DIRS.includes(name)) continue;
+      const nested = await collectFilesFromDirectoryHandle(handle, relPath);
+      results.push(...nested);
+    } else {
+      results.push({ relPath, handle });
+    }
+  }
+  return results;
+}
+
+async function runUploadAnalysis() {
+  if (!uploadSourceHandle) { alert('분석할 폴더를 먼저 선택해 주세요!'); return; }
+
+  const logConsole = document.getElementById('terminalLog');
+  const progressPanel = document.getElementById('progressPanel');
+  const runUploadBtn = document.getElementById('runUploadBtn');
+
+  runUploadBtn.disabled = true;
+  setLocalPathControlsDisabled(true); // 원격 업로드 분석 중에는 로컬 경로 분석 시작 불가
+  logConsole.textContent = "[업로드 분석] 폴더를 읽는 중...\n";
+  if (progressPanel) progressPanel.style.display = 'block';
+  document.getElementById('analysisOverlay').style.display = 'flex';
+
+  let entries;
+  try {
+    entries = await collectFilesFromDirectoryHandle(uploadSourceHandle);
+  } catch (err) {
+    logConsole.textContent += `\n[오류] 폴더 읽기 실패: ${err.message}`;
+    stopAnalysis();
+    runUploadBtn.disabled = false;
+    return;
+  }
+
+  if (entries.length === 0) {
+    alert('선택한 폴더에 업로드할 파일이 없습니다.');
+    stopAnalysis();
+    runUploadBtn.disabled = false;
+    return;
+  }
+
+  logConsole.textContent += `[업로드 분석] ${entries.length}개 파일 업로드 중...\n`;
+
+  currentSessionId = generateSessionId();
+  isUploadModeSession = true;
+
+  const formData = new FormData();
+  for (const entry of entries) {
+    const file = await entry.handle.getFile();
+    formData.append('files', file, entry.relPath);
+  }
+  formData.append('sessionId', currentSessionId);
+  formData.append('model', document.getElementById('modelSelect')?.value || 'claude-sonnet-4-6');
+  formData.append('projectName', uploadSourceHandle.name);
+
+  let startResp;
+  try {
+    const resp = await fetch('/api/upload-analysis', { method: 'POST', body: formData });
+    startResp = await resp.json();
+  } catch (err) {
+    logConsole.textContent += `\n[오류] 업로드 분석 시작 실패: ${err.message}`;
+    stopAnalysis();
+    isUploadModeSession = false;
+    runUploadBtn.disabled = false;
+    return;
+  }
+
+  if (startResp.error) {
+    logConsole.textContent += `\n[오류] ${startResp.error}`;
+    stopAnalysis();
+    isUploadModeSession = false;
+    runUploadBtn.disabled = false;
+    return;
+  }
+
+  if (startResp.sessionId) currentSessionId = startResp.sessionId;
+  uploadSessionIdForWriteback = currentSessionId;
+
+  if (analysisTimer) clearInterval(analysisTimer);
+  const startTimeStamp = Date.now();
+  const timerElement = document.getElementById('txtTotalTime');
+  if (timerElement) timerElement.textContent = "0.0";
+  analysisTimer = setInterval(() => {
+    if (timerElement) timerElement.textContent = ((Date.now() - startTimeStamp) / 1000).toFixed(1);
+  }, 100);
+
+  startPolling();
+}
+
+// 분석 완료 후 결과 파일들을 원본(또는 지정된 출력) 폴더 핸들에 다시 써넣는다.
+async function performWriteBack() {
+  const logConsole = document.getElementById('terminalLog');
+  const sessionId = uploadSessionIdForWriteback;
+  let targetHandle = uploadOutputHandle || uploadSourceHandle;
+
+  if (!sessionId || !targetHandle) { isUploadModeSession = false; return; }
+
+  const targetLabel = uploadOutputHandle ? '별도 출력 폴더' : '원본 폴더(덮어쓰기)';
+  appendTerminalLine(logConsole, `[write-back] 분석 결과를 ${targetLabel}에 반영합니다...`);
+
+  // 별도 출력 폴더를 선택한 경우, 경로 입력 방식(runAnalysis)과 동일하게
+  // {출력폴더}/{계정ID}/{원본폴더명}/ 구조로 계정별 격리한다.
+  // (여러 사용자가 같은 출력 폴더를 공유해도 서로 덮어쓰지 않도록)
+  if (uploadOutputHandle) {
+    const rawUsername = localStorage.getItem('userId') || 'unknown';
+    const safeUsername = rawUsername.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const sourceFolderName = uploadSourceHandle.name;
+    try {
+      const userDir = await uploadOutputHandle.getDirectoryHandle(safeUsername, { create: true });
+      targetHandle = await userDir.getDirectoryHandle(sourceFolderName, { create: true });
+      appendTerminalLine(logConsole, `[write-back] 저장 위치: ${safeUsername}/${sourceFolderName}/`);
+    } catch (err) {
+      appendTerminalLine(logConsole, `[오류] 출력 폴더 하위 구조 생성 실패: ${err.message}`);
+      isUploadModeSession = false;
+      return;
+    }
+  }
+
+  let manifest;
+  try {
+    const manifestResp = await fetch(`/api/upload-session/${sessionId}/manifest`);
+    manifest = await manifestResp.json();
+  } catch (err) {
+    appendTerminalLine(logConsole, `[오류] write-back 목록 조회 실패: ${err.message}`);
+    isUploadModeSession = false;
+    return;
+  }
+
+  if (manifest.error || !manifest.files) {
+    appendTerminalLine(logConsole, `[오류] ${manifest.error || 'write-back 대상 파일이 없습니다.'}`);
+    isUploadModeSession = false;
+    return;
+  }
+
+  let done = 0;
+  const blockedFiles = []; // 브라우저 보안 정책(.ps1/.py 등 위험 확장자, .git* 이름)으로 직접 쓰기가 막힌 파일
+
+  for (const relPath of manifest.files) {
+    let content;
+    try {
+      const fileResp = await fetch(`/api/upload-session/${sessionId}/file?path=${encodeURIComponent(relPath)}`);
+      if (!fileResp.ok) throw new Error(`HTTP ${fileResp.status}`);
+      content = await fileResp.arrayBuffer();
+    } catch (err) {
+      appendTerminalLine(logConsole, `[write-back 실패] ${relPath}: 서버에서 결과를 가져오지 못함 (${err.message})`);
+      continue;
+    }
+
+    try {
+      const fileHandle = await getOrCreateFileHandle(targetHandle, relPath);
+      const writable = await fileHandle.createWritable();
+      await writable.write(content);
+      await writable.close();
+      done++;
+    } catch (err) {
+      // Chrome File System Access API는 .ps1/.py/.exe 등 위험 확장자 및
+      // ".git"로 시작하는 이름에 대한 쓰기를 정책적으로 차단한다 - 우회 불가.
+      // 이 경우 일반 다운로드(<a download>)로 대체한다.
+      appendTerminalLine(logConsole, `[write-back 차단] ${relPath}: 브라우저 보안 정책으로 직접 쓰기 불가 - 아래에서 개별 다운로드 필요`);
+      blockedFiles.push({ relPath, blob: new Blob([content]) });
+    }
+  }
+
+  appendTerminalLine(logConsole, `[write-back 완료] ${done}/${manifest.files.length}개 파일 반영 완료`);
+
+  if (blockedFiles.length > 0) {
+    appendTerminalLine(logConsole, `[안내] ${blockedFiles.length}개 파일은 브라우저 제한으로 자동 반영되지 못했습니다. 아래 목록에서 직접 다운로드해 주세요.`);
+    showBlockedFilesDownloadPanel(blockedFiles);
+  }
+
+  try {
+    await fetch(`/api/upload-session/${sessionId}/cleanup`, { method: 'POST' });
+  } catch (err) {
+    console.warn('[write-back] 서버 임시 파일 정리 실패', err);
+  }
+
+  uploadSessionIdForWriteback = null;
+  uploadSourceHandle = null;
+  uploadOutputHandle = null;
+  isUploadModeSession = false;
+  document.getElementById('uploadSourceFolderName').textContent = '선택된 폴더 없음 (다른 PC/서버의 폴더를 직접 선택)';
+  document.getElementById('uploadOutputFolderName').textContent = '미선택 시 원본 폴더에 결과를 덮어씀';
+  setUploadControlsDisabled(false); // write-back까지 끝났으니 다음 업로드 분석을 위해 버튼 재활성화
+}
+
+// write-back이 차단된 파일들을 개별 다운로드 링크로 렌더링 (Blob URL 기반, File System Access API를 거치지 않으므로 확장자 차단의 영향을 받지 않음)
+function showBlockedFilesDownloadPanel(blockedFiles) {
+  const panel = document.getElementById('writeBackFailuresPanel');
+  const list = document.getElementById('writeBackFailuresList');
+  if (!panel || !list) return;
+
+  list.innerHTML = '';
+  blockedFiles.forEach(({ relPath, blob }) => {
+    const url = URL.createObjectURL(blob);
+    const row = document.createElement('div');
+    row.style.padding = '4px 0';
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = relPath.split('/').pop();
+    link.textContent = `⬇️ ${relPath}`;
+    link.style.color = '#58a6ff';
+    link.style.textDecoration = 'none';
+    row.appendChild(link);
+    list.appendChild(row);
+  });
+
+  panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// relativePath("src/main/Foo.java")를 따라 하위 폴더 핸들을 생성/탐색한 뒤 파일 핸들을 반환
+async function getOrCreateFileHandle(rootHandle, relativePath) {
+  const parts = relativePath.split('/').filter(Boolean);
+  let dirHandle = rootHandle;
+  for (let i = 0; i < parts.length - 1; i++) {
+    dirHandle = await dirHandle.getDirectoryHandle(parts[i], { create: true });
+  }
+  return dirHandle.getFileHandle(parts[parts.length - 1], { create: true });
+}
+
+function appendTerminalLine(logConsole, text) {
+  if (!logConsole) return;
+  const div = document.createElement('div');
+  div.className = 'log-line';
+  div.textContent = text;
+  logConsole.appendChild(div);
+  logConsole.scrollTop = logConsole.scrollHeight;
 }
 
 // ===================================================================
 // 세션 관리
 // ===================================================================
 function generateSessionId() {
-  const username = localStorage.getItem('username') || 'guest';
+  const username = localStorage.getItem('userId') || 'guest';
   const timestamp = Date.now();
   const randomId = Math.random().toString(36).substr(2, 8);
   return username + '-' + timestamp + '-' + randomId;
@@ -688,10 +1074,9 @@ function cancelAnalysis() {
   currentSessionId = null;
   updateSessionControlPanel();
 
-  const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
-  const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
-  if (step1Btn) { step1Btn.disabled = false; step1Btn.style.opacity = "1"; step1Btn.style.cursor = "pointer"; }
-  if (step2Btn) { step2Btn.disabled = false; step2Btn.style.opacity = "1"; step2Btn.style.cursor = "pointer"; }
+  isUploadModeSession = false;
+  setLocalPathControlsDisabled(false);
+  setUploadControlsDisabled(false);
 }
 
 // ===================================================================

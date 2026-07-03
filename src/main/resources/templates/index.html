@@ -50,23 +50,47 @@
         <div class="card-body">
             <div style="display: flex; flex-direction: column; gap: 15px;">
                 <div class="control-row">
-                    <label for="sourceFolderPath" style="font-weight: bold; min-width: 110px;">📂 원본 경로:</label>
-                    <input type="text" id="sourceFolderPath" class="form-control" placeholder="분석할 레거시 프로젝트 경로">
-                    <button type="button" onclick="loadDashboard()" class="btn">1 단계: 파일 상태 조회</button>
-                </div>
-                <div class="control-row">
-                    <label for="outputFolderPath" style="font-weight: bold; min-width: 110px;">🎯 출력 경로:</label>
-                    <input type="text" id="outputFolderPath" class="form-control" placeholder="결과물을 생성할 특정 폴더 경로">
-                    <button type="button" onclick="runBatchAnalysis()" class="btn btn-success">2 단계: 특정 경로에 결과 생성</button>
-                </div>
-                <div class="control-row">
-                    <label for="modelSelect" style="font-weight: bold; min-width: 110px;">🤖 AI 모델:</label>
+                    <label for="modelSelect" style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">🤖 AI 모델:</label>
                     <select id="modelSelect" class="form-control" style="max-width: 360px; background: #1e2a3a; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; font-size: 13px;">
                         <option value="claude-sonnet-4-6" selected>Claude Sonnet (권장 · $3/$15 per 1M)</option>
                         <option value="claude-opus-4-8">Claude Opus (고품질 · $15/$75 per 1M)</option>
                         <option value="claude-haiku-4-5-20251001">Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)</option>
                     </select>
                     <span style="color: #8b949e; font-size: 12px; margin-left: 8px;">입력/출력 토큰 기준</span>
+                </div>
+                <div id="uploadAnalysisSection" style="display: none; flex-direction: column; gap: 15px; border-top: 1px dashed #30363d; padding-top: 15px;">
+                    <div class="control-row">
+                        <label style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">📂 분석할 폴더:</label>
+                        <span id="uploadSourceFolderName" class="form-control" onclick="pickUploadSourceFolder()" style="display:inline-flex; align-items:center; color:#8b949e; cursor:pointer;" title="클릭해서 폴더 선택">선택된 폴더 없음 (다른 PC/서버의 폴더를 직접 선택)</span>
+                        <button type="button" onclick="pickUploadSourceFolder()" class="btn">1 단계: 폴더 선택</button>
+                    </div>
+                    <div class="control-row">
+                        <label style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">🎯 출력 폴더:</label>
+                        <span id="uploadOutputFolderName" class="form-control" onclick="pickUploadOutputFolder()" style="display:inline-flex; align-items:center; color:#8b949e; cursor:pointer;" title="클릭해서 폴더 선택">미선택 시 원본 폴더에 결과를 덮어씀</span>
+                        <button type="button" onclick="pickUploadOutputFolder()" class="btn">(선택) 다른 폴더 지정</button>
+                        <button type="button" onclick="runUploadAnalysis()" class="btn btn-success" id="runUploadBtn" disabled>2 단계: 업로드 분석 시작</button>
+                    </div>
+                </div>
+                <div id="uploadAnalysisUnsupportedNote" style="display: none; color: #f6c23e; font-size: 12px; padding-top: 10px; border-top: 1px dashed #30363d;">
+                    ⚠️ 이 브라우저(또는 비보안 접속)에서는 원격 업로드 분석을 지원하지 않습니다. Chrome/Edge + HTTPS(또는 localhost) 환경에서만 사용 가능합니다.
+                </div>
+                <div id="localPathAnalysisSection" style="display: none; flex-direction: column; gap: 10px; border-top: 1px dashed #30363d; padding-top: 15px;">
+                    <div onclick="toggleLocalPathSection()" style="cursor:pointer; display:flex; align-items:center; gap:6px; color:#f6c23e; font-weight:bold; font-size:13px; user-select:none;">
+                        <span id="localPathToggleIcon">▶</span> 🔒 관리자 전용 — 서버 경로 직접 지정
+                    </div>
+                    <div id="localPathAnalysisContent" style="display: none; flex-direction: column; gap: 15px;">
+                        <div style="color: #8b949e; font-size: 12px;">이 서버에 저장된 경로를 직접 입력해서 분석합니다. (이 앱이 실행 중인 서버에서 접속했을 때만 사용 가능)</div>
+                        <div class="control-row">
+                            <label for="sourceFolderPath" style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">📂 원본 경로:</label>
+                            <input type="text" id="sourceFolderPath" class="form-control" placeholder="분석할 레거시 프로젝트 경로">
+                            <button type="button" onclick="loadDashboard()" class="btn">1 단계: 파일 상태 조회</button>
+                        </div>
+                        <div class="control-row">
+                            <label for="outputFolderPath" style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">🎯 출력 경로:</label>
+                            <input type="text" id="outputFolderPath" class="form-control" placeholder="결과물을 생성할 특정 폴더 경로">
+                            <button type="button" onclick="runBatchAnalysis()" class="btn btn-success">2 단계: 특정 경로에 결과 생성</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="control-row" id="sessionControlPanel" style="display: none; gap: 10px;">
                     <span style="font-weight: bold; color: #4e73df;">분석 중:</span>
@@ -217,6 +241,22 @@
                         <pre id="cr_readmeContent" style="background:#161b22; padding:12px; border-radius:6px; overflow:auto; flex:1; min-height:160px; max-height:220px; white-space:pre-wrap; color:#c9d1d9; font-size:11px; border:1px solid #30363d; margin:0;"></pre>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ⚠️ write-back 차단 파일 개별 다운로드 패널 (Chrome 보안 정책으로 자동 반영 실패한 파일용) -->
+    <div id="writeBackFailuresPanel" style="display:none; margin-top: 16px;">
+        <div class="card" style="border: 1px solid #f6c23e; background: #0d1117;">
+            <div class="card-header" style="background: #f6c23e; color: #333; font-weight: bold; font-size: 15px;">
+                ⚠️ 자동 반영 실패 파일 (브라우저 보안 정책) - 직접 다운로드 필요
+            </div>
+            <div class="card-body" style="padding: 16px;">
+                <div style="color:#8b949e; font-size:12px; margin-bottom:10px;">
+                    Chrome은 .ps1/.py/.exe 등 실행 가능 확장자 및 ".git"로 시작하는 파일에 대해 웹페이지의 직접 쓰기를 차단합니다.
+                    아래 링크를 눌러 다운로드한 뒤, 원래 위치에 수동으로 옮겨 주세요.
+                </div>
+                <div id="writeBackFailuresList" style="display:flex; flex-direction:column; gap:4px; font-family:'Courier New',monospace; font-size:13px;"></div>
             </div>
         </div>
     </div>
