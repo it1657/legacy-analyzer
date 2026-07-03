@@ -439,6 +439,53 @@ public class MainApiController {
   }
 
   /**
+   * 세션의 완료/대기 파일 목록 조회 (재개 진입 시 우측 그리드를 채우기 위한 용도).
+   * '이어서 분석' 화면은 /?sessionId=...로 바로 진입해서 1단계 조회를 거치지 않으므로,
+   * 세션에 이미 기록된 patchedFilePaths(완료)/pendingFilePaths(대기)로 그리드를 복원한다.
+   */
+  @GetMapping("/api/session/{sessionId}/files")
+  @ResponseBody
+  public Map<String, Object> getSessionFileList(@PathVariable String sessionId, Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      result.put("error", "세션을 찾을 수 없습니다.");
+      return result;
+    }
+
+    String sourcePath = session.getSourcePath();
+    String outputPath = session.getOutputPath();
+    boolean isCopyMode = outputPath != null && !outputPath.isBlank() && !outputPath.equals(sourcePath);
+    Path analysisRoot = isCopyMode
+        ? Path.of(outputPath).resolve(Path.of(sourcePath).getFileName())
+        : Path.of(sourcePath);
+
+    List<Map<String, Object>> files = new ArrayList<>();
+    for (String abs : session.getPatchedFilePaths()) {
+      files.add(toSessionFileEntry(analysisRoot, abs, true));
+    }
+    for (String abs : session.getPendingFilePaths()) {
+      files.add(toSessionFileEntry(analysisRoot, abs, false));
+    }
+
+    result.put("files", files);
+    return result;
+  }
+
+  private Map<String, Object> toSessionFileEntry(Path analysisRoot, String absPathStr, boolean isCompleted) {
+    Map<String, Object> entry = new HashMap<>();
+    String display;
+    try {
+      display = analysisRoot.relativize(Path.of(absPathStr)).toString().replace("\\", "/");
+    } catch (Exception e) {
+      display = absPathStr;
+    }
+    entry.put("fileName", display);
+    entry.put("isCompleted", isCompleted);
+    return entry;
+  }
+
+  /**
    * CLAUDE.md 내용 단독 조회 (완료 화면 표시용)
    */
   @GetMapping("/api/analysis/claude-md")
@@ -728,6 +775,15 @@ public class MainApiController {
         session.setCurrentPhase("FAILED");
         session.addErrorLog("파일 목록 수집 실패: " + e.getMessage());
         sessionManager.failSession(sessionId, "파일 목록 수집 실패");
+        return;
+      }
+
+      // 분석 대상 파일이 0개면 아무것도 안 했는데 COMPLETED로 표시되는 게 오해의 소지가 있으므로
+      // FAILED로 명확히 표시한다 (지원 확장자 파일이 없거나 전부 제외 대상 폴더인 경우).
+      if (fileList.isEmpty()) {
+        session.setCurrentPhase("FAILED");
+        session.addErrorLog("분석 대상 파일이 없습니다. 지원되는 확장자의 파일이 없거나 모두 제외 대상(폴더/확장자)입니다.");
+        sessionManager.failSession(sessionId, "분석 대상 파일 없음");
         return;
       }
 

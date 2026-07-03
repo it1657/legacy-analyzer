@@ -99,6 +99,7 @@ window.onload = function() {
     const logConsole = document.getElementById('terminalLog');
     if (logConsole) logConsole.textContent = '[재개] 이전 분석 세션을 이어서 진행합니다...\n';
     updateSessionControlPanel();
+    loadSessionFileList(resumeSessionId);
     startPolling();
   }
 
@@ -115,6 +116,20 @@ window.onload = function() {
 
 function goToAnalysis() {
   window.location.href = '/';
+}
+
+// '이어서 분석' 진입 시 서버에 이미 기록된 완료/대기 파일 목록으로 우측 그리드를 채운다.
+async function loadSessionFileList(sessionId) {
+  try {
+    const resp = await fetch(`/api/session/${sessionId}/files`);
+    const data = await resp.json();
+    if (data.error || !data.files) return;
+    isUploadPreviewMode = false;
+    globalFilesCache = data.files;
+    renderDividedGrid(globalFilesCache);
+  } catch (err) {
+    console.warn('[재개 파일 목록 조회 실패]', err.message);
+  }
 }
 
 // 관리자 전용 "서버 경로 직접 지정" 섹션 아코디언 토글
