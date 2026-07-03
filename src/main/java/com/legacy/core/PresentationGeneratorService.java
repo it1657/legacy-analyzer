@@ -160,8 +160,8 @@ public class PresentationGeneratorService {
     }
 
     addRect(slide, 40, 360, W - 80, 1, BG_CARD);
-    addText(slide, "분석 경로: " + h.getSourcePath(), 40, 368, W - 80, 22, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
-    addText(slide, "출력 경로: " + h.getOutputPath(), 40, 388, W - 80, 22, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+    // 원격 업로드 분석의 경우 sourcePath/outputPath가 서버 내부 임시 저장소 경로라
+    // 사용자가 인식하는 실제 절대경로가 아니므로 보고서에는 노출하지 않는다.
   }
 
   // ── 고객 납품용: 프로젝트/패키지 구조 ───────────────────────
@@ -1466,7 +1466,7 @@ public class PresentationGeneratorService {
     }
 
     addRect(slide, 40, 358, W - 80, 1, BG_CARD);
-    addText(slide, "소스: " + h.getSourcePath(), 40, 366, W - 80, 22, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+    // 원격 업로드 분석의 경우 sourcePath가 서버 내부 임시 저장소 경로라 보고서에는 노출하지 않는다.
     addText(slide, "출력: " + h.getOutputPath(), 40, 386, W - 80, 22, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
     addText(slide, String.format("파일당 평균 처리시간: %.2f초", avgSec), 40, 410, W - 80, 22, 10, false, ACCENT, TextParagraph.TextAlign.LEFT);
   }
@@ -1582,8 +1582,8 @@ public class PresentationGeneratorService {
 
     // 경로 정보
     addRect(slide, 40, 360, W - 80, 1, BG_CARD);
-    addText(slide, "분석 경로: " + h.getSourcePath(), 40, 368, W - 80, 22, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
-    addText(slide, "출력 경로: " + h.getOutputPath(), 40, 388, W - 80, 22, 10, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+    // 원격 업로드 분석의 경우 sourcePath/outputPath가 서버 내부 임시 저장소 경로라
+    // 사용자가 인식하는 실제 절대경로가 아니므로 보고서에는 노출하지 않는다.
   }
 
   // ── 결과 마지막 슬라이드: 마무리 ────────────────────────────

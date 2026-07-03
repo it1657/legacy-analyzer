@@ -35,8 +35,11 @@ public class RetryHandler {
       try {
         return task.execute();
       } catch (Exception e) {
-        // 에러 분류
-        ApiErrorHandler.ErrorType errorType = classifyError(e);
+        // 이미 정확히 분류된 예외(예: ClaudeServiceImpl에서 credit balance 등을 보고 분류한 결과)는
+        // 그 분류를 그대로 신뢰한다. 여기서 메시지 문자열만으로 다시 분류하면 원래 정확했던
+        // 분류(INSUFFICIENT_CREDITS 등)가 뭉개져서 INVALID_REQUEST 같은 값으로 퇴화할 수 있다.
+        ApiErrorHandler.ErrorType errorType = (e instanceof AnalysisException ae)
+            ? ae.getErrorType() : classifyError(e);
 
         // 재시도 불가능하거나 최대 재시도 초과
         if (!apiErrorHandler.isRetryable(errorType) ||

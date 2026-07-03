@@ -12,9 +12,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.io.IOException;
@@ -23,6 +28,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -57,6 +63,9 @@ public class MainApiController {
 
   @Value("${app.analysis.chunking-threshold-bytes:153600}")
   private long chunkingThresholdBytes;
+
+  @Value("${app.analysis.upload-storage-path:.uploads}")
+  private String uploadStoragePath;
 
   @Autowired
   public MainApiController(
@@ -102,6 +111,10 @@ public class MainApiController {
 
     if (authentication == null || !(authentication.getPrincipal() instanceof User)) {
       result.put("error", "인증이 필요합니다. 다시 로그인해주세요.");
+      return result;
+    }
+    if (!isAdmin(authentication)) {
+      result.put("error", "서버 경로 직접 지정 분석은 관리자만 사용할 수 있습니다. 원격 업로드 분석을 이용해 주세요.");
       return result;
     }
 
@@ -158,6 +171,210 @@ public class MainApiController {
     result.put("message", "분석을 시작했습니다.");
     log.info("[분석 시작] sessionId={}, user={}, source={}", sessionId, userLoginId, finalSourcePath);
     return result;
+  }
+
+  // ===================================================================
+  // 브라우저 폴더 업로드 분석 (File System Access API 연동)
+  // 소스가 이 서버가 아닌 다른 PC/서버에 있을 때, 경로 문자열 대신
+  // 브라우저가 직접 읽은 파일 바이트를 업로드받아 분석하고,
+  // 결과는 write-back용으로 파일 단위 재다운로드를 지원한다.
+  // ===================================================================
+
+  /**
+   * 업로드 세션의 임시 저장 루트 절대경로 (샌드박스 경계)
+   */
+  private Path getUploadStorageRoot() {
+    return Path.of(uploadStoragePath).toAbsolutePath().normalize();
+  }
+
+  /**
+   * relativePath가 업로드 루트 밖을 가리키지 않는지 검증 후 실제 경로로 변환한다.
+   * (".." 등을 이용한 업로드 경로 조작으로 서버 임의 파일에 쓰거나 읽는 것을 방지)
+   */
+  private Path resolveWithinRoot(Path root, String relativePath) {
+    String cleaned = relativePath.replace("\\", "/");
+    Path resolved = root.resolve(cleaned).normalize();
+    if (!resolved.startsWith(root)) {
+      throw new SecurityException("허용되지 않은 경로입니다: " + relativePath);
+    }
+    return resolved;
+  }
+
+  /**
+   * 세션의 sourcePath가 업로드 샌드박스(uploadStoragePath) 하위인지 확인한다.
+   * 일반 경로 입력 방식 세션에 대해 파일 원문 조회 엔드포인트가 악용되는 것을 막는다.
+   */
+  private Path getValidatedUploadRoot(SessionState session) {
+    if (session == null || session.getSourcePath() == null) return null;
+    Path uploadBase = getUploadStorageRoot();
+    Path sessionSource = Path.of(session.getSourcePath()).toAbsolutePath().normalize();
+    return sessionSource.startsWith(uploadBase) ? sessionSource : null;
+  }
+
+  /**
+   * 서버 파일시스템 경로를 직접 입력해 분석하는 기능은 이 앱이 떠 있는 서버 자체에서
+   * 접근했을 때만 의미가 있고, 임의 경로 읽기/쓰기가 가능해 보안 위험이 있으므로 ADMIN 전용으로 제한한다.
+   */
+  private boolean isAdmin(Authentication authentication) {
+    return authentication != null && authentication.getAuthorities().stream()
+        .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+  }
+
+  /**
+   * 브라우저가 File System Access API로 읽은 폴더 파일들을 업로드받아 분석을 시작한다.
+   * 각 파일의 원본 파일명에는 상대 경로(예: src/main/Foo.java)가 그대로 담겨 전송된다.
+   */
+  @PostMapping("/api/upload-analysis")
+  @ResponseBody
+  public Map<String, Object> uploadAnalysis(
+      @RequestParam("files") MultipartFile[] files,
+      @RequestParam(value = "sessionId", required = false) String clientSessionId,
+      @RequestParam(value = "model", required = false) String selectedModel,
+      @RequestParam(value = "projectName", required = false) String projectName,
+      Authentication authentication) {
+
+    Map<String, Object> result = new HashMap<>();
+
+    if (authentication == null || !(authentication.getPrincipal() instanceof User)) {
+      result.put("error", "인증이 필요합니다. 다시 로그인해주세요.");
+      return result;
+    }
+    if (files == null || files.length == 0) {
+      result.put("error", "업로드된 파일이 없습니다.");
+      return result;
+    }
+
+    User user = (User) authentication.getPrincipal();
+    Long userSeq = user.getSeq();
+    String userLoginId = user.getUserId();
+
+    final String sessionId = (clientSessionId == null || clientSessionId.isBlank())
+        ? UUID.randomUUID().toString() : clientSessionId;
+
+    // 업로드된 폴더의 실제 이름(예: legacy-analyzer)을 그대로 저장 디렉터리명으로 사용한다.
+    // README/PPT/이력 목록 등 여러 화면이 sourcePath의 마지막 경로 조각을 "프로젝트명"으로 뽑아쓰기 때문에,
+    // sessionId를 폴더명으로 쓰면 그 사용자에게 무의미한 문자열이 프로젝트명으로 노출된다.
+    String safeProjectName = (projectName == null || projectName.isBlank())
+        ? "project" : projectName.replace("\\", "_").replace("/", "_").trim();
+    if (safeProjectName.isBlank()) safeProjectName = "project";
+
+    Path uploadRoot;
+    try {
+      Path sessionRoot = resolveWithinRoot(getUploadStorageRoot(), sessionId);
+      uploadRoot = resolveWithinRoot(sessionRoot, safeProjectName);
+      Files.createDirectories(uploadRoot);
+      for (MultipartFile file : files) {
+        String relativeName = file.getOriginalFilename();
+        if (relativeName == null || relativeName.isBlank()) continue;
+        Path targetPath = resolveWithinRoot(uploadRoot, relativeName);
+        Files.createDirectories(targetPath.getParent());
+        file.transferTo(targetPath);
+      }
+    } catch (Exception e) {
+      log.error("[업로드 분석] 파일 저장 실패 sessionId={}", sessionId, e);
+      result.put("error", "업로드된 파일 저장에 실패했습니다: " + e.getMessage());
+      return result;
+    }
+
+    if (selectedModel != null && !selectedModel.isBlank()) {
+      claudeService.setModel(selectedModel);
+    }
+
+    String uploadRootStr = uploadRoot.toString().replace("\\", "/");
+    SessionState session = sessionManager.createSession(sessionId, uploadRootStr, uploadRootStr);
+    session.setUserId(userSeq);
+    session.setUsername(userLoginId);
+    session.setCurrentPhase("STARTING");
+    session.addRecentLog("[세션 시작] 업로드 분석 - 사용자: " + userLoginId + ", 파일 " + files.length + "개");
+
+    new Thread(() -> runAnalysis(sessionId, uploadRootStr, null, false, userSeq, userLoginId)).start();
+
+    result.put("sessionId", sessionId);
+    result.put("message", "업로드 분석을 시작했습니다.");
+    log.info("[업로드 분석 시작] sessionId={}, user={}, 파일수={}", sessionId, userLoginId, files.length);
+    return result;
+  }
+
+  /**
+   * write-back 대상 파일 목록(분석 완료 후 실제로 디스크에 존재하는 상대경로들)을 반환한다.
+   */
+  @GetMapping("/api/upload-session/{sessionId}/manifest")
+  @ResponseBody
+  public Map<String, Object> getUploadManifest(@PathVariable String sessionId, Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    SessionState session = sessionManager.getSession(sessionId);
+    Path uploadRoot = getValidatedUploadRoot(session);
+    if (uploadRoot == null) {
+      result.put("error", "업로드 분석 세션이 아니거나 찾을 수 없습니다.");
+      return result;
+    }
+
+    try (Stream<Path> stream = Files.walk(uploadRoot)) {
+      List<String> relativePaths = stream.filter(Files::isRegularFile)
+          .map(p -> uploadRoot.relativize(p).toString().replace("\\", "/"))
+          .toList();
+      result.put("files", relativePaths);
+      return result;
+    } catch (Exception e) {
+      result.put("error", "파일 목록 조회 실패: " + e.getMessage());
+      return result;
+    }
+  }
+
+  /**
+   * write-back을 위해 분석 완료된 파일 하나의 원문 바이트를 반환한다.
+   */
+  @GetMapping("/api/upload-session/{sessionId}/file")
+  public ResponseEntity<byte[]> getUploadedFileContent(
+      @PathVariable String sessionId, @RequestParam String path, Authentication authentication) {
+    SessionState session = sessionManager.getSession(sessionId);
+    Path uploadRoot = getValidatedUploadRoot(session);
+    if (uploadRoot == null) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    }
+    try {
+      Path filePath = resolveWithinRoot(uploadRoot, path);
+      if (!Files.exists(filePath) || !Files.isRegularFile(filePath)) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+      }
+      byte[] content = Files.readAllBytes(filePath);
+      return ResponseEntity.ok()
+          .contentType(MediaType.APPLICATION_OCTET_STREAM)
+          .body(content);
+    } catch (SecurityException e) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+    } catch (Exception e) {
+      log.error("[업로드 파일 조회 실패] sessionId={}, path={}", sessionId, path, e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+  }
+
+  /**
+   * write-back까지 끝난 뒤 브라우저가 호출 - 서버에 임시로 남아있던 업로드 원본을 정리한다.
+   */
+  @PostMapping("/api/upload-session/{sessionId}/cleanup")
+  @ResponseBody
+  public Map<String, Object> cleanupUploadSession(@PathVariable String sessionId, Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    SessionState session = sessionManager.getSession(sessionId);
+    if (getValidatedUploadRoot(session) == null) {
+      result.put("error", "업로드 분석 세션이 아니거나 찾을 수 없습니다.");
+      return result;
+    }
+    // sourcePath는 {sessionId}/{projectName} 하위 폴더이므로, 정리할 때는
+    // sessionId 폴더 자체(프로젝트명 폴더의 부모)를 지워 잔여물 없이 완전히 제거한다.
+    Path uploadRoot = resolveWithinRoot(getUploadStorageRoot(), sessionId);
+    try (Stream<Path> stream = Files.walk(uploadRoot)) {
+      stream.sorted(Comparator.reverseOrder()).forEach(p -> {
+        try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+      });
+      result.put("success", true);
+      log.info("[업로드 세션 정리] sessionId={}", sessionId);
+      return result;
+    } catch (Exception e) {
+      result.put("error", "정리 실패: " + e.getMessage());
+      return result;
+    }
   }
 
   /**
@@ -252,6 +469,10 @@ public class MainApiController {
   public Map<String, Object> getDashboardStatus(@RequestBody Map<String, String> request,
       Authentication authentication) {
     Map<String, Object> resultData = new HashMap<>();
+    if (!isAdmin(authentication)) {
+      resultData.put("error", "서버 경로 직접 지정 분석은 관리자만 사용할 수 있습니다. 원격 업로드 분석을 이용해 주세요.");
+      return resultData;
+    }
     String folderPathStr = request.get("folderPath");
     String outputPathStr = request.get("outputPath");
 
@@ -566,13 +787,15 @@ public class MainApiController {
             FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
                 sourceRootPath, isForceActive, finalOutPath);
 
-            completedFilePaths.add(filePath.toString());
-
             // 카운터 업데이트
+            // completedFilePaths는 "더 이상 재처리할 필요가 없는 파일"을 의미하므로
+            // FAILED는 여기 포함시키지 않는다 (포함시키면 실패한 파일이 재개 대상에서 빠짐).
             if ("SUCCESS".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
               int sc = successCount.incrementAndGet();
               session.getStatistics().setSuccessCount(sc);
             } else if ("SKIPPED".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
               if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
                 int ac = alreadyProcessedCount.incrementAndGet();
                 session.getStatistics().setSkipCount(ac);
@@ -660,6 +883,33 @@ public class MainApiController {
         session.addRecentLog(String.format(
             "[일시정지 완료] %d개 처리됨, %d개 대기 중. 분석 이력에서 '이어서 분석' 버튼으로 재개하세요.",
             completedFilePaths.size(), pendingPaths.size()));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // 전부 실패한 경우 - COMPLETED로 표시하면 정상 완료로 오인할 수 있으므로
+      // 크레딧 소진과 동일하게 PAUSED로 저장해 '이어서 분석'으로 재시도할 수 있게 한다.
+      if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
+          && session.getStatistics().getFailureCount() > 0) {
+        List<String> pendingPaths = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(pendingPaths);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        List<String> errLog = session.getErrorLog();
+        String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+        session.addRecentLog(String.format(
+            "⚠️ [전체 실패] %d개 파일 모두 분석 실패 (사유: %s). 분석 이력에서 '이어서 분석' 버튼으로 재시도하세요.",
+            session.getStatistics().getFailureCount(), lastError));
         session.setCurrentPhase("PAUSED");
         return;
       }
@@ -756,11 +1006,11 @@ public class MainApiController {
             FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
                 sourceRootPath, isForceActive, finalOutPath);
 
-            completedFilePaths.add(filePath.toString());
-
             if ("SUCCESS".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
               session.getStatistics().setSuccessCount(successCount.incrementAndGet());
             } else if ("SKIPPED".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
               if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
                 session.getStatistics().setSkipCount(alreadyProcessedCount.incrementAndGet());
               } else { skipCount.incrementAndGet(); }
@@ -804,6 +1054,27 @@ public class MainApiController {
         sessionManager.saveSessionState(session);
         session.addRecentLog(String.format("[일시정지] %d개 완료, %d개 대기 중.",
             completedFilePaths.size(), newPending.size()));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // 재개했는데 이번에도 전부 실패한 경우 - 다시 PAUSED로 저장해 재시도 가능하게 한다.
+      if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
+          && session.getStatistics().getFailureCount() > 0) {
+        List<String> newPending = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(newPending);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        List<String> errLog = session.getErrorLog();
+        String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+        session.addRecentLog(String.format(
+            "⚠️ [전체 실패] 재시도한 %d개 파일 모두 다시 실패 (사유: %s).", newPending.size(), lastError));
         session.setCurrentPhase("PAUSED");
         return;
       }

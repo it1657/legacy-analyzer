@@ -655,13 +655,25 @@ public class ClaudeServiceImpl implements ClaudeService {
             return fixed.toString().stripTrailing();
         }
 
-        // HTML/XML 블록 주석 처리: // <!--로 시작하는 경우 올바른 HTML 형식으로 변환
+        // HTML/XML 블록 주석 처리: // <!--로 시작하는 경우 올바른 HTML 형식으로 변환 (HTML/XML 파일에서만)
         if (trimmed.startsWith("// <!--")) {
-            // "// <!--" 또는 "// -->" 같은 잘못된 형식을 "<!--" 또는 "-->"로 정정
-            String fixed = trimmed.replaceAll("^// <!--", "<!--")
-                                    .replaceAll("\n// <!--", "\n<!--")
-                                    .replaceAll("// -->$", "-->");
-            return fixed;
+            if (isXmlFamily(extension)) {
+                // "// <!--" 또는 "// -->" 같은 잘못된 형식을 "<!--" 또는 "-->"로 정정
+                String fixed = trimmed.replaceAll("^// <!--", "<!--")
+                                        .replaceAll("\n// <!--", "\n<!--")
+                                        .replaceAll("// -->$", "-->");
+                return fixed;
+            }
+            // Java 등 비-XML 파일: <!--/--> 마커만 제거하고 순수 // 스타일로 정규화
+            String stripped = trimmed.replace("<!--", "").replace("-->", "").trim();
+            String[] strippedLines = stripped.split("\n");
+            StringBuilder fixedNonXml = new StringBuilder();
+            for (String line : strippedLines) {
+                String l = line.trim();
+                if (l.startsWith("//")) l = l.substring(2).trim();
+                fixedNonXml.append(l.isEmpty() ? "//\n" : "// " + l + "\n");
+            }
+            return fixedNonXml.toString().stripTrailing();
         }
 
         // <!-- --> 블록: HTML/XML 파일에서만 허용, 그 외(Java 등)는 // 스타일로 변환
@@ -680,17 +692,25 @@ public class ClaudeServiceImpl implements ClaudeService {
             return fixed.toString().stripTrailing();
         }
 
-        // JavaScript/CSS 블록 내 // 주석으로 시작하는 HTML 블록 처리
+        // JavaScript/CSS 블록 내 // 주석으로 시작하는 HTML 블록 처리 (HTML/XML 파일에서만 해당)
         if (trimmed.startsWith("//") && trimmed.contains("<!--")) {
+            if (!isXmlFamily(extension)) {
+                // Java 등 비-XML 파일: 이미 // 형식이므로 변환 없이 그대로 사용
+                return comment;
+            }
             // <style>, <script> 블록 내 실수로 작성된 // <!-- 형식 정정
             String fixed = trimmed.replaceAll("^// <!--", "<!--")
                                     .replaceAll("\n// <!--", "\n<!--");
             return fixed;
         }
 
-        // HTML/XML 본문에서 발견된 // 주석 → HTML 주석으로 변환
+        // HTML/XML 본문에서 발견된 // 주석 → HTML 주석으로 변환 (HTML/XML 파일에서만 해당)
         // (HTML 파일의 경우 <script>, <style> 태그 외부에서는 // 주석이 유효하지 않음)
         if (trimmed.startsWith("//") && !trimmed.startsWith("// <!--")) {
+            if (!isXmlFamily(extension)) {
+                // Java 등 비-XML 파일: 이미 올바른 // 형식이므로 변환 없이 그대로 사용
+                return comment;
+            }
             // 여러 줄의 // 주석을 <!-- --> 형식으로 변환
             String[] lines = trimmed.split("\n");
             if (lines.length == 1) {
