@@ -98,7 +98,7 @@ window.onload = function() {
     currentSessionId = resumeSessionId;
     const logConsole = document.getElementById('terminalLog');
     if (logConsole) logConsole.textContent = '[재개] 이전 분석 세션을 이어서 진행합니다...\n';
-    updateSessionIdDisplay();
+    updateSessionControlPanel();
     startPolling();
   }
 
