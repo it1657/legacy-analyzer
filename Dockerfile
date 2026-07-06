@@ -7,6 +7,7 @@ WORKDIR /workspace
 # 의존성 캐시 레이어 분리 (소스 변경 시에도 의존성은 재다운로드하지 않도록)
 COPY gradlew settings.gradle build.gradle ./
 COPY gradle ./gradle
+RUN chmod +x gradlew
 RUN ./gradlew dependencies --no-daemon || true
 
 # 소스 복사 후 실제 빌드 (테스트는 이미지 빌드 단계에서 생략)
