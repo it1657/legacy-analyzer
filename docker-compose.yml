@@ -37,7 +37,7 @@ services:
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       TZ: Asia/Seoul
     ports:
-      - "8888:8888"
+      - "8803:8803"
     volumes:
       - session_data:/app/.analysis-sessions
 
