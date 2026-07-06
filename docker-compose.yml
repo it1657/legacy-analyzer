@@ -37,21 +37,9 @@ services:
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       TZ: Asia/Seoul
     ports:
-      - "8082:8082"
+      - "8888:8888"
     volumes:
       - session_data:/app/.analysis-sessions
-
-  nginx:
-    image: nginx:alpine
-    container_name: legacy-analyzer-nginx
-    restart: unless-stopped
-    depends_on:
-      - app
-    ports:
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
 
 volumes:
   postgres_data:
