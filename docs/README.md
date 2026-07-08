@@ -18,6 +18,59 @@ docs/
 
 ---
 
+## 🏗️ 프로젝트 전체 구조
+
+`docs/`는 프로젝트 루트(`legacy-analyzer/`)의 하위 디렉터리입니다. 전체 프로젝트는 **Spring Boot 3.2.5 (Java 17)** 기반 백엔드 애플리케이션이며, 다음과 같이 구성되어 있습니다.
+
+```
+legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
+├── src/main/java/com/legacy/
+│   ├── admin/          ← 관리자 대시보드·사용자 관리 컨트롤러
+│   ├── analysis/       ← 핵심 분석 도메인 (Claude API 연동, 세션/배치 관리)
+│   ├── api/
+│   │   ├── monitoring/ ← 성능 메트릭 수집 API
+│   │   └── usage/      ← Claude API 사용량 로깅
+│   ├── audit/          ← 감사 로그(Audit Log)
+│   ├── auth/           ← JWT 기반 인증/인가, Spring Security 설정
+│   ├── core/           ← 애플리케이션 엔트리포인트, 공통 에러 핸들러, DB 자동 선택기
+│   ├── notification/   ← 알림 기능
+│   └── statistics/     ← 시스템/사용자 통계
+├── src/main/resources/
+│   ├── application*.properties  ← 공통/H2/PostgreSQL 프로파일 설정
+│   ├── prompt.md, custom_spec.txt, CLAUDE.md  ← Claude 분석 프롬프트 & 스펙
+│   ├── static/{css,js}          ← 대시보드 정적 리소스
+│   └── templates/               ← Thymeleaf 뷰 (admin, auth, fragments 등)
+├── src/test/            ← 테스트 코드
+├── docs/                ← 프로젝트 문서 (현재 디렉터리)
+├── scripts/pptx/        ← PPTX 변환 자동화 스크립트 (PowerShell/Python)
+├── nginx/               ← nginx 설정 및 인증서 (리버스 프록시용, 현재 docker-compose 기본 구성에는 미포함)
+├── data/                ← H2 로컬 DB 파일
+├── Dockerfile, docker-compose.yml  ← 컨테이너 빌드/배포 구성 (app + postgres, 8803 포트)
+├── build.gradle, settings.gradle, gradlew  ← Gradle 빌드 설정
+└── logs/, app.log 등    ← 런타임 로그
+```
+
+### 백엔드 패키지 상세 (`src/main/java/com/legacy/`)
+
+| 패키지 | 역할 | 주요 클래스 |
+|---|---|---|
+| `admin` | 관리자 페이지 및 사용자 관리 | `AdminController`, `AdminPageController`, `UserController` |
+| `analysis` | 코드 분석 핵심 로직, Claude API 연동, 분석 세션/배치/재시도 처리 | `ClaudeService(Impl)`, `AnalysisSessionManager`, `SessionState`, `RetryHandler`, `CodeCleaner`, `TokenUsage`, `MainApiController` |
+| `api.monitoring` | 애플리케이션 성능 모니터링 | `MonitoringController`, `PerformanceMetricsCollector` |
+| `api.usage` | Claude API 호출 사용량 기록/필터링 | `ApiUsage`, `ApiUsageController`, `ApiUsageFilter`, `ApiUsageRepository` |
+| `audit` | 사용자 행위 감사 로그 | `AuditLog`, `AuditLogController`, `AuditLogService` |
+| `auth` | JWT 인증/인가, 사용자·권한 관리 | `SecurityConfig`, `JwtTokenProvider`, `JwtAuthenticationFilter`, `User`, `Role`, `AuthController` |
+| `core` | 앱 엔트리포인트, 공통 에러 핸들러, DB 소스 자동 선택(H2/PostgreSQL), PPT 리포트 생성 | `LegacyAnalyzerApplication`, `ApiErrorHandler`, `DatasourceAutoSelector`, `PresentationGeneratorService` |
+| `notification` | 사용자 알림 | `Notification`, `NotificationController`, `NotificationService` |
+| `statistics` | 시스템/사용자 통계 대시보드 데이터 | `StatisticsController`, `SystemStatisticsDto`, `UserStatisticsDto` |
+
+### 배포 구성 참고
+- **Dockerfile**: Debian 기반 이미지 사용 (ARM64/PGX 서버 호환을 위해 Alpine에서 전환)
+- **docker-compose.yml**: `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스로 구성. nginx 서비스는 최근 배포 방식 변경으로 compose 구성에서 제외됨
+- **DB**: 로컬 개발은 H2(`data/`), 운영 배포는 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) 프로파일 사용
+
+---
+
 ## 📊 presentations/ - 프레젠테이션 리소스
 
 ### FINAL_PROJECT_REPORT_Presentation.html
@@ -186,7 +239,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-06-19
+- **마지막 업데이트**: 2026-06-30
 - **작성자**: 정재훈
 - **관리자**: 개발팀
 
