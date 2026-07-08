@@ -419,6 +419,92 @@ public class PresentationGeneratorService {
     return types.isEmpty() ? fileNames.size() + "개 클래스" : String.join(" · ", types);
   }
 
+  /**
+   * Claude가 생성한 README 마크다운에서 "## 제목" 섹션의 본문을 추출한다 (다음 "## " 전까지).
+   * generateProjectReadmeWithClaude()가 지정한 고정 출력 형식(## 도메인별 기능 분석, ## 계층별 역할 정의 등)에 맞춰 파싱한다.
+   */
+  private String extractReadmeSection(String readme, String heading) {
+    if (readme == null || readme.isBlank()) return null;
+    String[] lines = readme.split("\n");
+    StringBuilder body = new StringBuilder();
+    boolean capturing = false;
+    for (String line : lines) {
+      String trimmed = line.trim();
+      if (trimmed.startsWith("## ")) {
+        if (capturing) break;
+        if (trimmed.substring(3).trim().equalsIgnoreCase(heading)) {
+          capturing = true;
+        }
+        continue;
+      }
+      if (capturing) body.append(line).append("\n");
+    }
+    String result = body.toString().trim();
+    return result.isEmpty() ? null : result;
+  }
+
+  /** 섹션 본문 내 "### 제목" 하위 섹션의 본문을 추출한다 (다음 "### " 또는 섹션 끝까지). */
+  private String extractReadmeSubSection(String sectionBody, String subHeading) {
+    if (sectionBody == null) return null;
+    String[] lines = sectionBody.split("\n");
+    StringBuilder body = new StringBuilder();
+    boolean capturing = false;
+    for (String line : lines) {
+      String trimmed = line.trim();
+      if (trimmed.startsWith("### ")) {
+        if (capturing) break;
+        if (trimmed.substring(4).trim().equalsIgnoreCase(subHeading)) {
+          capturing = true;
+        }
+        continue;
+      }
+      if (capturing) body.append(line).append("\n");
+    }
+    String result = body.toString().trim();
+    return result.isEmpty() ? null : result;
+  }
+
+  /** README 마크다운 문법(볼드·리스트 기호·백틱)을 제거하고 슬라이드에 넣기 좋은 길이로 자른다. */
+  private String cleanMarkdownSnippet(String md, int maxLen) {
+    if (md == null) return "";
+    String cleaned = md
+        .replaceAll("(?m)^[-*]\\s+", "• ")
+        .replaceAll("\\*\\*(.*?)\\*\\*", "$1")
+        .replaceAll("`", "")
+        .replaceAll("\\n{2,}", "\n")
+        .trim();
+    if (cleaned.length() > maxLen) {
+      cleaned = cleaned.substring(0, maxLen - 1).trim() + "…";
+    }
+    return cleaned;
+  }
+
+  /** 도메인별 기능 분석 섹션 본문에서 특정 패키지명이 언급된 줄을 찾아 설명으로 사용한다. */
+  private String findPackageDescriptionInReadme(String domainSection, String pkgName) {
+    if (domainSection == null || pkgName == null || pkgName.isBlank()) return null;
+    String[] lines = domainSection.split("\n");
+    String quoted = java.util.regex.Pattern.quote(pkgName);
+    java.util.regex.Pattern mention = java.util.regex.Pattern.compile(
+        "(?i)[`*#]{0,2}\\b" + quoted + "\\b[`*]{0,2}");
+    for (int i = 0; i < lines.length; i++) {
+      String line = lines[i].trim();
+      if (line.isEmpty() || !mention.matcher(line).find()) continue;
+      String desc = line
+          .replaceAll("^#+\\s*", "")
+          .replaceAll("^[-*]\\s*", "")
+          .replaceAll("(?i)\\*\\*" + quoted + "\\*\\*", "")
+          .replaceAll("(?i)`" + quoted + "`", "")
+          .replaceAll("(?i)\\b" + quoted + "\\b", "")
+          .replaceAll("^[:\\-\\s]+", "")
+          .trim();
+      if (desc.length() < 15 && i + 1 < lines.length) {
+        desc = (desc + " " + lines[i + 1].trim()).trim();
+      }
+      if (!desc.isEmpty()) return desc;
+    }
+    return null;
+  }
+
   // ── React / Vue / Next.js 프론트엔드 구조 ──────────────────
   private void renderFrontendStructure(XSLFSlide slide, Path root, String projectType) {
     String typeBadge = switch (projectType) {
@@ -1292,6 +1378,18 @@ public class PresentationGeneratorService {
     Path javaRoot = Paths.get(sourcePath).resolve("src").resolve("main").resolve("java");
     List<String[]> packages = buildPackageList(javaRoot);
 
+    // Claude가 실제로 분석한 README의 "도메인별 기능 분석" 섹션이 있으면 그 설명을 우선 사용하고,
+    // 언급이 없는 패키지만 파일명 기반 추론(inferPackageDescription)으로 보완한다.
+    String domainSection = extractReadmeSection(h.getReadmeContent(), "도메인별 기능 분석");
+    if (domainSection != null) {
+      for (String[] pkg : packages) {
+        String readmeDesc = findPackageDescriptionInReadme(domainSection, pkg[0]);
+        if (readmeDesc != null) {
+          pkg[1] = cleanMarkdownSnippet(readmeDesc, 120);
+        }
+      }
+    }
+
     if (packages.isEmpty()) {
       addText(slide, "Java 패키지 구조를 찾을 수 없습니다.", 40, 270, W - 80, 40, 13, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
       return;
@@ -1365,21 +1463,25 @@ public class PresentationGeneratorService {
         ? collectJavaFilesByLayer(javaRoot)
         : new java.util.LinkedHashMap<>();
 
+    // 마지막 항목은 Claude README의 "### OO 계층" 하위 섹션명 — 실제 분석 결과가 있으면 이 항목을 매칭해 우선 사용한다.
     String[][] layerDef = {
         {"🎮  Controller",
          "HTTP 요청 수신 및 응답 처리\n• @GetMapping / @PostMapping 등 매핑\n• 입력값 검증 및 응답 포맷팅\n• 인증·인가 검사 (Spring Security)\n• Service 계층 위임 처리",
-         "Controller"},
+         "Controller", "Controller 계층"},
         {"⚙️  Service",
          "핵심 비즈니스 로직 처리\n• 도메인 업무 규칙 구현\n• 여러 Repository 조합 처리\n• @Transactional 트랜잭션 관리\n• 도메인 이벤트 발행",
-         "Service"},
+         "Service", "Service 계층"},
         {"🗄️  Repository",
          "데이터베이스 접근 처리\n• JPA / MyBatis CRUD 처리\n• 페이징·정렬 쿼리 제공\n• @Query 커스텀 쿼리 정의\n• 영속성 컨텍스트 관리",
-         "Repository"},
+         "Repository", "Repository 계층"},
         {"📦  Entity / DTO",
          "데이터 구조 정의\n• @Entity: DB 테이블 매핑\n• 연관관계 (@OneToMany 등) 정의\n• DTO: 계층 간 데이터 전달\n• @Valid 유효성 검증 어노테이션",
-         "Entity"},
+         "Entity", "Entity / DTO"},
     };
     Color[] cardColors = {BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
+
+    // Claude가 실제로 분석한 README의 "계층별 역할 정의" 섹션이 있으면 각 계층 설명에 우선 반영한다.
+    String layerSection = extractReadmeSection(h.getReadmeContent(), "계층별 역할 정의");
 
     int cardW = (W - 100) / 2;  // ~430
     int cardH = (H - 130) / 2;  // ~205
@@ -1394,8 +1496,10 @@ public class PresentationGeneratorService {
       // 레이어명
       addText(slide, layerDef[i][0], x + 14, y + 8, cardW / 2 - 10, 24, 12, true, cardColors[i], TextParagraph.TextAlign.LEFT);
 
-      // 역할 설명 (좌측 절반)
-      addText(slide, layerDef[i][1], x + 14, y + 36, cardW / 2 - 20, cardH - 50, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      // 역할 설명 (좌측 절반) — README에 실제 분석 내용이 있으면 그것을, 없으면 기본 설명을 사용
+      String readmeDesc = layerSection != null ? extractReadmeSubSection(layerSection, layerDef[i][3]) : null;
+      String roleDesc = readmeDesc != null ? cleanMarkdownSnippet(readmeDesc, 260) : layerDef[i][1];
+      addText(slide, roleDesc, x + 14, y + 36, cardW / 2 - 20, cardH - 50, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
 
       // 세로 구분선
       addRect(slide, x + cardW / 2 + 4, y + 10, 1, cardH - 20, new Color(51, 65, 85));
