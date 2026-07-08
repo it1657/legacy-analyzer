@@ -90,9 +90,9 @@ if (tokenUsage != null) {
 #### 비용 계산 메서드 추가
 ```java
 private double calculateEstimatedCost(long inputTokens, long outputTokens, String modelName) {
-    // Claude 3.5 Haiku: $0.80/MTok (입력), $4.00/MTok (출력)
-    // Claude 3.5 Sonnet: $3.00/MTok (입력), $15.00/MTok (출력)
-    // Claude 3 Opus: $15.00/MTok (입력), $45.00/MTok (출력)
+    // Claude Haiku: $0.80/MTok (입력), $4.00/MTok (출력)
+    // Claude Sonnet: $3.00/MTok (입력), $15.00/MTok (출력)
+    // Claude Opus: $15.00/MTok (입력), $75.00/MTok (출력)
     
     // 모델별 가격 조회 후 비용 계산
     double inputCost = (inputTokens / 1_000_000.0) * inputPrice;
@@ -148,9 +148,9 @@ private double calculateEstimatedCost(long inputTokens, long outputTokens, Strin
 ## 🎯 모델별 가격표
 | 모델 | 입력 가격 | 출력 가격 |
 |------|---------|---------|
-| Claude 3.5 Haiku | $0.80/MTok | $4.00/MTok |
-| Claude 3.5 Sonnet | $3.00/MTok | $15.00/MTok |
-| Claude 3 Opus | $15.00/MTok | $45.00/MTok |
+| claude-haiku-4-5-20251001 | $0.80/MTok | $4.00/MTok |
+| claude-sonnet-4-6 | $3.00/MTok | $15.00/MTok |
+| claude-opus-4-8 | $15.00/MTok | $75.00/MTok |
 
 ## 💾 데이터베이스 저장
 AnalysisHistory 테이블:

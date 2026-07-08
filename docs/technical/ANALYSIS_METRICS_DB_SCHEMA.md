@@ -216,7 +216,8 @@ Repository.save(history)
 ```
 모델별 요금:
 - claude-haiku-4-5-20251001: $0.80/MTok(입력), $4.00/MTok(출력)
-- claude-opus-4-8: $15.00/MTok(입력), $45.00/MTok(출력)
+- claude-sonnet-4-6: $3.00/MTok(입력), $15.00/MTok(출력)
+- claude-opus-4-8: $15.00/MTok(입력), $75.00/MTok(출력)
 
 비용 계산식:
 estimatedCost = 
@@ -257,7 +258,7 @@ estimatedCost =
 ## 📝 기본 설정값
 ```properties
 # 기본 모델 (application.properties)
-anthropic.api.model=claude-haiku-4-5-20251001
+anthropic.api.model=claude-sonnet-4-6
 
 # 최대 토큰 제한
 anthropic.api.max-tokens=8192
@@ -269,14 +270,11 @@ anthropic.api.max-tokens=8192
 - [x] SystemStatisticsDto 필드 확장
 - [x] UserStatisticsDto 필드 확장
 - [x] StatisticsController 엔드포인트 추가
-- [ ] ClaudeServiceImpl에서 토큰 정보 추출 구현
-- [ ] MainApiController에서 토큰 정보 저장 구현
-- [ ] 관리자 대시보드 UI에 토큰 통계 탭 추가
-- [ ] 비용 계산 로직 구현
+- [x] ClaudeServiceImpl에서 토큰 정보 추출 구현
+- [x] MainApiController에서 토큰 정보 저장 구현
+- [x] 관리자 대시보드 UI에 토큰 통계 탭 추가
+- [x] 비용 계산 로직 구현
 - [ ] 단위 테스트 작성
 
 ## 🚀 다음 단계
-1. ClaudeServiceImpl 수정 - API 응답에서 토큰 정보 추출
-2. MainApiController 수정 - 토큰 정보를 AnalysisHistory에 저장
-3. 관리자 대시보드 업데이트 - 토큰/비용 통계 시각화
-4. 비용 계산 모듈 추가 - 정확한 API 비용 계산
+1. 단위 테스트 작성 - 토큰 추출/비용 계산 로직 검증
