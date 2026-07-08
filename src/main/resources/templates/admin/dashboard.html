@@ -1064,6 +1064,7 @@
                     ? h.sourcePath.replace(/.*[/\\]/, '')
                     : '-';
                 const statusClass = h.status === 'COMPLETED' ? 'badge-active' : 'badge-inactive';
+                const statusTitle = h.status === 'FAILED' && h.notes ? ` title="${h.notes.replace(/"/g, '&quot;')}"` : '';
                 const timeSec = h.processingTimeMs ? (h.processingTimeMs / 1000).toFixed(2) : '-';
                 const userLabel = h.displayName
                     ? `${h.displayName} <span style="color:#aaa;font-size:11px;">(${h.userId})</span>`
@@ -1079,7 +1080,7 @@
                     <td title="${sourcePathTooltip(h.sourcePath)}">${projectName}</td>
                     <td>${h.totalFiles ?? '-'}</td>
                     <td>${h.successCount ?? '-'}</td>
-                    <td><span class="badge ${statusClass}">${h.status}</span></td>
+                    <td><span class="badge ${statusClass}"${statusTitle}>${h.status}</span></td>
                     <td>${timeSec}초</td>
                     <td>
                         ${pptBtn}

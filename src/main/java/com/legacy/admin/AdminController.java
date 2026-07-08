@@ -192,6 +192,7 @@ public class AdminController {
             map.put("failureCount", history.getFailureCount());
             map.put("processingTimeMs", history.getProcessingTimeMs());
             map.put("status", history.getStatus());
+            map.put("notes", history.getNotes());
             map.put("modelName", history.getModelName());
             map.put("inputTokens", history.getInputTokens());
             map.put("outputTokens", history.getOutputTokens());
@@ -260,6 +261,7 @@ public class AdminController {
             map.put("failureCount", history.getFailureCount());
             map.put("processingTimeMs", history.getProcessingTimeMs());
             map.put("status", history.getStatus());
+            map.put("notes", history.getNotes());
             map.put("createdAt", history.getCreatedAt());
             return map;
           })

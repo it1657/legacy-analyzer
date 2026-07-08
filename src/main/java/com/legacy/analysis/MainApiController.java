@@ -999,8 +999,11 @@ public class MainApiController {
       if ("FAILED".equals(session.getCurrentPhase())) {
         AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
         if (failedHistory != null && userId != null) {
+          List<String> errLog = session.getErrorLog();
+          String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
           failedHistory.setStatus("FAILED");
           failedHistory.setCompletedAt(LocalDateTime.now());
+          failedHistory.setNotes(lastError);
           analysisHistoryRepository.save(failedHistory);
           notificationService.notifyAnalysisFailure(failedHistory);
         }
@@ -1159,12 +1162,27 @@ public class MainApiController {
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       session.setCurrentPhase("FAILED");
+      session.addErrorLog("재개 분석이 인터럽트되었습니다.");
       sessionManager.failSession(sessionId, "인터럽트");
     } catch (Exception e) {
       log.error("[재개 분석 중 예외]", e);
       session.setCurrentPhase("FAILED");
       session.addErrorLog("재개 분석 오류: " + e.getMessage());
       sessionManager.failSession(sessionId, e.getMessage());
+    } finally {
+      // FAILED 상태가 된 경우 이력에 사유를 남기고 알림 발송 (history가 있을 때만)
+      if ("FAILED".equals(session.getCurrentPhase())) {
+        AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
+        if (failedHistory != null && session.getUserId() != null) {
+          List<String> errLog = session.getErrorLog();
+          String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+          failedHistory.setStatus("FAILED");
+          failedHistory.setCompletedAt(LocalDateTime.now());
+          failedHistory.setNotes(lastError);
+          analysisHistoryRepository.save(failedHistory);
+          notificationService.notifyAnalysisFailure(failedHistory);
+        }
+      }
     }
   }
 
