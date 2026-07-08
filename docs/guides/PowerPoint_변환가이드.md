@@ -84,7 +84,7 @@ pip install python-pptx
 
 #### Python 스크립트 실행:
 ```bash
-cd C:\project\legacy-analyzer
+cd C:\project\legacy-analyzer\scripts\pptx
 python create_presentation.py
 ```
 

@@ -83,7 +83,7 @@ C:\project\legacy-analyzer\FINAL_PROJECT_REPORT_Presentation.pptx
 
 2. 관리자 대시보드 접속
    ```
-   http://localhost:8082/admin/dashboard
+   http://localhost:8803/admin/dashboard
    ```
 
 3. 로그인
