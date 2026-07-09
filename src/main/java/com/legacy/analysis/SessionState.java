@@ -81,6 +81,10 @@ public class SessionState {
   @Column(name = "username", length = 100)
   private String username;
 
+  // 분석 시작 시 사용자가 입력한 추가 요구사항 (prompt.md와 결합해 이 세션 전용 CLAUDE.md를 AI로 생성하는 데 사용)
+  @Column(name = "requirements", columnDefinition = "TEXT")
+  private String requirements;
+
   // 강제 재분석 여부
   @Column(name = "force_active")
   private boolean forceActive = false;
@@ -301,6 +305,8 @@ public class SessionState {
 
   public String getUsername() { return username; }
   public void setUsername(String username) { this.username = username; }
+  public String getRequirements() { return requirements; }
+  public void setRequirements(String requirements) { this.requirements = requirements; }
   public boolean isForceActive() { return forceActive; }
   public void setForceActive(boolean forceActive) { this.forceActive = forceActive; }
 

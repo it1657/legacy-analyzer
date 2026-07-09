@@ -72,6 +72,7 @@ public class UserActivityController {
             map.put("createdAt", h.getCreatedAt());
             map.put("completedAt", h.getCompletedAt());
             map.put("readmePath", h.getReadmePath());
+            map.put("hasClaudeMd", h.getClaudeMdContent() != null && !h.getClaudeMdContent().isBlank());
             return map;
           })
           .toList();
@@ -81,6 +82,30 @@ public class UserActivityController {
       log.error("[내 분석이력 조회 실패]", e);
       return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
           .body(Collections.singletonMap("message", "분석이력 조회 실패: " + e.getMessage()));
+    }
+  }
+
+  // 해당 분석에 실제 사용된 CLAUDE.md 내용 조회 (본인 이력만)
+  @GetMapping("/api/my/claude-md/{historyId}")
+  @ResponseBody
+  public ResponseEntity<?> getMyClaudeMdContent(
+      @PathVariable Long historyId, Authentication authentication) {
+    try {
+      User user = (User) authentication.getPrincipal();
+      AnalysisHistory history = analysisHistoryRepository.findById(historyId).orElse(null);
+      if (history == null) return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+      if (!history.getUserId().equals(user.getSeq())) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+
+      String content = history.getClaudeMdContent();
+      if (content == null || content.isBlank()) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(Collections.singletonMap("message", "이 분석에 저장된 CLAUDE.md 내용이 없습니다."));
+      }
+      return ResponseEntity.ok(Collections.singletonMap("content", content));
+    } catch (Exception e) {
+      log.error("[CLAUDE.md 조회 실패] historyId={}", historyId, e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+          .body(Collections.singletonMap("message", "CLAUDE.md 조회 실패: " + e.getMessage()));
     }
   }
 

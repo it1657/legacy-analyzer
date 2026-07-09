@@ -145,6 +145,16 @@ function toggleLocalPathSection() {
   if (icon) icon.textContent = isOpen ? '▶' : '▼';
 }
 
+// "추가 요구사항" 섹션 아코디언 토글
+function toggleAnalysisRequirementsSection() {
+  const content = document.getElementById('analysisRequirementsContent');
+  const icon = document.getElementById('analysisRequirementsToggleIcon');
+  if (!content) return;
+  const isOpen = content.style.display === 'block';
+  content.style.display = isOpen ? 'none' : 'block';
+  if (icon) icon.textContent = isOpen ? '▶' : '▼';
+}
+
 // ===================================================================
 // 1단계: 파일 상태 조회
 // ===================================================================
@@ -355,7 +365,8 @@ async function runBatchAnalysis() {
         outputPath,
         sessionId: currentSessionId,
         model: selectedModel,
-        forceActive: 'false'
+        forceActive: 'false',
+        requirements: document.getElementById('analysisRequirements')?.value?.trim() || ''
       })
     });
     startResp = await resp.json();
@@ -650,6 +661,35 @@ function downloadCompletionPpt() {
     .catch(err => alert(err.message));
 }
 
+/**
+ * 완료 결과 패널의 "CLAUDE.md 보기" 버튼 핸들러
+ * currentHistoryId를 기반으로 /api/my/claude-md/{id} 호출해 이번 분석에 실제 사용된 지침을 모달로 보여준다.
+ * (기존에는 "내 활동" 페이지까지 가야만 확인 가능해서 완료 직후 바로 볼 수 있도록 추가)
+ */
+function openCompletionClaudeMdModal() {
+  if (!currentHistoryId) {
+    alert('조회할 분석 이력 ID가 없습니다. 분석이 완료된 후 다시 시도해 주세요.');
+    return;
+  }
+  const modal = document.getElementById('completionClaudeMdModal');
+  const contentEl = document.getElementById('completionClaudeMdContent');
+  contentEl.textContent = '불러오는 중...';
+  modal.style.display = 'flex';
+  fetch(`/api/my/claude-md/${currentHistoryId}`)
+    .then(async res => {
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || '조회 실패');
+      contentEl.textContent = data.content;
+    })
+    .catch(err => {
+      contentEl.textContent = err.message || 'CLAUDE.md 내용을 불러올 수 없습니다.';
+    });
+}
+
+function closeCompletionClaudeMdModal() {
+  document.getElementById('completionClaudeMdModal').style.display = 'none';
+}
+
 function escapeHtml(str) {
   if (!str) return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -841,7 +881,13 @@ async function runUploadAnalysis() {
     return;
   }
 
-  logConsole.textContent += `[업로드 분석] ${entries.length}개 파일 업로드 중...\n`;
+  // 업로드 총량(write-back 복원용 전체 파일)과 실제 AI 분석 대상(지원 확장자만)을 구분해서 보여준다.
+  // 두 숫자가 다를 수 있는데(로그/설정/인증서 등은 원본 그대로 두고 분석은 스킵), 안내 없이 숫자만 보이면
+  // "파일이 누락됐다"는 오해를 사기 쉬워서 업로드 시작 시점에 미리 설명을 붙인다.
+  const analyzableCount = entries.filter(e => isUploadFileSupported(e.relPath)).length;
+  const skippedCount = entries.length - analyzableCount;
+  logConsole.textContent += `[업로드 분석] 총 ${entries.length}개 파일 업로드 중 `
+      + `(AI 주석 분석 대상 ${analyzableCount}개 / 로그·설정·인증서 등 원본 보존 대상 ${skippedCount}개)...\n`;
 
   currentSessionId = generateSessionId();
   isUploadModeSession = true;
@@ -854,6 +900,7 @@ async function runUploadAnalysis() {
   formData.append('sessionId', currentSessionId);
   formData.append('model', document.getElementById('modelSelect')?.value || 'claude-sonnet-4-6');
   formData.append('projectName', uploadSourceHandle.name);
+  formData.append('requirements', document.getElementById('analysisRequirements')?.value?.trim() || '');
 
   let startResp;
   try {

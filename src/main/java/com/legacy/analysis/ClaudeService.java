@@ -39,4 +39,23 @@ public interface ClaudeService {
      * @param model 모델 ID (예: claude-sonnet-4-6)
      */
     void setModel(String model);
+
+    /**
+     * prompt.md 표준 템플릿과 사용자가 입력한 추가 요구사항을 결합하여
+     * 이번 분석 세션 전용 CLAUDE.md(시스템 프롬프트) 내용을 AI로 생성한다.
+     * @param customRequirements 사용자 추가 요구사항 (없으면 null/빈 문자열 가능 — 이 경우 표준 템플릿만으로 생성)
+     * @return 생성된 CLAUDE.md 마크다운 전체 내용
+     */
+    String generateSessionClaudeMd(String customRequirements);
+
+    /**
+     * 특정 소스 경로(세션)에 대해 이번 분석에서 사용할 CLAUDE.md 내용을 등록한다.
+     * 등록된 값이 있으면 이후 해당 경로의 파일 분석은 이 내용을 시스템 프롬프트로 사용한다.
+     */
+    void setSessionSystemPrompt(String sourceFolderPath, String claudeMdContent);
+
+    /**
+     * 분석 세션 종료 시 등록해둔 세션 전용 시스템 프롬프트를 정리한다.
+     */
+    void clearSessionSystemPrompt(String sourceFolderPath);
 }

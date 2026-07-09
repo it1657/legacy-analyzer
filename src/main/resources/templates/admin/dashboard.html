@@ -799,6 +799,17 @@
         </div>
     </div>
 
+    <!-- 내 활동: CLAUDE.md 내용 보기 모달 (해당 분석에 실제 사용된 지침 내용을 DB에서 조회하여 표시) -->
+    <div id="myClaudeMdModal" class="modal">
+        <div class="modal-content-wide">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <div class="modal-header" style="margin-bottom:0;">📝 이 분석에 사용된 CLAUDE.md</div>
+                <button type="button" class="btn-cancel" onclick="closeMyClaudeMdModal()">닫기</button>
+            </div>
+            <pre id="myClaudeMdContent" style="background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; padding:1rem; font-size:12.5px; line-height:1.5; white-space:pre-wrap; overflow:auto; max-height:60vh; margin:0;">불러오는 중...</pre>
+        </div>
+    </div>
+
     <!-- 사용자 추가/수정 모달 -->
     <div id="userModal" class="modal">
         <div class="modal-content">
@@ -1398,15 +1409,19 @@
                 const model   = myShortModel(h.modelName);
                 const date    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
                 const stCls   = h.status === 'COMPLETED' ? 'badge-active' : 'badge-inactive';
-                const pptBtn  = h.status === 'COMPLETED'
+                let actionBtns = h.status === 'COMPLETED'
                     ? `<button class="btn-sm btn-ppt" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📋 보고서 PPT</button>`
                     : '-';
+                if (h.hasClaudeMd) {
+                    actionBtns += `<button class="btn-sm btn-claudemd" onclick="openMyClaudeMdModal(${h.id})" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기" style="font-size:11px;padding:3px 8px;background:#6c5ce7;color:white;border:none;border-radius:4px;cursor:pointer;">📝 CLAUDE.md</button>`;
+                }
                 return `<tr>
                     <td title="${sourcePathTooltip(h.sourcePath)}">${project}</td>
                     <td>${h.totalFiles??'-'}</td><td>${h.successCount??'-'}</td><td>${h.failureCount??'-'}</td>
                     <td style="font-size:11px;">${model}</td><td>${timeSec}</td><td>${cost}</td>
                     <td><span class="badge ${stCls}">${h.status}</span></td>
-                    <td style="font-size:11px;">${date}</td><td>${pptBtn}</td>
+                    <td style="font-size:11px;">${date}</td>
+                    <td style="white-space:nowrap;"><div style="display:flex;flex-wrap:wrap;gap:4px;">${actionBtns}</div></td>
                 </tr>`;
             }).join('');
         }
@@ -1464,6 +1479,29 @@
                 document.body.appendChild(a); a.click();
                 URL.revokeObjectURL(a.href); document.body.removeChild(a);
             } catch (e) { alert('PPT 다운로드 중 오류가 발생했습니다.'); }
+        }
+
+        // 내 활동: 분석에 실제 사용된 CLAUDE.md 내용 조회 및 모달 표시
+        async function openMyClaudeMdModal(historyId) {
+            const modal = document.getElementById('myClaudeMdModal');
+            const contentEl = document.getElementById('myClaudeMdContent');
+            contentEl.textContent = '불러오는 중...';
+            modal.classList.add('active');
+            const token = localStorage.getItem('token');
+            try {
+                const res = await fetch(`/api/my/claude-md/${historyId}`, {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || '조회 실패');
+                contentEl.textContent = data.content;
+            } catch (e) {
+                contentEl.textContent = e.message || 'CLAUDE.md 내용을 불러올 수 없습니다.';
+            }
+        }
+
+        function closeMyClaudeMdModal() {
+            document.getElementById('myClaudeMdModal').classList.remove('active');
         }
 
         function myShortModel(name) {

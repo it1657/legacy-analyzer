@@ -58,6 +58,14 @@
                     </select>
                     <span style="color: #8b949e; font-size: 12px; margin-left: 8px;">입력/출력 토큰 기준</span>
                 </div>
+                <div class="control-row" style="flex-direction: column; align-items: stretch; gap: 8px;">
+                    <div onclick="toggleAnalysisRequirementsSection()" style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold; user-select:none;">
+                        <span id="analysisRequirementsToggleIcon">▶</span> 📝 추가 요구사항
+                    </div>
+                    <div id="analysisRequirementsContent" style="display: none;">
+                        <textarea id="analysisRequirements" class="form-control" rows="3" placeholder="(선택) 이 프로젝트만의 분석 지침이나 도메인 특이사항을 입력하면, AI가 기본 분석 지침에 반영하여 이번 분석 전용 CLAUDE.md를 생성합니다. 비워두면 기본 지침으로 분석합니다." style="resize: vertical; min-height: 60px; width: 100%; box-sizing: border-box;"></textarea>
+                    </div>
+                </div>
                 <div id="uploadAnalysisSection" style="display: none; flex-direction: column; gap: 15px; border-top: 1px dashed #30363d; padding-top: 15px;">
                     <div class="control-row">
                         <label style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">📂 분석할 폴더:</label>
@@ -196,9 +204,14 @@
         <div class="card" style="border: 1px solid #1cc88a; background: #0d1117;">
             <div class="card-header" style="background: linear-gradient(135deg, #1cc88a 0%, #17a673 100%); color: white; font-weight: bold; font-size: 15px; display: flex; justify-content: space-between; align-items: center;">
                 <span>✅ 분석 완료 결과</span>
-                <button id="btnDownloadPpt" onclick="downloadCompletionPpt()" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5); color: white; padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold;" title="분석 결과 PPT 다운로드">
-                    📊 PPT 다운로드
-                </button>
+                <div>
+                    <button id="btnViewClaudeMd" onclick="openCompletionClaudeMdModal()" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5); color: white; padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold; margin-right: 6px;" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기">
+                        📝 CLAUDE.md 보기
+                    </button>
+                    <button id="btnDownloadPpt" onclick="downloadCompletionPpt()" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5); color: white; padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold;" title="분석 결과 PPT 다운로드">
+                        📊 PPT 다운로드
+                    </button>
+                </div>
             </div>
             <div class="card-body" style="padding: 16px;">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
@@ -242,6 +255,15 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- 📝 CLAUDE.md 내용 보기 모달 (완료 패널에서 즉시 확인용 - "내 활동" 페이지까지 이동할 필요 없이 바로 확인) -->
+    <div id="completionClaudeMdModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
+        <div style="background:#0d1117; border:1px solid #30363d; border-radius:8px; width:720px; max-width:95vw; max-height:85vh; display:flex; flex-direction:column; padding:1.25rem;">
+            <div style="color:#e6edf3; font-weight:bold; font-size:15px; margin-bottom:0.75rem;">📝 이 분석에 사용된 CLAUDE.md</div>
+            <pre id="completionClaudeMdContent" style="background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:8px; padding:1rem; font-size:12.5px; line-height:1.5; white-space:pre-wrap; overflow:auto; flex:1; min-height:200px; max-height:60vh; margin:0 0 1rem 0;">불러오는 중...</pre>
+            <button onclick="closeCompletionClaudeMdModal()" style="align-self:flex-end; background:#21262d; color:#e6edf3; border:1px solid #30363d; padding:6px 16px; border-radius:6px; cursor:pointer;">닫기</button>
         </div>
     </div>
 

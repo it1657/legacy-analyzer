@@ -126,6 +126,7 @@ public class MainApiController {
     String outputPath = request.getOrDefault("outputPath", "").replace("\\", "/");
     String clientSessionId = request.getOrDefault("sessionId", "");
     String selectedModel = request.getOrDefault("model", "").trim();
+    String requirements = request.getOrDefault("requirements", "").trim();
     boolean forceActive = "true".equalsIgnoreCase(request.getOrDefault("forceActive", "false"));
 
     // 모델 선택 적용
@@ -156,6 +157,7 @@ public class MainApiController {
     session.setUserId(userSeq);
     session.setUsername(userLoginId);
     session.setForceActive(forceActive);
+    if (!requirements.isBlank()) session.setRequirements(requirements);
     session.setCurrentPhase("STARTING");
     session.addRecentLog("[세션 시작] 사용자: " + userLoginId);
 
@@ -231,6 +233,7 @@ public class MainApiController {
       @RequestParam(value = "sessionId", required = false) String clientSessionId,
       @RequestParam(value = "model", required = false) String selectedModel,
       @RequestParam(value = "projectName", required = false) String projectName,
+      @RequestParam(value = "requirements", required = false) String requirements,
       Authentication authentication) {
 
     Map<String, Object> result = new HashMap<>();
@@ -284,6 +287,7 @@ public class MainApiController {
     SessionState session = sessionManager.createSession(sessionId, uploadRootStr, uploadRootStr);
     session.setUserId(userSeq);
     session.setUsername(userLoginId);
+    if (requirements != null && !requirements.isBlank()) session.setRequirements(requirements.trim());
     session.setCurrentPhase("STARTING");
     session.addRecentLog("[세션 시작] 업로드 분석 - 사용자: " + userLoginId + ", 파일 " + files.length + "개");
 
@@ -798,6 +802,21 @@ public class MainApiController {
         }
       }
 
+      // CLAUDE.md 생성: prompt.md 표준 템플릿 + 사용자 추가 요구사항(있는 경우)을 AI로 결합하여
+      // 이번 분석 세션 전용 시스템 프롬프트를 만들고, 파일별 분석에 사용하도록 등록한다.
+      session.addRecentLog("[시스템] 🧭 분석 지침(CLAUDE.md) 생성 중...");
+      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements());
+      claudeService.setSessionSystemPrompt(sourceRootPath.toString(), generatedClaudeMd);
+      if (history != null) {
+        history.setClaudeMdContent(generatedClaudeMd);
+        try {
+          analysisHistoryRepository.save(history);
+        } catch (Exception e) {
+          log.warn("[CLAUDE.md 저장 실패] {}", e.getMessage());
+        }
+      }
+      session.addRecentLog("[시스템] ✅ 분석 지침(CLAUDE.md) 생성 완료");
+
       // [3단계] 파일 병렬 분석
       // 기존에 처리된 파일 목록을 추적 파일에서 로드 (재분석 스킵용)
       loadTrackerIntoSession(session, finalOutputPath);
@@ -995,6 +1014,11 @@ public class MainApiController {
       session.addErrorLog("분석 중 오류: " + e.getMessage());
       sessionManager.failSession(sessionId, e.getMessage());
     } finally {
+      // 세션이 종료(완료·실패)되면 등록해둔 세션 전용 CLAUDE.md는 정리한다 (PAUSED는 재개 시 재사용하므로 유지)
+      // (sourceRootPath는 try 블록 지역 변수라 여기서 재접근 불가 — 파라미터로 다시 계산)
+      if ("FAILED".equals(session.getCurrentPhase()) || "COMPLETED".equals(session.getCurrentPhase())) {
+        claudeService.clearSessionSystemPrompt(Path.of(normalizedSourcePath).toString());
+      }
       // FAILED 상태가 된 경우 알림 발송 (history가 있을 때만)
       if ("FAILED".equals(session.getCurrentPhase())) {
         AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
@@ -1037,6 +1061,18 @@ public class MainApiController {
         history.setStatus("IN_PROGRESS");
         analysisHistoryRepository.save(history);
       }
+
+      // 최초 실행 시 생성해둔 CLAUDE.md를 재사용 (앱 재시작 등으로 메모리에 없을 수 있으므로 DB에서 복원).
+      // 저장된 내용이 없으면(구버전 세션 등) 새로 생성한다.
+      String claudeMdContent = (history != null) ? history.getClaudeMdContent() : null;
+      if (claudeMdContent == null || claudeMdContent.isBlank()) {
+        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements());
+        if (history != null) {
+          history.setClaudeMdContent(claudeMdContent);
+          analysisHistoryRepository.save(history);
+        }
+      }
+      claudeService.setSessionSystemPrompt(sourceRootPath.toString(), claudeMdContent);
 
       session.addRecentLog(String.format("[재개] %d개 파일 이어서 분석합니다...", fileList.size()));
 
@@ -1170,6 +1206,13 @@ public class MainApiController {
       session.addErrorLog("재개 분석 오류: " + e.getMessage());
       sessionManager.failSession(sessionId, e.getMessage());
     } finally {
+      // 세션이 종료(완료·실패)되면 등록해둔 세션 전용 CLAUDE.md는 정리한다 (PAUSED는 재개 시 재사용하므로 유지)
+      // (sourceRootPath는 try 블록 지역 변수라 여기서 재접근 불가 — session에서 다시 계산)
+      if ("FAILED".equals(session.getCurrentPhase()) || "COMPLETED".equals(session.getCurrentPhase())) {
+        if (session.getSourcePath() != null) {
+          claudeService.clearSessionSystemPrompt(Path.of(session.getSourcePath()).toString());
+        }
+      }
       // FAILED 상태가 된 경우 이력에 사유를 남기고 알림 발송 (history가 있을 때만)
       if ("FAILED".equals(session.getCurrentPhase())) {
         AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
@@ -1362,17 +1405,6 @@ public class MainApiController {
         session.addRecentLog("[경고] README 생성 중 오류 (분석은 완료됨): " + e.getMessage());
       }
 
-      // CLAUDE.md 내용 읽기 (DB 저장용)
-      String claudeMdContent = "";
-      try {
-        File mdFile = new File("src/main/resources/CLAUDE.md");
-        if (mdFile.exists()) {
-          claudeMdContent = Files.readString(mdFile.toPath(), StandardCharsets.UTF_8);
-        }
-      } catch (Exception e) {
-        log.warn("[CLAUDE.md 읽기 실패] {}", e.getMessage());
-      }
-
       // 완료 요약 메시지
       int failureCount = session.getStatistics().getFailureCount();
       String finalSummary = String.format(
@@ -1392,11 +1424,11 @@ public class MainApiController {
       session.updateMetadata("readmePath", readmeFullPath);
       session.updateMetadata("readmeContent", generatedReadmeContent);
 
-      // README 경로, 내용, CLAUDE.md, 평균 처리 시간 DB 저장
+      // README 경로, 내용, 평균 처리 시간 DB 저장
+      // (CLAUDE.md 내용은 분석 시작 시 이미 history에 저장되어 있으므로 여기서 덮어쓰지 않는다)
       if (history != null) {
         if (!readmeFullPath.isBlank()) history.setReadmePath(readmeFullPath);
         if (!generatedReadmeContent.isBlank()) history.setReadmeContent(generatedReadmeContent);
-        if (!claudeMdContent.isBlank()) history.setClaudeMdContent(claudeMdContent);
         history.setAvgTimePerFile(avgTimePerFile);
         try {
           analysisHistoryRepository.save(history);

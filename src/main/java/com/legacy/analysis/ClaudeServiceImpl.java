@@ -45,6 +45,9 @@ public class ClaudeServiceImpl implements ClaudeService {
     // 런타임 모델 오버라이드 (선택한 모델이 있으면 우선 사용)
     private volatile String modelOverride = null;
 
+    // 분석 세션(소스 경로)별로 AI가 생성한 CLAUDE.md 내용을 보관 (세션 종료 시 정리)
+    private final Map<String, String> sessionSystemPrompts = new java.util.concurrent.ConcurrentHashMap<>();
+
     // 지원 모델 목록과 표시명
     public static final Map<String, String> SUPPORTED_MODELS = new java.util.LinkedHashMap<>();
     static {
@@ -112,13 +115,97 @@ public class ClaudeServiceImpl implements ClaudeService {
         }
     }
 
-    /**
-     * 최초 가동 자동화 인프라:
-     * 리소스 폴더에 CLAUDE.md 설계서가 없거나 비어있으면, 표준 지침 내용을 담아 실물 파일로 자동 복원/생성합니다.
-     */
-    private String loadSystemPromptFromMd() {
-        java.io.File mdFile = new java.io.File("src/main/resources/" + systemPromptFilename);
+    @Override
+    public void setSessionSystemPrompt(String sourceFolderPath, String claudeMdContent) {
+        if (sourceFolderPath == null || claudeMdContent == null || claudeMdContent.isBlank()) return;
+        sessionSystemPrompts.put(sourceFolderPath, claudeMdContent);
+    }
 
+    @Override
+    public void clearSessionSystemPrompt(String sourceFolderPath) {
+        if (sourceFolderPath == null) return;
+        sessionSystemPrompts.remove(sourceFolderPath);
+    }
+
+    @Override
+    public String generateSessionClaudeMd(String customRequirements) {
+        String baseTemplate = loadBaseSystemPromptTemplate();
+        boolean hasRequirements = customRequirements != null && !customRequirements.isBlank();
+
+        if (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty()) {
+            log.warn("[CLAUDE.md 생성] API KEY 미설정으로 표준 템플릿을 그대로 사용합니다.");
+            return baseTemplate;
+        }
+
+        String systemPrompt =
+            "당신은 레거시 코드 분석 AI에게 내려줄 시스템 프롬프트(CLAUDE.md)를 작성하는 프롬프트 엔지니어입니다.\n" +
+            "아래 '표준 기본 지침'의 구조(섹션 제목, 분석 철학, 주석 우선순위, 금지 패턴 등)를 최대한 유지하면서,\n" +
+            "'추가 요구사항'이 있다면 관련 섹션을 보강하거나 새 섹션을 추가하여 최종 CLAUDE.md 문서를 작성하세요.\n" +
+            "추가 요구사항이 없으면 표준 기본 지침을 그대로(문구를 임의로 바꾸지 말고) 반환하세요.\n" +
+            "마크다운 문서 본문만 출력하세요. 서두·인사말·설명·추가 정보 요청은 절대 금지입니다.";
+
+        String userContent = "## 표준 기본 지침\n\n" + baseTemplate
+            + (hasRequirements
+                ? "\n\n## 추가 요구사항 (사용자 지정)\n\n" + customRequirements
+                : "\n\n## 추가 요구사항\n\n(없음 — 표준 기본 지침을 그대로 사용)");
+
+        WebClient claudeMdWebClient = WebClient.builder()
+            .baseUrl(apiUrl)
+            .defaultHeader("x-api-key", apiKey)
+            .defaultHeader("anthropic-version", "2023-06-01")
+            .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+            .build();
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", getCurrentModel());
+        requestBody.put("max_tokens", 4096);
+        requestBody.put("system", systemPrompt);
+
+        Map<String, String> userMsg = new HashMap<>();
+        userMsg.put("role", "user");
+        userMsg.put("content", userContent);
+        requestBody.put("messages", Collections.singletonList(userMsg));
+
+        try {
+            Map<?, ?> response = claudeMdWebClient.post()
+                .uri("/v1/messages")
+                .header("anthropic-version", "2023-06-01")
+                .bodyValue(requestBody)
+                .retrieve()
+                .onStatus(status -> !status.is2xxSuccessful(),
+                    cr -> cr.bodyToMono(String.class).defaultIfEmpty("")
+                        .flatMap(body -> Mono.error(new RuntimeException("CLAUDE.md 생성 API 오류: " + body))))
+                .bodyToMono(Map.class)
+                .block();
+
+            if (response != null && response.containsKey("content")) {
+                List<?> contentList = (List<?>) response.get("content");
+                if (contentList != null && !contentList.isEmpty()) {
+                    Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
+                    String generated = String.valueOf(contentMap.get("text"));
+                    extractAndStoreTokenUsage(response);
+                    log.info("[CLAUDE.md 생성 완료] 요구사항 반영={}, 길이={}자", hasRequirements, generated.length());
+                    return generated;
+                }
+            }
+            log.warn("[CLAUDE.md 생성 응답 파싱 실패] 표준 템플릿 사용");
+        } catch (Exception e) {
+            log.warn("[CLAUDE.md 생성 API 호출 실패, 표준 템플릿 사용] {}", e.getMessage());
+        }
+        return baseTemplate;
+    }
+
+    /** 세션 전용 CLAUDE.md가 등록되어 있으면 그것을, 없으면 prompt.md 표준 템플릿을 시스템 프롬프트로 사용한다. */
+    private String resolveSystemPrompt(String sourceFolderPath) {
+        String sessionPrompt = sourceFolderPath != null ? sessionSystemPrompts.get(sourceFolderPath) : null;
+        return sessionPrompt != null ? sessionPrompt : loadBaseSystemPromptTemplate();
+    }
+
+    /**
+     * 표준 기본 지침 템플릿(prompt.md)을 로드합니다. 리소스 폴더에 파일이 없거나 비어있으면
+     * 간소화된 기본 지침 내용을 반환합니다 (analyzeCodeWithClaude 호출 자체는 실패하지 않도록 함).
+     */
+    private String loadBaseSystemPromptTemplate() {
         // [레거시 시스템 분석 전문가 프롬프트 - 간소화]
         String defaultTemplate = """
                 레거시 시스템 분석가: 파일(fileName, 확장자: ${extension})의 비즈니스 로직만 한글 주석으로 설명하자.
@@ -148,30 +235,16 @@ public class ClaudeServiceImpl implements ClaudeService {
                 ]
                 주의: 마크다운 또는 다른 형식은 절대 금지. JSON만 반환.""";
 
-        if (!mdFile.exists() || mdFile.length() == 0) {
-            try {
-                java.io.File parentDir = mdFile.getParentFile();
-                if (parentDir != null && !parentDir.exists()) {
-                    boolean isCreated = parentDir.mkdirs();
-                    if (!isCreated) {
-                        log.warn("CLAUDE.md 저장 폴더 생성에 실패했거나 이미 존재합니다. 경로: {}", parentDir.getAbsolutePath());
-                    }
-                }
-                java.nio.file.Files.writeString(mdFile.toPath(), defaultTemplate, java.nio.charset.StandardCharsets.UTF_8);
-                log.warn("[시스템 경고] CLAUDE.md 파일 내용이 비어있어 기본 표준 지침서로 내용이 자동 원상복구되었습니다.");
-                return defaultTemplate;
-            } catch (Exception e) {
-                log.error("CLAUDE.md 자동 백업 생성 실패", e);
-            }
-        }
-
         try (InputStream is = getClass().getClassLoader().getResourceAsStream(systemPromptFilename)) {
-            String content = (is == null) ? java.nio.file.Files.readString(mdFile.toPath(), java.nio.charset.StandardCharsets.UTF_8)
-                    : new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            if (is == null) {
+                log.warn("[{} 없음] 간소화된 기본 지침으로 대체합니다.", systemPromptFilename);
+                return defaultTemplate;
+            }
+            String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             return content.trim().isEmpty() ? defaultTemplate : content;
         } catch (Exception e) {
-            log.error("CLAUDE.md 로드 중 예외 발생", e);
-            return "/* [오류] CLAUDE.md 로드 실패: " + e.getMessage() + " */";
+            log.error("prompt.md 로드 중 예외 발생", e);
+            return defaultTemplate;
         }
     }
 
@@ -373,7 +446,7 @@ public class ClaudeServiceImpl implements ClaudeService {
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
 
-        String baseSystemPrompt = loadSystemPromptFromMd();
+        String baseSystemPrompt = resolveSystemPrompt(sourceFolderPath);
 
         String finalSystemPrompt = baseSystemPrompt
                 .replace("${fileName}", fileName)

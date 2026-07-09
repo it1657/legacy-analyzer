@@ -54,7 +54,8 @@
 
     .table-wrap {
       background: white; border-radius: 10px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.07); overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+      overflow-x: auto; overflow-y: hidden;
     }
     table { width: 100%; border-collapse: collapse; }
     thead { background: #f8f9fa; border-bottom: 2px solid #e0e0e0; }
@@ -79,6 +80,8 @@
     .btn-ppt:hover { background: #d35400; }
     .btn-resume { background: #2980b9; color: white; }
     .btn-resume:hover { background: #1a6fa3; }
+    .btn-claudemd { background: #6c5ce7; color: white; }
+    .btn-claudemd:hover { background: #5b4bd6; }
 
     .section-title { font-size: 16px; font-weight: 700; color: #444; margin-bottom: 1rem; }
 
@@ -137,6 +140,14 @@
     .modal-msg { font-size:13px; margin-top:0.75rem; padding:0.5rem 0.75rem; border-radius:6px; display:none; }
     .modal-msg.ok  { background:#e8f5e9; color:#27ae60; display:block; }
     .modal-msg.err { background:#ffebee; color:#e74c3c; display:block; }
+
+    /* CLAUDE.md 내용 보기 모달 (프로필 모달보다 넓게) */
+    .modal-box.wide { width: 720px; max-width: 95vw; display: flex; flex-direction: column; max-height: 85vh; }
+    #claudeMdContent {
+      background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 8px;
+      padding: 1rem; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap;
+      overflow: auto; flex: 1; min-height: 200px; max-height: 60vh; margin-bottom: 1rem;
+    }
   </style>
 </head>
 <body>
@@ -298,6 +309,17 @@
   </div>
 </div>
 
+<!-- CLAUDE.md 내용 보기 모달 (해당 분석에 실제 사용된 지침 내용을 DB에서 조회하여 표시) -->
+<div id="claudeMdModal" class="modal-overlay">
+  <div class="modal-box wide">
+    <div class="modal-title">📝 이 분석에 사용된 CLAUDE.md</div>
+    <pre id="claudeMdContent">불러오는 중...</pre>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeClaudeMdModal()">닫기</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const token = localStorage.getItem('token');
   const username = localStorage.getItem('userId');
@@ -364,6 +386,9 @@
       } else if (h.status === 'PAUSED' && h.sessionId) {
         actionBtn = `<button class="btn-sm btn-resume" onclick="resumeAnalysis('${h.sessionId}', ${h.id})" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
       }
+      if (h.hasClaudeMd) {
+        actionBtn += `<button class="btn-sm btn-claudemd" onclick="openClaudeMdModal(${h.id})" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기">📝 CLAUDE.md</button>`;
+      }
       return `<tr>
         <td title="${sourcePathTooltip(h.sourcePath)}">${project}</td>
         <td>${h.totalFiles ?? '-'}</td>
@@ -374,9 +399,31 @@
         <td>${cost}</td>
         <td><span class="badge ${stCls}">${h.status}</span></td>
         <td style="font-size:11px;">${dateStr}</td>
-        <td>${actionBtn}</td>
+        <td style="white-space:nowrap;"><div style="display:flex; flex-wrap:wrap; gap:4px;">${actionBtn}</div></td>
       </tr>`;
     }).join('');
+  }
+
+  // 분석에 실제 사용된 CLAUDE.md 내용 조회 및 모달 표시
+  async function openClaudeMdModal(historyId) {
+    const modal = document.getElementById('claudeMdModal');
+    const contentEl = document.getElementById('claudeMdContent');
+    contentEl.textContent = '불러오는 중...';
+    modal.classList.add('active');
+    try {
+      const res = await fetch(`/api/my/claude-md/${historyId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || '조회 실패');
+      contentEl.textContent = data.content;
+    } catch (e) {
+      contentEl.textContent = e.message || 'CLAUDE.md 내용을 불러올 수 없습니다.';
+    }
+  }
+
+  function closeClaudeMdModal() {
+    document.getElementById('claudeMdModal').classList.remove('active');
   }
 
   // 이어서 분석 (PAUSED 세션 재개)
@@ -642,6 +689,9 @@
   // 모달 외부 클릭 시 닫기
   document.getElementById('profileModal').addEventListener('click', function(e) {
     if (e.target === this) closeProfileModal();
+  });
+  document.getElementById('claudeMdModal').addEventListener('click', function(e) {
+    if (e.target === this) closeClaudeMdModal();
   });
 
   function logout() {
