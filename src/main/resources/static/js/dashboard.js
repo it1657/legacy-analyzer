@@ -891,6 +891,10 @@ async function runUploadAnalysis() {
 
   currentSessionId = generateSessionId();
   isUploadModeSession = true;
+  isAnalysisPaused = false;
+  isPausedLocally = false;
+  isAnalysisComplete = false;
+  updateSessionControlPanel();
 
   const formData = new FormData();
   for (const entry of entries) {
