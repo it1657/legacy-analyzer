@@ -25,6 +25,12 @@ import java.util.stream.Stream;
 @Service
 public class PresentationGeneratorService {
 
+  private final ProjectTypeDetector projectTypeDetector;
+
+  public PresentationGeneratorService(ProjectTypeDetector projectTypeDetector) {
+    this.projectTypeDetector = projectTypeDetector;
+  }
+
   private static final int W = 960;
   private static final int H = 540;
 
@@ -71,12 +77,21 @@ public class PresentationGeneratorService {
     XMLSlideShow ppt = new XMLSlideShow();
     ppt.setPageSize(new Dimension(W, H));
 
+    // 프로젝트 타입은 슬라이드 생성 도중 바뀌지 않으므로 한 번만 감지해서 각 슬라이드에 전달한다
+    // (이전에는 슬라이드마다 detectProjectType을 재호출해 동일한 파일시스템 스캔이 반복됐다).
+    String sourcePath = h.getSourcePath();
+    Path root = (sourcePath != null && !sourcePath.isBlank()) ? Paths.get(sourcePath) : null;
+    String projectType = (root != null) ? projectTypeDetector.detectProjectType(root) : "general";
+    // "general" 타입일 때만 필요한 확장자별 파일 그룹도 한 번만 스캔해 두 슬라이드가 공유한다.
+    Map<String, List<String>> generalFilesByExt = (root != null && isUnknownType(projectType))
+        ? collectGeneralFilesByExtension(root, 4) : new LinkedHashMap<>();
+
     createProjectTitleSlide(ppt, h);
     createProjectScopeSlide(ppt, h);
-    createArchitectureSlide(ppt, h);
-    createDomainAnalysisSlide(ppt, h);
-    createLayerResponsibilitySlide(ppt, h);
-    createProjectStructureSlide(ppt, h);
+    createArchitectureSlide(ppt, h, root, projectType, generalFilesByExt);
+    createDomainAnalysisSlide(ppt, h, root, projectType);
+    createLayerResponsibilitySlide(ppt, h, root, projectType, generalFilesByExt);
+    createProjectStructureSlide(ppt, h, root, projectType);
     createResourceStructureSlide(ppt, h);    // resources/ 설정·XML mapper 구조
     createReadmeSlides(ppt, h.getReadmeContent());
     createProjectClosingSlide(ppt, h);
@@ -87,6 +102,11 @@ public class PresentationGeneratorService {
 
     log.info("✅ 프로젝트 보고서 PPTX 생성 완료: {}KB", baos.size() / 1024);
     return baos.toByteArray();
+  }
+
+  private boolean isUnknownType(String projectType) {
+    return !("java".equals(projectType) || "react".equals(projectType) || "nextjs".equals(projectType)
+        || "vue".equals(projectType) || "python".equals(projectType));
   }
 
   // ── 고객 납품용: 표지 ────────────────────────────────────────
@@ -165,19 +185,15 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 프로젝트/패키지 구조 ───────────────────────
-  private void createProjectStructureSlide(XMLSlideShow ppt, AnalysisHistory h) {
+  private void createProjectStructureSlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "프로젝트 구조", "Project & Package Structure");
 
-    String sourcePath = h.getSourcePath();
-    if (sourcePath == null || sourcePath.isBlank()) {
+    if (root == null) {
       addText(slide, "(소스 경로 정보 없음)", 40, 200, W - 80, 40, 14, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
       return;
     }
-
-    Path root = Paths.get(sourcePath);
-    String projectType = detectProjectType(root);
 
     switch (projectType) {
       case "java"                   -> renderJavaPackageStructure(slide, root, root.resolve("src").resolve("main").resolve("java"));
@@ -190,30 +206,6 @@ public class PresentationGeneratorService {
         addText(slide, tree, 60, 136, W - 108, H - 178, 10, false, new Color(186, 230, 253), TextParagraph.TextAlign.LEFT);
       }
     }
-  }
-
-  /** 프로젝트 타입 감지 (java / react / nextjs / vue / python / general) */
-  private String detectProjectType(Path root) {
-    if (Files.exists(root.resolve("src").resolve("main").resolve("java"))) return "java";
-
-    if (Files.exists(root.resolve("requirements.txt")) ||
-        Files.exists(root.resolve("pyproject.toml"))   ||
-        Files.exists(root.resolve("setup.py")))          return "python";
-
-    if (Files.exists(root.resolve("package.json"))) {
-      if (Files.exists(root.resolve("next.config.js"))  ||
-          Files.exists(root.resolve("next.config.ts"))  ||
-          Files.exists(root.resolve("next.config.mjs"))) return "nextjs";
-
-      if (Files.exists(root.resolve("src").resolve("views")) ||
-          Files.exists(root.resolve("vue.config.js"))) {
-        try (Stream<Path> files = Files.walk(root.resolve("src"), 3)) {
-          if (files.anyMatch(p -> p.toString().endsWith(".vue"))) return "vue";
-        } catch (IOException ignored) {}
-      }
-      return "react";
-    }
-    return "general";
   }
 
   /** Java 패키지 구조를 비즈니스 설명 카드 레이아웃으로 렌더링 */
@@ -484,8 +476,12 @@ public class PresentationGeneratorService {
     if (domainSection == null || pkgName == null || pkgName.isBlank()) return null;
     String[] lines = domainSection.split("\n");
     String quoted = java.util.regex.Pattern.quote(pkgName);
+    // \b(단어 경계)는 pkgName이 ".ts"처럼 비단어 문자로 시작/끝나면 절대 성립하지 않으므로,
+    // 앞뒤에 영숫자/밑줄이 아니라는 것만 확인하는 lookaround로 대체한다.
+    String boundary = "(?<![A-Za-z0-9_])";
+    String boundaryEnd = "(?![A-Za-z0-9_])";
     java.util.regex.Pattern mention = java.util.regex.Pattern.compile(
-        "(?i)[`*#]{0,2}\\b" + quoted + "\\b[`*]{0,2}");
+        "(?i)[`*#]{0,2}" + boundary + quoted + boundaryEnd + "[`*]{0,2}");
     for (int i = 0; i < lines.length; i++) {
       String line = lines[i].trim();
       if (line.isEmpty() || !mention.matcher(line).find()) continue;
@@ -494,7 +490,7 @@ public class PresentationGeneratorService {
           .replaceAll("^[-*]\\s*", "")
           .replaceAll("(?i)\\*\\*" + quoted + "\\*\\*", "")
           .replaceAll("(?i)`" + quoted + "`", "")
-          .replaceAll("(?i)\\b" + quoted + "\\b", "")
+          .replaceAll("(?i)" + boundary + quoted + boundaryEnd, "")
           .replaceAll("^[:\\-\\s]+", "")
           .trim();
       if (desc.length() < 15 && i + 1 < lines.length) {
@@ -775,9 +771,7 @@ public class PresentationGeneratorService {
             Path rel = root.relativize(p);
             for (int i = 0; i < rel.getNameCount(); i++) {
               String seg = rel.getName(i).toString();
-              if (seg.startsWith(".")) return false;
-              if (seg.equals("build") || seg.equals("target") || seg.equals("out")
-                  || seg.equals("bin") || seg.equals("node_modules") || seg.equals("__pycache__")) return false;
+              if (seg.startsWith(".") || GENERAL_SKIP_DIRS.contains(seg)) return false;
             }
             return true;
           })
@@ -1284,15 +1278,230 @@ public class PresentationGeneratorService {
     return result;
   }
 
+  // ── 소스 직접 파싱: 프론트엔드 파일을 4개 계층 버킷으로 분류 ──
+  private Map<String, List<String>> collectFrontendFilesByLayer(Path root, String projectType) {
+    Map<String, List<String>> result = new LinkedHashMap<>();
+    for (String label : new String[]{"Pages/Routes", "Components", "State/Hooks", "API/Services"}) {
+      result.put(label, new ArrayList<>());
+    }
+
+    Set<String> pageDirs  = Set.of("pages", "app", "views", "router", "routes");
+    Set<String> compDirs  = Set.of("components", "layouts");
+    Set<String> stateDirs = Set.of("hooks", "composables", "store", "stores", "context", "providers");
+    Set<String> apiDirs   = Set.of("api", "services");
+
+    List<Path> scanRoots = new ArrayList<>();
+    Path srcDir = root.resolve("src");
+    if (Files.exists(srcDir)) scanRoots.add(srcDir);
+    if ("nextjs".equals(projectType)) {
+      Path appDir = root.resolve("app"), pagesDir = root.resolve("pages");
+      if (Files.exists(appDir)) scanRoots.add(0, appDir);
+      if (Files.exists(pagesDir)) scanRoots.add(0, pagesDir);
+    }
+    if (scanRoots.isEmpty()) scanRoots.add(root);
+
+    // lib/utils/shared 같은 래퍼 디렉토리는 한 단계 더 들어가 api/services 등을 찾는다
+    // (예: src/lib/api, src/utils/services 같은 흔한 중첩 구조 대응)
+    Set<String> wrapperDirs = Set.of("lib", "utils", "shared");
+
+    for (Path scanRoot : scanRoots) {
+      try (Stream<Path> children = Files.list(scanRoot)) {
+        children.filter(Files::isDirectory).forEach(dir -> {
+          String name = dir.getFileName().toString().toLowerCase();
+          String bucket = pageDirs.contains(name)  ? "Pages/Routes"
+                         : compDirs.contains(name)  ? "Components"
+                         : stateDirs.contains(name) ? "State/Hooks"
+                         : apiDirs.contains(name)   ? "API/Services" : null;
+          if (bucket != null) {
+            collectBucketFiles(result, bucket, dir);
+            return;
+          }
+          if (!wrapperDirs.contains(name)) return;
+          try (Stream<Path> subDirs = Files.list(dir)) {
+            subDirs.filter(Files::isDirectory).forEach(subDir -> {
+              String subName = subDir.getFileName().toString().toLowerCase();
+              String subBucket = pageDirs.contains(subName)  ? "Pages/Routes"
+                                : compDirs.contains(subName)  ? "Components"
+                                : stateDirs.contains(subName) ? "State/Hooks"
+                                : apiDirs.contains(subName)   ? "API/Services" : null;
+              if (subBucket != null) collectBucketFiles(result, subBucket, subDir);
+            });
+          } catch (IOException ignored) {}
+        });
+      } catch (IOException e) {
+        log.warn("프론트엔드 계층 파일 수집 실패: {}", scanRoot, e);
+      }
+    }
+    return result;
+  }
+
+  private void collectBucketFiles(Map<String, List<String>> result, String bucket, Path dir) {
+    try (Stream<Path> files = Files.walk(dir, 4)) {
+      files.filter(Files::isRegularFile)
+           .map(p -> p.getFileName().toString())
+           .forEach(f -> result.get(bucket).add(f));
+    } catch (IOException ignored) {}
+  }
+
+  // ── 소스 직접 파싱: Python 파일을 4개 계층 버킷으로 분류 ────
+  private Map<String, List<String>> collectPythonFilesByLayer(Path root) {
+    Map<String, List<String>> result = new LinkedHashMap<>();
+    for (String label : new String[]{"Router/View", "Service/Logic", "Model", "Config"}) {
+      result.put(label, new ArrayList<>());
+    }
+
+    Set<String> routerDirs = Set.of("views", "urls", "routers", "api");
+    Set<String> serviceDirs = Set.of("services", "tasks");
+    Set<String> modelDirs = Set.of("models", "schemas", "serializers");
+    Set<String> configDirs = Set.of("config", "admin", "middleware", "migrations");
+
+    if (!Files.exists(root)) return result;
+    try (Stream<Path> children = Files.walk(root, 3)) {
+      children.filter(Files::isDirectory).forEach(dir -> {
+        String name = dir.getFileName().toString().toLowerCase();
+        String bucket = routerDirs.contains(name)  ? "Router/View"
+                       : serviceDirs.contains(name) ? "Service/Logic"
+                       : modelDirs.contains(name)   ? "Model"
+                       : configDirs.contains(name)  ? "Config" : null;
+        if (bucket == null) return;
+        try (Stream<Path> files = Files.walk(dir, 4)) {
+          files.filter(Files::isRegularFile)
+               .filter(p -> p.toString().endsWith(".py"))
+               .map(p -> p.getFileName().toString())
+               .forEach(f -> result.get(bucket).add(f));
+        } catch (IOException ignored) {}
+      });
+    } catch (IOException e) {
+      log.warn("Python 계층 파일 수집 실패: {}", root, e);
+    }
+    return result;
+  }
+
+  private static final Set<String> GENERAL_SKIP_DIRS = Set.of(
+      "node_modules", ".git", "build", "target", "out", "bin",
+      "__pycache__", ".venv", "venv", "dist", ".next", ".idea", ".gradle");
+
+  // ── 소스 직접 파싱: 확장자 기준 상위 N개 그룹 (general 타입용) ──
+  private LinkedHashMap<String, List<String>> collectGeneralFilesByExtension(Path root, int topN) {
+    Map<String, List<String>> byExt = new java.util.HashMap<>();
+    if (!Files.exists(root)) return new LinkedHashMap<>();
+    try (Stream<Path> stream = Files.walk(root, 8)) {
+      stream.filter(Files::isRegularFile)
+          .filter(p -> {
+            Path rel = root.relativize(p);
+            for (int i = 0; i < rel.getNameCount() - 1; i++) {
+              String seg = rel.getName(i).toString();
+              if (seg.startsWith(".") || GENERAL_SKIP_DIRS.contains(seg)) return false;
+            }
+            return true;
+          })
+          .forEach(p -> {
+            String name = p.getFileName().toString();
+            int i = name.lastIndexOf('.');
+            String ext = (i > 0) ? name.substring(i).toLowerCase() : "(확장자 없음)";
+            byExt.computeIfAbsent(ext, k -> new ArrayList<>()).add(name);
+          });
+    } catch (IOException e) {
+      log.warn("확장자별 파일 수집 실패: {}", root, e);
+    }
+
+    return byExt.entrySet().stream()
+        .sorted((a, b) -> {
+          int c = Integer.compare(b.getValue().size(), a.getValue().size());
+          return c != 0 ? c : a.getKey().compareTo(b.getKey());
+        })
+        .limit(topN)
+        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue,
+            (x, y) -> x, LinkedHashMap::new));
+  }
+
+  private String inferExtensionDescription(String ext) {
+    return switch (ext) {
+      case ".java"          -> "Java 소스 파일";
+      case ".ts", ".tsx"     -> "TypeScript 파일";
+      case ".js", ".jsx"     -> "JavaScript 파일";
+      case ".py"             -> "Python 스크립트";
+      case ".json"           -> "설정/데이터 파일";
+      case ".yml", ".yaml"   -> "설정 파일";
+      case ".xml"            -> "설정/구조 정의 파일";
+      case ".sql"            -> "데이터베이스 스크립트";
+      case ".md"             -> "문서 파일";
+      case ".css", ".scss"   -> "스타일시트";
+      case ".html"           -> "마크업 파일";
+      default                -> ext + " 확장자 파일 그룹";
+    };
+  }
+
+  /** general 타입: 최상위 폴더별 파일 목록. 폴더가 없는 완전 평면 구조면 확장자 그룹으로 폴백 */
+  private List<String[]> buildGeneralDirList(Path root) {
+    List<String[]> result = new ArrayList<>();
+    if (!Files.exists(root)) return result;
+    try (Stream<Path> children = Files.list(root)) {
+      children.filter(Files::isDirectory)
+          .filter(p -> !GENERAL_SKIP_DIRS.contains(p.getFileName().toString()))
+          .filter(p -> !p.getFileName().toString().startsWith("."))
+          .sorted()
+          .forEach(dir -> {
+            List<String> fileNames = new ArrayList<>();
+            try (Stream<Path> files = Files.walk(dir, 4)) {
+              files.filter(Files::isRegularFile)
+                   .map(p -> p.getFileName().toString())
+                   .forEach(fileNames::add);
+            } catch (IOException ignored) {}
+            if (fileNames.isEmpty()) return;
+
+            Map<String, Long> extCount = fileNames.stream()
+                .map(n -> { int i = n.lastIndexOf('.'); return i > 0 ? n.substring(i) : "기타"; })
+                .collect(Collectors.groupingBy(e -> e, Collectors.counting()));
+            String topExt = extCount.entrySet().stream()
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey).orElse("");
+
+            result.add(new String[]{
+                dir.getFileName().toString(),
+                fileNames.size() + "개 파일 (" + topExt + " 등)",
+                fileNames.size() + "개"
+            });
+          });
+    } catch (IOException e) {
+      log.warn("일반 프로젝트 디렉토리 목록 수집 실패: {}", root, e);
+    }
+
+    if (result.isEmpty()) {
+      collectGeneralFilesByExtension(root, 6).forEach((ext, files) ->
+          result.add(new String[]{ext, inferExtensionDescription(ext), files.size() + "개"}));
+    }
+    return result;
+  }
+
   // ── 고객 납품용: 시스템 아키텍처 슬라이드 ──────────────────
-  private void createArchitectureSlide(XMLSlideShow ppt, AnalysisHistory h) {
+  private void createArchitectureSlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType,
+      Map<String, List<String>> generalFilesByExt) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "시스템 아키텍처", "System Architecture");
 
-    // 계층 흐름 다이어그램
-    String[] flowNames = {"Client",  "Controller", "Service",    "Repository",  "Database"};
-    String[] flowSubs  = {"요청/응답", "REST API",  "비즈니스 로직", "데이터 접근", "저장소"};
+    // 계층 흐름 다이어그램 (프로젝트 타입별 라벨) — 소스 경로가 없어도 항상 렌더링한다.
+    String[] flowNames;
+    String[] flowSubs;
+    switch (projectType) {
+      case "react", "nextjs", "vue" -> {
+        flowNames = new String[]{"Browser", "Router/Pages", "Components", "State/API", "Backend"};
+        flowSubs  = new String[]{"사용자 요청", "화면 라우팅", "UI 렌더링", "상태·통신", "서버 API"};
+      }
+      case "python" -> {
+        flowNames = new String[]{"Client", "URL Router", "View/Service", "Model/ORM", "Database"};
+        flowSubs  = new String[]{"요청/응답", "URL 매핑", "비즈니스 로직", "데이터 접근", "저장소"};
+      }
+      case "java" -> {
+        flowNames = new String[]{"Client", "Controller", "Service", "Repository", "Database"};
+        flowSubs  = new String[]{"요청/응답", "REST API", "비즈니스 로직", "데이터 접근", "저장소"};
+      }
+      default -> {
+        flowNames = new String[]{"소스 파일", "확장자별 그룹", "빌드/설정", "산출물", "Runtime"};
+        flowSubs  = new String[]{"원본 코드", "타입별 분류", "빌드 도구", "배포 산출물", "실행 환경"};
+      }
+    }
     Color[]  flowBg    = {BG_CARD, BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
     Color[]  flowTxt   = {TEXT_GRAY, TEXT_WHITE, TEXT_WHITE, TEXT_WHITE, TEXT_WHITE};
     Color[]  flowSub   = {TEXT_GRAY, new Color(186, 230, 253), new Color(187, 247, 208),
@@ -1312,37 +1521,74 @@ public class PresentationGeneratorService {
       }
     }
     addRect(slide, 40, 182, W - 80, 1, BG_CARD);
+    if (root == null) return;
 
-    // 계층별 클래스 현황 (4열 카드)
-    String sourcePath = h.getSourcePath();
-    if (sourcePath == null || sourcePath.isBlank()) return;
-    Path javaRoot = Paths.get(sourcePath).resolve("src").resolve("main").resolve("java");
-    Map<String, List<String>> byLayer = collectJavaFilesByLayer(javaRoot);
-
-    String[] keys  = {"Controller", "Service", "Repository", "Entity"};
-    String[] icons = {"🎮", "⚙️", "🗄️", "📦"};
-    String[] roles = {
-        "REST API 엔드포인트\n요청 수신 및 응답 처리\n입력 검증·권한 확인",
-        "비즈니스 로직 처리\n도메인 규칙·흐름 제어\n트랜잭션 경계 설정",
-        "데이터베이스 접근\nCRUD 쿼리 실행\nJPA·MyBatis 처리",
-        "도메인 모델·DTO\n엔티티 및 전송 객체\n데이터 구조 정의"
-    };
+    // 계층별 파일 현황 (프로젝트 타입별 카드)
+    Map<String, List<String>> byLayer;
+    String[] keys;
+    String[] icons;
+    String[] roles;
+    switch (projectType) {
+      case "react", "nextjs", "vue" -> {
+        byLayer = collectFrontendFilesByLayer(root, projectType);
+        keys = new String[]{"Pages/Routes", "Components", "State/Hooks", "API/Services"};
+        icons = new String[]{"🧭", "🧩", "🪝", "🔌"};
+        roles = new String[]{
+            "화면 라우팅 및 페이지 구성\n• URL 경로별 화면 매핑\n• 데이터 로딩 및 초기 렌더\n• 레이아웃 조합",
+            "재사용 가능한 UI 컴포넌트\n• Props 기반 렌더링\n• 프레젠테이션 로직 담당\n• 스타일 캡슐화",
+            "상태 관리 및 로직 재사용\n• 전역/로컬 상태 관리\n• 커스텀 Hook·Composable\n• 사이드 이펙트 처리",
+            "서버 통신 및 외부 연동\n• REST/GraphQL 호출\n• 응답 데이터 가공\n• 에러 핸들링"
+        };
+      }
+      case "python" -> {
+        byLayer = collectPythonFilesByLayer(root);
+        keys = new String[]{"Router/View", "Service/Logic", "Model", "Config"};
+        icons = new String[]{"🧭", "⚙️", "🗄️", "🔧"};
+        roles = new String[]{
+            "요청 라우팅 및 뷰 처리\n• URL 매핑·요청 파라미터 검증\n• 응답 포맷팅",
+            "비즈니스 로직 처리\n• 도메인 규칙·흐름 제어\n• 외부 연동 처리",
+            "데이터 모델 정의\n• ORM 매핑·스키마 정의\n• 유효성 검증",
+            "환경 설정 및 부가 처리\n• 설정값 관리·마이그레이션\n• 미들웨어 처리"
+        };
+      }
+      case "java" -> {
+        Path javaRoot = root.resolve("src").resolve("main").resolve("java");
+        byLayer = collectJavaFilesByLayer(javaRoot);
+        keys = new String[]{"Controller", "Service", "Repository", "Entity"};
+        icons = new String[]{"🎮", "⚙️", "🗄️", "📦"};
+        roles = new String[]{
+            "REST API 엔드포인트\n요청 수신 및 응답 처리\n입력 검증·권한 확인",
+            "비즈니스 로직 처리\n도메인 규칙·흐름 제어\n트랜잭션 경계 설정",
+            "데이터베이스 접근\nCRUD 쿼리 실행\nJPA·MyBatis 처리",
+            "도메인 모델·DTO\n엔티티 및 전송 객체\n데이터 구조 정의"
+        };
+      }
+      default -> {
+        byLayer = generalFilesByExt;
+        keys = generalFilesByExt.keySet().toArray(new String[0]);
+        icons = new String[keys.length];
+        java.util.Arrays.fill(icons, "📄");
+        roles = new String[keys.length];
+        for (int i = 0; i < keys.length; i++) roles[i] = inferExtensionDescription(keys[i]);
+      }
+    }
     Color[] layerColors = {BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
 
-    int cW = (W - 100) / 4;
-    int cGap = (W - 80 - 4 * cW) / 3;
+    int cW = (W - 100) / Math.max(keys.length, 1);
+    int cGap = keys.length > 1 ? (W - 80 - keys.length * cW) / (keys.length - 1) : 0;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < keys.length; i++) {
       int x = 40 + i * (cW + cGap);
       int y = 190, cH = H - y - 14;
+      Color layerColor = layerColors[i % layerColors.length];
 
       addRoundCard(slide, x, y, cW, cH, BG_CARD);
-      addRect(slide, x, y, cW, 3, layerColors[i]);
+      addRect(slide, x, y, cW, 3, layerColor);
 
-      addText(slide, icons[i] + "  " + keys[i], x + 10, y + 8, cW - 60, 22, 12, true, layerColors[i], TextParagraph.TextAlign.LEFT);
+      addText(slide, icons[i] + "  " + keys[i], x + 10, y + 8, cW - 60, 22, 12, true, layerColor, TextParagraph.TextAlign.LEFT);
 
       List<String> files = new ArrayList<>(byLayer.getOrDefault(keys[i], List.of()));
-      if ("Entity".equals(keys[i])) files.addAll(byLayer.getOrDefault("DTO", List.of()));
+      if ("java".equals(projectType) && "Entity".equals(keys[i])) files.addAll(byLayer.getOrDefault("DTO", List.of()));
 
       addText(slide, files.size() + "개", x + cW - 46, y + 8, 40, 22, 11, true, TEXT_WHITE, TextParagraph.TextAlign.RIGHT);
       addText(slide, roles[i], x + 10, y + 34, cW - 20, 54, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
@@ -1364,19 +1610,22 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 도메인별 기능 분석 슬라이드 ────────────────
-  private void createDomainAnalysisSlide(XMLSlideShow ppt, AnalysisHistory h) {
+  private void createDomainAnalysisSlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "도메인별 기능 분석", "Domain Function Analysis");
 
-    String sourcePath = h.getSourcePath();
-    if (sourcePath == null || sourcePath.isBlank()) {
+    if (root == null) {
       addText(slide, "(소스 경로 정보 없음)", 40, 280, W - 80, 40, 14, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
       return;
     }
 
-    Path javaRoot = Paths.get(sourcePath).resolve("src").resolve("main").resolve("java");
-    List<String[]> packages = buildPackageList(javaRoot);
+    List<String[]> packages = switch (projectType) {
+      case "java" -> buildPackageList(root.resolve("src").resolve("main").resolve("java"));
+      case "react", "nextjs", "vue" -> buildFrontendDirList(root, projectType);
+      case "python" -> buildPythonModuleList(root);
+      default -> buildGeneralDirList(root);
+    };
 
     // Claude가 실제로 분석한 README의 "도메인별 기능 분석" 섹션이 있으면 그 설명을 우선 사용하고,
     // 언급이 없는 패키지만 파일명 기반 추론(inferPackageDescription)으로 보완한다.
@@ -1391,7 +1640,7 @@ public class PresentationGeneratorService {
     }
 
     if (packages.isEmpty()) {
-      addText(slide, "Java 패키지 구조를 찾을 수 없습니다.", 40, 270, W - 80, 40, 13, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
+      addText(slide, "프로젝트 구조를 찾을 수 없습니다.", 40, 270, W - 80, 40, 13, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
       return;
     }
 
@@ -1450,34 +1699,79 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 계층별 역할 정의 슬라이드 ──────────────────
-  private void createLayerResponsibilitySlide(XMLSlideShow ppt, AnalysisHistory h) {
+  private void createLayerResponsibilitySlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType,
+      Map<String, List<String>> generalFilesByExt) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "계층별 역할 정의", "Layer Responsibility");
 
-    String sourcePath = h.getSourcePath();
-    Path javaRoot = (sourcePath != null && !sourcePath.isBlank())
-        ? Paths.get(sourcePath).resolve("src").resolve("main").resolve("java")
-        : null;
-    Map<String, List<String>> byLayer = (javaRoot != null)
-        ? collectJavaFilesByLayer(javaRoot)
-        : new java.util.LinkedHashMap<>();
-
-    // 마지막 항목은 Claude README의 "### OO 계층" 하위 섹션명 — 실제 분석 결과가 있으면 이 항목을 매칭해 우선 사용한다.
-    String[][] layerDef = {
-        {"🎮  Controller",
-         "HTTP 요청 수신 및 응답 처리\n• @GetMapping / @PostMapping 등 매핑\n• 입력값 검증 및 응답 포맷팅\n• 인증·인가 검사 (Spring Security)\n• Service 계층 위임 처리",
-         "Controller", "Controller 계층"},
-        {"⚙️  Service",
-         "핵심 비즈니스 로직 처리\n• 도메인 업무 규칙 구현\n• 여러 Repository 조합 처리\n• @Transactional 트랜잭션 관리\n• 도메인 이벤트 발행",
-         "Service", "Service 계층"},
-        {"🗄️  Repository",
-         "데이터베이스 접근 처리\n• JPA / MyBatis CRUD 처리\n• 페이징·정렬 쿼리 제공\n• @Query 커스텀 쿼리 정의\n• 영속성 컨텍스트 관리",
-         "Repository", "Repository 계층"},
-        {"📦  Entity / DTO",
-         "데이터 구조 정의\n• @Entity: DB 테이블 매핑\n• 연관관계 (@OneToMany 등) 정의\n• DTO: 계층 간 데이터 전달\n• @Valid 유효성 검증 어노테이션",
-         "Entity", "Entity / DTO"},
-    };
+    Map<String, List<String>> byLayer;
+    // 각 행의 4번째 항목은 Claude README의 "### OO" 하위 섹션명 — null이면 매칭을 시도하지 않는다.
+    String[][] layerDef;
+    switch (projectType) {
+      case "react", "nextjs", "vue" -> {
+        byLayer = (root != null) ? collectFrontendFilesByLayer(root, projectType) : new LinkedHashMap<>();
+        layerDef = new String[][]{
+            {"🧭  Pages/Routes",
+             "화면 라우팅 및 페이지 구성\n• URL 경로별 화면 매핑\n• 데이터 로딩 및 초기 렌더\n• 레이아웃 조합",
+             "Pages/Routes", LayerLabels.FRONTEND[0]},
+            {"🧩  Components",
+             "재사용 가능한 UI 컴포넌트\n• Props 기반 렌더링\n• 프레젠테이션 로직 담당\n• 스타일 캡슐화",
+             "Components", LayerLabels.FRONTEND[1]},
+            {"🪝  State/Hooks",
+             "상태 관리 및 로직 재사용\n• 전역/로컬 상태 관리\n• 커스텀 Hook·Composable\n• 사이드 이펙트 처리",
+             "State/Hooks", LayerLabels.FRONTEND[2]},
+            {"🔌  API/Services",
+             "서버 통신 및 외부 연동\n• REST/GraphQL 호출\n• 응답 데이터 가공\n• 에러 핸들링",
+             "API/Services", LayerLabels.FRONTEND[3]},
+        };
+      }
+      case "python" -> {
+        byLayer = (root != null) ? collectPythonFilesByLayer(root) : new LinkedHashMap<>();
+        layerDef = new String[][]{
+            {"🧭  Router/View",
+             "요청 라우팅 및 뷰 처리\n• URL 매핑·요청 파라미터 검증\n• 응답 포맷팅",
+             "Router/View", LayerLabels.PYTHON[0]},
+            {"⚙️  Service/Logic",
+             "비즈니스 로직 처리\n• 도메인 규칙·흐름 제어\n• 외부 연동 처리",
+             "Service/Logic", LayerLabels.PYTHON[1]},
+            {"🗄️  Model",
+             "데이터 모델 정의\n• ORM 매핑·스키마 정의\n• 유효성 검증",
+             "Model", LayerLabels.PYTHON[2]},
+            {"🔧  Config",
+             "환경 설정 및 부가 처리\n• 설정값 관리·마이그레이션\n• 미들웨어 처리",
+             "Config", LayerLabels.PYTHON[3]},
+        };
+      }
+      case "java" -> {
+        Path javaRoot = (root != null) ? root.resolve("src").resolve("main").resolve("java") : null;
+        byLayer = (javaRoot != null) ? collectJavaFilesByLayer(javaRoot) : new LinkedHashMap<>();
+        layerDef = new String[][]{
+            {"🎮  Controller",
+             "HTTP 요청 수신 및 응답 처리\n• @GetMapping / @PostMapping 등 매핑\n• 입력값 검증 및 응답 포맷팅\n• 인증·인가 검사 (Spring Security)\n• Service 계층 위임 처리",
+             "Controller", LayerLabels.JAVA[0]},
+            {"⚙️  Service",
+             "핵심 비즈니스 로직 처리\n• 도메인 업무 규칙 구현\n• 여러 Repository 조합 처리\n• @Transactional 트랜잭션 관리\n• 도메인 이벤트 발행",
+             "Service", LayerLabels.JAVA[1]},
+            {"🗄️  Repository",
+             "데이터베이스 접근 처리\n• JPA / MyBatis CRUD 처리\n• 페이징·정렬 쿼리 제공\n• @Query 커스텀 쿼리 정의\n• 영속성 컨텍스트 관리",
+             "Repository", LayerLabels.JAVA[2]},
+            {"📦  Entity / DTO",
+             "데이터 구조 정의\n• @Entity: DB 테이블 매핑\n• 연관관계 (@OneToMany 등) 정의\n• DTO: 계층 간 데이터 전달\n• @Valid 유효성 검증 어노테이션",
+             "Entity", LayerLabels.JAVA[3]},
+        };
+      }
+      default -> {
+        byLayer = generalFilesByExt;
+        layerDef = generalFilesByExt.keySet().stream()
+            .map(ext -> new String[]{"📄  " + ext, inferExtensionDescription(ext) + "\n실제 프로젝트에 존재하는 파일 그룹입니다.", ext, null})
+            .toArray(String[][]::new);
+      }
+    }
+    if (layerDef.length == 0) {
+      addText(slide, "프로젝트 구조를 찾을 수 없습니다.", 40, 270, W - 80, 40, 13, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
+      return;
+    }
     Color[] cardColors = {BADGE_BLUE, BADGE_GRN, new Color(161, 98, 7), new Color(109, 40, 217)};
 
     // Claude가 실제로 분석한 README의 "계층별 역할 정의" 섹션이 있으면 각 계층 설명에 우선 반영한다.
@@ -1487,29 +1781,31 @@ public class PresentationGeneratorService {
     int cardH = (H - 130) / 2;  // ~205
     int[][] pos = {{40, 118}, {510, 118}, {40, 118 + cardH + 10}, {510, 118 + cardH + 10}};
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < layerDef.length && i < pos.length; i++) {
       int x = pos[i][0], y = pos[i][1];
+      Color cardColor = cardColors[i % cardColors.length];
       addRoundCard(slide, x, y, cardW, cardH, BG_CARD);
-      addRect(slide, x, y, cardW, 3, cardColors[i]);
-      addRect(slide, x, y, 3, cardH, cardColors[i]);
+      addRect(slide, x, y, cardW, 3, cardColor);
+      addRect(slide, x, y, 3, cardH, cardColor);
 
       // 레이어명
-      addText(slide, layerDef[i][0], x + 14, y + 8, cardW / 2 - 10, 24, 12, true, cardColors[i], TextParagraph.TextAlign.LEFT);
+      addText(slide, layerDef[i][0], x + 14, y + 8, cardW / 2 - 10, 24, 12, true, cardColor, TextParagraph.TextAlign.LEFT);
 
       // 역할 설명 (좌측 절반) — README에 실제 분석 내용이 있으면 그것을, 없으면 기본 설명을 사용
-      String readmeDesc = layerSection != null ? extractReadmeSubSection(layerSection, layerDef[i][3]) : null;
+      String readmeDesc = (layerSection != null && layerDef[i][3] != null)
+          ? extractReadmeSubSection(layerSection, layerDef[i][3]) : null;
       String roleDesc = readmeDesc != null ? cleanMarkdownSnippet(readmeDesc, 260) : layerDef[i][1];
       addText(slide, roleDesc, x + 14, y + 36, cardW / 2 - 20, cardH - 50, 8, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
 
       // 세로 구분선
       addRect(slide, x + cardW / 2 + 4, y + 10, 1, cardH - 20, new Color(51, 65, 85));
 
-      // 실제 클래스 목록 (우측 절반)
+      // 실제 파일 목록 (우측 절반)
       List<String> files = new ArrayList<>(byLayer.getOrDefault(layerDef[i][2], List.of()));
-      if ("Entity".equals(layerDef[i][2])) files.addAll(byLayer.getOrDefault("DTO", List.of()));
+      if ("java".equals(projectType) && "Entity".equals(layerDef[i][2])) files.addAll(byLayer.getOrDefault("DTO", List.of()));
 
       int fx = x + cardW / 2 + 14, fw = cardW / 2 - 22;
-      addText(slide, "프로젝트 클래스", fx, y + 8, fw - 40, 18, 9, true, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+      addText(slide, "프로젝트 파일", fx, y + 8, fw - 40, 18, 9, true, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
       addText(slide, files.size() + "개", x + cardW - 14, y + 8, 30, 18, 10, true, TEXT_WHITE, TextParagraph.TextAlign.RIGHT);
 
       int fy = y + 30;

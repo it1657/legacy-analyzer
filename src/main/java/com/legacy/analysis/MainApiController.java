@@ -4,6 +4,7 @@ import com.legacy.auth.JwtTokenProvider;
 import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
+import com.legacy.core.ProjectTypeDetector;
 import com.legacy.notification.NotificationService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -48,6 +49,7 @@ public class MainApiController {
   private final AnalysisHistoryRepository analysisHistoryRepository;
   private final JwtTokenProvider jwtTokenProvider;
   private final NotificationService notificationService;
+  private final ProjectTypeDetector projectTypeDetector;
 
   @Value("${app.analysis.max-file-size-bytes:524288}")
   private long maxFileSizeBytes;
@@ -77,7 +79,8 @@ public class MainApiController {
       RetryHandler retryHandler,
       AnalysisHistoryRepository analysisHistoryRepository,
       JwtTokenProvider jwtTokenProvider,
-      NotificationService notificationService) {
+      NotificationService notificationService,
+      ProjectTypeDetector projectTypeDetector) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -87,6 +90,7 @@ public class MainApiController {
     this.analysisHistoryRepository = analysisHistoryRepository;
     this.jwtTokenProvider = jwtTokenProvider;
     this.notificationService = notificationService;
+    this.projectTypeDetector = projectTypeDetector;
   }
 
   @GetMapping("/")
@@ -1719,6 +1723,19 @@ public class MainApiController {
       sb.append("### 주요 설정 정보\n\n").append(configInfo).append("\n");
     }
 
+    String projectType = projectTypeDetector.detectProjectType(outputPath);
+    switch (projectType) {
+      case "java" -> appendJavaStructure(sb, outputPath, session);
+      case "react", "nextjs", "vue" -> appendFrontendStructure(sb, outputPath, projectType, session);
+      case "python" -> appendPythonStructure(sb, outputPath, session);
+      default -> appendGeneralStructure(sb, outputPath, session);
+    }
+
+    return sb;
+  }
+
+  /** Java(Spring) 프로젝트: 계층별 클래스 통계 + 패키지 구조 (기존 로직 그대로 유지) */
+  private void appendJavaStructure(StringBuilder sb, Path outputPath, SessionState session) {
     // 출력 폴더를 직접 스캔하여 파일 분류
     Map<String, List<String>> layerFiles = new java.util.LinkedHashMap<>();
     layerFiles.put("Controller", new ArrayList<>());
@@ -1757,7 +1774,8 @@ public class MainApiController {
                 if (pkg != null && !pkg.isEmpty()) {
                   packageGroups.computeIfAbsent(pkg, k -> new ArrayList<>()).add(name);
                 }
-              } else if (lw.endsWith(".html") || lw.endsWith(".js") || lw.endsWith(".ts") || lw.endsWith(".vue") || lw.endsWith(".css")) {
+              } else if (lw.endsWith(".html") || lw.endsWith(".js") || lw.endsWith(".jsx") ||
+                         lw.endsWith(".ts") || lw.endsWith(".tsx") || lw.endsWith(".vue") || lw.endsWith(".css")) {
                 webFiles.add(path);
               } else if (lw.endsWith(".properties") || lw.endsWith(".yml") || lw.endsWith(".yaml") || lw.endsWith(".xml")) {
                 configFiles.add(path);
@@ -1805,8 +1823,216 @@ public class MainApiController {
       sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
     }
     sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
 
-    return sb;
+  /** React/Next.js/Vue 프로젝트: 디렉토리별 실제 파일명 나열 + 프론트엔드 통계 */
+  private void appendFrontendStructure(StringBuilder sb, Path root, String projectType, SessionState session) {
+    Set<String> skipDirs = Set.of("node_modules", "dist", ".next", ".nuxt", "build", "out",
+        ".git", ".idea", "coverage", ".turbo", ".vercel", "storybook-static");
+
+    List<Path> scanRoots = new ArrayList<>();
+    Path srcDir = root.resolve("src");
+    if (Files.exists(srcDir)) scanRoots.add(srcDir);
+    if ("nextjs".equals(projectType)) {
+      Path appDir = root.resolve("app"), pagesDir = root.resolve("pages");
+      if (Files.exists(appDir)) scanRoots.add(0, appDir);
+      if (Files.exists(pagesDir)) scanRoots.add(0, pagesDir);
+    }
+    if (scanRoots.isEmpty()) scanRoots.add(root);
+
+    Map<String, List<String>> dirFiles = new TreeMap<>();
+    int[] componentCount = {0};
+
+    for (Path scanRoot : scanRoots) {
+      try (Stream<Path> children = Files.list(scanRoot)) {
+        children.filter(Files::isDirectory)
+            .filter(p -> !skipDirs.contains(p.getFileName().toString()))
+            .filter(p -> !p.getFileName().toString().startsWith("."))
+            .forEach(dir -> {
+              String dirName = dir.getFileName().toString();
+              try (Stream<Path> files = Files.walk(dir, 4)) {
+                List<String> names = files.filter(Files::isRegularFile)
+                    .filter(this::isSupportedFile)
+                    .map(p -> p.getFileName().toString())
+                    .collect(Collectors.toList());
+                // 서로 다른 scanRoot(예: pages/api, src/api)에 같은 이름의 디렉토리가 있으면 병합한다.
+                if (!names.isEmpty()) {
+                  dirFiles.merge(dirName, names, (existing, added) -> {
+                    existing.addAll(added);
+                    return existing;
+                  });
+                }
+                componentCount[0] += (int) names.stream()
+                    .filter(n -> n.endsWith(".tsx") || n.endsWith(".jsx") || n.endsWith(".vue")).count();
+              } catch (IOException ignored) {}
+            });
+      } catch (IOException e) {
+        log.warn("[프론트엔드 구조 스캔 실패] {}", scanRoot, e);
+      }
+    }
+
+    if (!dirFiles.isEmpty()) {
+      sb.append("### 디렉토리별 파일 구조\n\n");
+      for (Map.Entry<String, List<String>> entry : dirFiles.entrySet()) {
+        List<String> files = entry.getValue();
+        sb.append("#### ").append(entry.getKey()).append(" (").append(files.size()).append("개)\n");
+        List<String> preview = files.subList(0, Math.min(files.size(), 20));
+        for (String fileName : preview) {
+          String role = inferFileRole(fileName);
+          sb.append("- ").append(fileName);
+          if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+          sb.append("\n");
+        }
+        if (files.size() > 20) sb.append("- 외 ").append(files.size() - 20).append("개\n");
+        sb.append("\n");
+      }
+    }
+
+    sb.append("### 분석 통계\n\n");
+    sb.append("- 프레임워크: ").append(switch (projectType) {
+      case "nextjs" -> "Next.js";
+      case "vue" -> "Vue 3";
+      default -> "React";
+    }).append("\n");
+    sb.append("- 컴포넌트 파일(.tsx/.jsx/.vue): ").append(componentCount[0]).append("개\n");
+    sb.append("- 디렉토리 수: ").append(dirFiles.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
+
+  /** Python 프로젝트: 디렉토리별 .py 파일 나열 + 프레임워크 감지 */
+  private void appendPythonStructure(StringBuilder sb, Path root, SessionState session) {
+    Set<String> skipDirs = Set.of(".git", ".venv", "venv", "__pycache__", ".pytest_cache",
+        "dist", "build", ".tox", "node_modules", ".idea", ".mypy_cache");
+
+    String framework = "Python";
+    try {
+      Path reqFile = root.resolve("requirements.txt");
+      if (Files.exists(reqFile)) {
+        String content = Files.readString(reqFile, StandardCharsets.UTF_8).toLowerCase();
+        if (content.contains("django")) framework = "Python / Django";
+        else if (content.contains("fastapi")) framework = "Python / FastAPI";
+        else if (content.contains("flask")) framework = "Python / Flask";
+      }
+    } catch (IOException ignored) {}
+
+    Map<String, List<String>> dirFiles = new TreeMap<>();
+    int[] pyCount = {0};
+    try (Stream<Path> children = Files.list(root)) {
+      children.filter(Files::isDirectory)
+          .filter(p -> !skipDirs.contains(p.getFileName().toString()))
+          .filter(p -> !p.getFileName().toString().startsWith("."))
+          .forEach(dir -> {
+            try (Stream<Path> files = Files.walk(dir, 5)) {
+              List<String> names = files.filter(Files::isRegularFile)
+                  .map(p -> p.getFileName().toString())
+                  .filter(n -> n.endsWith(".py"))
+                  .collect(Collectors.toList());
+              if (!names.isEmpty()) {
+                dirFiles.put(dir.getFileName().toString(), names);
+                pyCount[0] += names.size();
+              }
+            } catch (IOException ignored) {}
+          });
+    } catch (IOException e) {
+      log.warn("[Python 구조 스캔 실패] {}", root, e);
+    }
+
+    if (!dirFiles.isEmpty()) {
+      sb.append("### 디렉토리별 파일 구조\n\n");
+      for (Map.Entry<String, List<String>> entry : dirFiles.entrySet()) {
+        List<String> files = entry.getValue();
+        sb.append("#### ").append(entry.getKey()).append(" (").append(files.size()).append("개)\n");
+        List<String> preview = files.subList(0, Math.min(files.size(), 20));
+        for (String fileName : preview) {
+          String role = inferFileRole(fileName);
+          sb.append("- ").append(fileName);
+          if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+          sb.append("\n");
+        }
+        if (files.size() > 20) sb.append("- 외 ").append(files.size() - 20).append("개\n");
+        sb.append("\n");
+      }
+    }
+
+    sb.append("### 분석 통계\n\n");
+    sb.append("- 프레임워크: ").append(framework).append("\n");
+    sb.append("- Python 파일: ").append(pyCount[0]).append("개\n");
+    sb.append("- 디렉토리 수: ").append(dirFiles.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
+
+  /** 지원 프레임워크로 감지되지 않은 프로젝트: 확장자/최상위 폴더 기준 범용 분류 */
+  private void appendGeneralStructure(StringBuilder sb, Path root, SessionState session) {
+    Set<String> skipDirs = Set.of("node_modules", ".git", "build", "target", "out", "bin",
+        "__pycache__", ".venv", "venv", "dist", ".next", ".idea", ".gradle");
+
+    Map<String, List<String>> byExt = new java.util.HashMap<>();
+    Map<String, Integer> byTopDir = new TreeMap<>();
+
+    try (Stream<Path> stream = Files.walk(root, 8)) {
+      stream.filter(Files::isRegularFile)
+          .filter(p -> {
+            Path rel = root.relativize(p);
+            for (int i = 0; i < rel.getNameCount() - 1; i++) {
+              String seg = rel.getName(i).toString();
+              if (seg.startsWith(".") || skipDirs.contains(seg)) return false;
+            }
+            return true;
+          })
+          .forEach(p -> {
+            String name = p.getFileName().toString();
+            int i = name.lastIndexOf('.');
+            String ext = (i > 0) ? name.substring(i).toLowerCase() : "(확장자 없음)";
+            byExt.computeIfAbsent(ext, k -> new ArrayList<>()).add(name);
+
+            Path rel = root.relativize(p);
+            String topDir = rel.getNameCount() > 1 ? rel.getName(0).toString() : "(루트)";
+            byTopDir.merge(topDir, 1, Integer::sum);
+          });
+    } catch (IOException e) {
+      log.warn("[일반 프로젝트 구조 스캔 실패] {}", root, e);
+    }
+
+    // 개수가 같을 때 HashMap 순회 순서에 의존하지 않도록 확장자명 사전순으로 동률을 정리한다.
+    List<Map.Entry<String, List<String>>> topExts = byExt.entrySet().stream()
+        .sorted((a, b) -> {
+          int c = Integer.compare(b.getValue().size(), a.getValue().size());
+          return c != 0 ? c : a.getKey().compareTo(b.getKey());
+        })
+        .limit(8)
+        .collect(Collectors.toList());
+
+    sb.append("### 확장자별 파일 통계\n\n");
+    for (Map.Entry<String, List<String>> entry : topExts) {
+      sb.append("- ").append(entry.getKey()).append(": ").append(entry.getValue().size()).append("개\n");
+    }
+    sb.append("\n");
+
+    sb.append("### 최상위 폴더별 파일 개수\n\n");
+    byTopDir.forEach((dir, count) -> sb.append("- ").append(dir).append(": ").append(count).append("개\n"));
+    sb.append("\n");
+
+    sb.append("### 주요 파일 샘플\n\n");
+    for (Map.Entry<String, List<String>> entry : topExts) {
+      List<String> preview = entry.getValue().subList(0, Math.min(entry.getValue().size(), 10));
+      sb.append("- ").append(entry.getKey()).append(": ").append(String.join(", ", preview)).append("\n");
+    }
+    sb.append("\n");
+
+    sb.append("### 분석 통계\n\n");
+    sb.append("- 전체 파일: ").append(byExt.values().stream().mapToInt(List::size).sum()).append("개\n");
+    sb.append("- 확장자 종류: ").append(byExt.size()).append("개\n");
+    sb.append("- 최상위 폴더 수: ").append(byTopDir.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
   }
 
   private String detectBuildTool(Path outputPath) {
@@ -1975,7 +2201,12 @@ public class MainApiController {
     if (fileName.endsWith("Exception.java")) return "예외 처리";
     if (fileName.endsWith(".properties")) return "설정 파일";
     if (fileName.endsWith(".xml")) return "XML 설정/구조";
-    if (fileName.endsWith(".js") || fileName.endsWith(".jsx")) return "JavaScript/React";
+    if (fileName.endsWith(".tsx")) return "React 컴포넌트 (TypeScript)";
+    if (fileName.endsWith(".jsx")) return "React 컴포넌트";
+    if (fileName.endsWith(".vue")) return "Vue 컴포넌트";
+    if (fileName.endsWith(".ts")) return "TypeScript 모듈";
+    if (fileName.endsWith(".js")) return "JavaScript 모듈";
+    if (fileName.endsWith(".py")) return "Python 모듈";
     if (fileName.endsWith(".css") || fileName.endsWith(".scss")) return "스타일시트";
     if (fileName.endsWith("README.md")) return "프로젝트 설명서";
     return "";

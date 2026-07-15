@@ -1,6 +1,8 @@
 package com.legacy.analysis;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
+import com.legacy.core.LayerLabels;
+import com.legacy.core.ProjectTypeDetector;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -68,13 +70,15 @@ public class ClaudeServiceImpl implements ClaudeService {
     private final ApiErrorHandler apiErrorHandler;
     private final FileIoErrorHandler fileIoErrorHandler;
     private final SessionConfig sessionConfig;
+    private final ProjectTypeDetector projectTypeDetector;
 
     @Autowired
     public ClaudeServiceImpl(ApiErrorHandler apiErrorHandler, FileIoErrorHandler fileIoErrorHandler,
-        SessionConfig sessionConfig) {
+        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector) {
       this.apiErrorHandler = apiErrorHandler;
       this.fileIoErrorHandler = fileIoErrorHandler;
       this.sessionConfig = sessionConfig;
+      this.projectTypeDetector = projectTypeDetector;
     }
 
     @Override
@@ -588,37 +592,13 @@ public class ClaudeServiceImpl implements ClaudeService {
             }
         } catch (Exception ignored) {}
 
-        String systemPrompt =
-            "당신은 레거시 소프트웨어를 분석하는 시니어 SW 아키텍트입니다.\n" +
-            "제공된 프로젝트 패키지 구조와 파일 목록만으로 완전한 기술 인수인계 문서를 작성하세요.\n" +
-            "추가 정보를 요청하거나 '정보를 제공해 주세요'라는 문구는 절대 쓰지 마세요.\n" +
-            "파일명·패키지명으로 최대한 유추하여 구체적으로 작성하세요.\n\n" +
-            "## 각 섹션 작성 기준\n" +
-            "- **시스템 개요**: 프로젝트명, 추정 도메인(패키지명 기준), 주요 기능 2~3문장 요약\n" +
-            "- **아키텍처 구조**: Controller→Service→Repository→DB 레이어 흐름 설명.\n" +
-            "  각 레이어에 해당하는 실제 패키지/클래스명을 명시할 것\n" +
-            "- **도메인별 기능 분석**: 비즈니스 도메인(auth/order/payment 등)별로\n" +
-            "  무슨 업무를 처리하는지 구체적으로 설명. 실제 클래스명 언급 필수\n" +
-            "- **계층별 역할 정의**: Controller/Service/Repository/Entity 각 계층의\n" +
-            "  책임과 해당 실제 클래스 목록을 함께 작성\n" +
-            "- **기술 스택**: 파일 목록에서 실제로 확인되는 기술만 작성\n" +
-            "  (pom.xml/build.gradle/package.json/설정파일 기반)\n" +
-            "- **인수인계 체크리스트**: 이 프로젝트에 특화된 확인 항목만 작성\n" +
-            "  (일반적인 항목 금지, 실제 파일명·패키지명 포함)\n\n" +
-            "## 필수 출력 형식 (반드시 이 구조로 작성)\n" +
-            "## 시스템 개요\n" +
-            "## 아키텍처 구조\n" +
-            "### 레이어 흐름\n" +
-            "### 주요 패키지 역할\n" +
-            "## 도메인별 기능 분석\n" +
-            "## 계층별 역할 정의\n" +
-            "### Controller 계층\n" +
-            "### Service 계층\n" +
-            "### Repository 계층\n" +
-            "### Entity / DTO\n" +
-            "## 기술 스택\n" +
-            "## 인수인계 주요 체크리스트\n\n" +
-            "마크다운만 출력하세요. 서두·인사말·추가 설명·정보 요청은 절대 금지입니다.";
+        String projectType = projectTypeDetector.detectProjectType(sourceFolderPath);
+        String systemPrompt = switch (projectType) {
+            case "java" -> buildJavaReadmeSystemPrompt();
+            case "react", "nextjs", "vue" -> buildFrontendReadmeSystemPrompt();
+            case "python" -> buildPythonReadmeSystemPrompt();
+            default -> buildGeneralReadmeSystemPrompt();
+        };
 
         String userContent = "프로젝트명: " + projectName + "\n\n" + projectStructure;
 
@@ -666,33 +646,192 @@ public class ClaudeServiceImpl implements ClaudeService {
             log.warn("[README API 호출 실패, 폴백 사용] {}", e.getMessage());
         }
         // API 실패 시 패키지 구조 기반 폴백 README 생성
-        return buildFallbackReadme(projectName, projectStructure);
+        return buildFallbackReadme(projectName, projectStructure, projectType);
     }
 
-    /** API 호출 실패 시 패키지 구조 데이터로 기본 README 생성 */
-    private String buildFallbackReadme(String projectName, String projectStructure) {
+    /** Java(Spring) 프로젝트용 README 시스템 프롬프트 (기존 프롬프트 그대로 유지) */
+    private String buildJavaReadmeSystemPrompt() {
+        return "당신은 레거시 소프트웨어를 분석하는 시니어 SW 아키텍트입니다.\n" +
+            "제공된 프로젝트 패키지 구조와 파일 목록만으로 완전한 기술 인수인계 문서를 작성하세요.\n" +
+            "추가 정보를 요청하거나 '정보를 제공해 주세요'라는 문구는 절대 쓰지 마세요.\n" +
+            "파일명·패키지명으로 최대한 유추하여 구체적으로 작성하세요.\n\n" +
+            "## 각 섹션 작성 기준\n" +
+            "- **시스템 개요**: 프로젝트명, 추정 도메인(패키지명 기준), 주요 기능 2~3문장 요약\n" +
+            "- **아키텍처 구조**: Controller→Service→Repository→DB 레이어 흐름 설명.\n" +
+            "  각 레이어에 해당하는 실제 패키지/클래스명을 명시할 것\n" +
+            "- **도메인별 기능 분석**: 비즈니스 도메인(auth/order/payment 등)별로\n" +
+            "  무슨 업무를 처리하는지 구체적으로 설명. 실제 클래스명 언급 필수\n" +
+            "- **계층별 역할 정의**: Controller/Service/Repository/Entity 각 계층의\n" +
+            "  책임과 해당 실제 클래스 목록을 함께 작성\n" +
+            "- **기술 스택**: 파일 목록에서 실제로 확인되는 기술만 작성\n" +
+            "  (pom.xml/build.gradle/package.json/설정파일 기반)\n" +
+            "- **인수인계 체크리스트**: 이 프로젝트에 특화된 확인 항목만 작성\n" +
+            "  (일반적인 항목 금지, 실제 파일명·패키지명 포함)\n\n" +
+            "## 필수 출력 형식 (반드시 이 구조로 작성)\n" +
+            "## 시스템 개요\n" +
+            "## 아키텍처 구조\n" +
+            "### 레이어 흐름\n" +
+            "### 주요 패키지 역할\n" +
+            "## 도메인별 기능 분석\n" +
+            "## 계층별 역할 정의\n" +
+            "### " + LayerLabels.JAVA[0] + "\n" +
+            "### " + LayerLabels.JAVA[1] + "\n" +
+            "### " + LayerLabels.JAVA[2] + "\n" +
+            "### " + LayerLabels.JAVA[3] + "\n" +
+            "## 기술 스택\n" +
+            "## 인수인계 주요 체크리스트\n\n" +
+            "마크다운만 출력하세요. 서두·인사말·추가 설명·정보 요청은 절대 금지입니다.";
+    }
+
+    /** React/Next.js/Vue 프론트엔드 프로젝트용 README 시스템 프롬프트 */
+    private String buildFrontendReadmeSystemPrompt() {
+        return "당신은 레거시 소프트웨어를 분석하는 시니어 프론트엔드 아키텍트입니다.\n" +
+            "제공된 프로젝트 디렉토리 구조와 파일 목록만으로 완전한 기술 인수인계 문서를 작성하세요.\n" +
+            "이 프로젝트는 프론트엔드(React/Next.js/Vue) 프로젝트입니다. Controller/Service/Repository 같은\n" +
+            "백엔드 레이어드 아키텍처 용어는 절대 사용하지 마세요.\n" +
+            "추가 정보를 요청하거나 '정보를 제공해 주세요'라는 문구는 절대 쓰지 마세요.\n" +
+            "파일명·디렉토리명으로 최대한 유추하여 구체적으로 작성하세요.\n\n" +
+            "## 각 섹션 작성 기준\n" +
+            "- **시스템 개요**: 프로젝트명, 사용 프레임워크(React/Next.js/Vue), 주요 화면·기능 2~3문장 요약\n" +
+            "- **아키텍처 구조**: Browser → Router/Pages → Components → State/API 흐름 설명.\n" +
+            "  각 단계에 해당하는 실제 디렉토리/파일명을 명시할 것\n" +
+            "- **도메인별 기능 분석**: 화면·기능 단위(로그인/대시보드/설정 등)로\n" +
+            "  무슨 화면을 어떻게 구성하는지 구체적으로 설명. 실제 파일명 언급 필수\n" +
+            "- **계층별 역할 정의**: " + String.join(", ", LayerLabels.FRONTEND) + " 각 계층의\n" +
+            "  역할과 해당 실제 파일 목록을 함께 작성\n" +
+            "- **기술 스택**: 파일 목록에서 실제로 확인되는 기술만 작성\n" +
+            "  (package.json 의존성, 상태관리 라이브러리, 스타일링 방식 기반)\n" +
+            "- **인수인계 체크리스트**: 이 프로젝트에 특화된 확인 항목만 작성\n" +
+            "  (일반적인 항목 금지, 실제 파일명·디렉토리명 포함)\n\n" +
+            "## 필수 출력 형식 (반드시 이 구조로 작성)\n" +
+            "## 시스템 개요\n" +
+            "## 아키텍처 구조\n" +
+            "### 화면 흐름\n" +
+            "### 주요 디렉토리 역할\n" +
+            "## 도메인별 기능 분석\n" +
+            "## 계층별 역할 정의\n" +
+            "### " + LayerLabels.FRONTEND[0] + "\n" +
+            "### " + LayerLabels.FRONTEND[1] + "\n" +
+            "### " + LayerLabels.FRONTEND[2] + "\n" +
+            "### " + LayerLabels.FRONTEND[3] + "\n" +
+            "## 기술 스택\n" +
+            "## 인수인계 주요 체크리스트\n\n" +
+            "마크다운만 출력하세요. 서두·인사말·추가 설명·정보 요청은 절대 금지입니다.";
+    }
+
+    /** Python 프로젝트용 README 시스템 프롬프트 */
+    private String buildPythonReadmeSystemPrompt() {
+        return "당신은 레거시 소프트웨어를 분석하는 시니어 SW 아키텍트입니다.\n" +
+            "제공된 프로젝트 디렉토리 구조와 파일 목록만으로 완전한 기술 인수인계 문서를 작성하세요.\n" +
+            "이 프로젝트는 Python 프로젝트(Django/FastAPI/Flask 등)입니다.\n" +
+            "추가 정보를 요청하거나 '정보를 제공해 주세요'라는 문구는 절대 쓰지 마세요.\n" +
+            "파일명·디렉토리명으로 최대한 유추하여 구체적으로 작성하세요.\n\n" +
+            "## 각 섹션 작성 기준\n" +
+            "- **시스템 개요**: 프로젝트명, 사용 프레임워크, 주요 기능 2~3문장 요약\n" +
+            "- **아키텍처 구조**: Client → URL Router → View/Service → Model/ORM → DB 흐름 설명.\n" +
+            "  각 단계에 해당하는 실제 디렉토리/파일명을 명시할 것\n" +
+            "- **도메인별 기능 분석**: 비즈니스 도메인별로 무슨 업무를 처리하는지\n" +
+            "  구체적으로 설명. 실제 파일명 언급 필수\n" +
+            "- **계층별 역할 정의**: " + String.join(", ", LayerLabels.PYTHON) + " 각 계층의\n" +
+            "  책임과 해당 실제 파일 목록을 함께 작성\n" +
+            "- **기술 스택**: 파일 목록에서 실제로 확인되는 기술만 작성\n" +
+            "  (requirements.txt/pyproject.toml/설정파일 기반)\n" +
+            "- **인수인계 체크리스트**: 이 프로젝트에 특화된 확인 항목만 작성\n" +
+            "  (일반적인 항목 금지, 실제 파일명·디렉토리명 포함)\n\n" +
+            "## 필수 출력 형식 (반드시 이 구조로 작성)\n" +
+            "## 시스템 개요\n" +
+            "## 아키텍처 구조\n" +
+            "### 요청 흐름\n" +
+            "### 주요 디렉토리 역할\n" +
+            "## 도메인별 기능 분석\n" +
+            "## 계층별 역할 정의\n" +
+            "### " + LayerLabels.PYTHON[0] + "\n" +
+            "### " + LayerLabels.PYTHON[1] + "\n" +
+            "### " + LayerLabels.PYTHON[2] + "\n" +
+            "### " + LayerLabels.PYTHON[3] + "\n" +
+            "## 기술 스택\n" +
+            "## 인수인계 주요 체크리스트\n\n" +
+            "마크다운만 출력하세요. 서두·인사말·추가 설명·정보 요청은 절대 금지입니다.";
+    }
+
+    /** Java/프론트엔드/Python 어디에도 해당하지 않는 프로젝트용 README 시스템 프롬프트 */
+    private String buildGeneralReadmeSystemPrompt() {
+        return "당신은 레거시 소프트웨어를 분석하는 시니어 SW 아키텍트입니다.\n" +
+            "제공된 파일 확장자 통계와 최상위 폴더 구조만으로 완전한 기술 인수인계 문서를 작성하세요.\n" +
+            "이 프로젝트는 특정 프레임워크로 분류되지 않았습니다. Controller/Service/Repository 같은\n" +
+            "특정 아키텍처 패턴을 강제로 갖다 붙이지 말고, 실제 존재하는 확장자·폴더 구성을 근거로만 서술하세요.\n" +
+            "추가 정보를 요청하거나 '정보를 제공해 주세요'라는 문구는 절대 쓰지 마세요.\n\n" +
+            "## 각 섹션 작성 기준\n" +
+            "- **시스템 개요**: 프로젝트명, 확장자 통계로 추정되는 기술 스택, 2~3문장 요약\n" +
+            "- **아키텍처 구조**: 실제 존재하는 최상위 폴더/파일 그룹을 기준으로 구조를 설명\n" +
+            "- **도메인별 기능 분석**: 최상위 폴더 단위로 무엇을 담당하는지 설명. 실제 파일명 언급 필수\n" +
+            "- **계층별 역할 정의**: 제공된 확장자·폴더 통계를 근거로 실제 존재하는 그룹 3~5개만 자유 서식으로 서술\n" +
+            "  (없는 계층을 지어내지 말 것)\n" +
+            "- **기술 스택**: 파일 목록에서 실제로 확인되는 기술만 작성\n" +
+            "- **인수인계 체크리스트**: 이 프로젝트에 특화된 확인 항목만 작성\n\n" +
+            "## 필수 출력 형식 (반드시 이 구조로 작성, ### 하위 제목은 자유 서식)\n" +
+            "## 시스템 개요\n" +
+            "## 아키텍처 구조\n" +
+            "## 도메인별 기능 분석\n" +
+            "## 계층별 역할 정의\n" +
+            "## 기술 스택\n" +
+            "## 인수인계 주요 체크리스트\n\n" +
+            "마크다운만 출력하세요. 서두·인사말·추가 설명·정보 요청은 절대 금지입니다.";
+    }
+
+    /** API 호출 실패 시 패키지 구조 데이터로 기본 README 생성 (프로젝트 타입별 문구 분기) */
+    private String buildFallbackReadme(String projectName, String projectStructure, String projectType) {
+        String archNote = switch (projectType) {
+            case "react", "nextjs", "vue" -> "Pages/Components/Hooks/API 등 프론트엔드 디렉토리 구조를 확인하세요.";
+            case "python" -> "View/Service/Model 등 Python 모듈 구조를 확인하세요.";
+            case "java" -> "Controller / Service / Repository 패턴이 적용된 경우 각 레이어의 역할을 확인하세요.";
+            default -> "아래 확장자·폴더 통계를 참고해 실제 구성을 확인하세요.";
+        };
+        String componentNote = switch (projectType) {
+            case "react", "nextjs", "vue" -> "- `*.tsx` / `*.jsx` / `*.vue` : 화면 컴포넌트\n" +
+                "- `hooks/`, `store/`, `context/` : 상태 관리\n" +
+                "- `api/`, `services/` : 서버 통신\n" +
+                "- `pages/`, `app/`, `router/` : 화면 라우팅\n";
+            case "python" -> "- `views.py` / `routers/` : 요청 처리\n" +
+                "- `*_service.py` / `services/` : 비즈니스 로직\n" +
+                "- `models.py` / `schemas.py` : 데이터 모델\n";
+            case "java" -> "- `*Controller.java` : REST API 엔드포인트 (요청 수신 및 응답 처리)\n" +
+                "- `*Service.java` : 비즈니스 로직 처리\n" +
+                "- `*Repository.java` : 데이터베이스 접근 (CRUD)\n" +
+                "- `*Entity.java` / `*DTO.java` : 데이터 모델\n";
+            default -> "위 파일 목록을 참고해 코드베이스의 실제 구성을 확인하세요.\n";
+        };
+        String checklistNote = switch (projectType) {
+            case "react", "nextjs", "vue" -> "- [ ] package.json 의존성 및 빌드 스크립트 확인\n" +
+                "- [ ] 라우팅 구조 파악 (pages/app/router)\n" +
+                "- [ ] 상태 관리 방식 확인 (hooks/store/context)\n" +
+                "- [ ] API 연동 지점 확인 (api/services)\n";
+            case "python" -> "- [ ] requirements.txt / pyproject.toml 의존성 확인\n" +
+                "- [ ] URL 라우팅 구조 파악\n" +
+                "- [ ] 데이터 모델(ORM) 구조 확인\n";
+            case "java" -> "- [ ] 빌드 도구 및 의존성 확인 (pom.xml / build.gradle)\n" +
+                "- [ ] 데이터베이스 연결 설정 확인 (application.properties)\n" +
+                "- [ ] 주요 비즈니스 로직 흐름 파악 (Service 계층 중심)\n";
+            default -> "- [ ] 빌드/설정 파일 확인\n" +
+                "- [ ] 주요 폴더별 역할 파악\n";
+        };
+
         return "## 시스템 개요\n\n" +
             "**프로젝트명**: " + projectName + "\n\n" +
             "본 문서는 레거시 코드 자동 분석 시스템이 수집한 프로젝트 구조 정보를 기반으로 생성된 기술 인수인계 문서입니다.\n" +
             "(AI 분석 생성 실패 — 아래 구조 정보를 참고하세요)\n\n" +
             "## 아키텍처 구조\n\n" +
-            "소스 파일 목록 기반으로 파악된 레이어 구조입니다.\n" +
-            "Controller / Service / Repository 패턴이 적용된 경우 각 레이어의 역할을 확인하세요.\n\n" +
+            "소스 파일 목록 기반으로 파악된 구조입니다.\n" +
+            archNote + "\n\n" +
             "## 패키지별 기능 설명\n\n" +
             projectStructure + "\n\n" +
             "## 주요 컴포넌트 및 역할\n\n" +
-            "위 패키지 구조의 파일명을 기준으로 각 컴포넌트의 역할을 파악하세요.\n" +
-            "- `*Controller.java` : REST API 엔드포인트 (요청 수신 및 응답 처리)\n" +
-            "- `*Service.java` : 비즈니스 로직 처리\n" +
-            "- `*Repository.java` : 데이터베이스 접근 (CRUD)\n" +
-            "- `*Entity.java` / `*DTO.java` : 데이터 모델\n\n" +
+            componentNote + "\n" +
             "## 기술 스택 (파일 목록 기반 유추)\n\n" +
             "파일 확장자 및 설정 파일 기반으로 기술 스택을 확인하세요.\n\n" +
             "## 인수인계 주요 체크리스트\n\n" +
-            "- [ ] 소스 코드 전체 구조 파악 (위 패키지 구조 참조)\n" +
-            "- [ ] 빌드 도구 및 의존성 확인 (pom.xml / build.gradle)\n" +
-            "- [ ] 데이터베이스 연결 설정 확인 (application.properties)\n" +
-            "- [ ] 주요 비즈니스 로직 흐름 파악 (Service 계층 중심)\n" +
+            "- [ ] 소스 코드 전체 구조 파악 (위 구조 정보 참조)\n" +
+            checklistNote +
             "- [ ] 외부 API 및 연동 시스템 목록 확인\n";
     }
 
