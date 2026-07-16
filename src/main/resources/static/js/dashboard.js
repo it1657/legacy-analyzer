@@ -680,6 +680,8 @@ function startPolling() {
         pollingIntervalId = null;
         if (status.phase === 'PAUSED') {
           handleAnalysisPaused(status);
+        } else if (status.phase === 'CANCELLED') {
+          handleAnalysisCancelled(status);
         } else {
           handleAnalysisCompletion(status);
         }
@@ -782,9 +784,47 @@ function handleAnalysisPaused(status) {
 
   setLocalPathControlsDisabled(false);
   setUploadControlsDisabled(false);
+  setExtraControlsLocked(false);
 
   // 업로드 분석 중 일시정지된 경우: 아직 분석이 끝난 게 아니므로 write-back/서버 정리는 하지 않는다.
   // (재개 시 서버가 같은 업로드 폴더를 계속 써야 함)
+  isUploadModeSession = false;
+
+  clearSessionFromStorage();
+  currentSessionId = null;
+  updateSessionControlPanel();
+}
+
+// ===================================================================
+// 분석 취소 처리 - COMPLETED와 달리 결과가 없으므로 완료 패널/write-back을 띄우지 않는다.
+// PAUSED와 달리 '이어서 분석'으로 재개할 수 없는 최종 종료 상태다(취소 시 대기 파일 목록을 저장하지 않음).
+// ===================================================================
+function handleAnalysisCancelled(status) {
+  isAnalysisComplete = true;
+  if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+
+  const progressPanel = document.getElementById('progressPanel');
+  const overlay = document.getElementById('analysisOverlay');
+  const sessionControlPanel = document.getElementById('sessionControlPanel');
+  const logConsole = document.getElementById('terminalLog');
+
+  if (progressPanel) progressPanel.style.display = "none";
+  if (overlay) overlay.style.display = "none";
+  if (sessionControlPanel) sessionControlPanel.style.display = "none";
+
+  if (logConsole) {
+    appendTerminalLine(logConsole, '⚠️ [취소됨] 분석이 취소되었습니다.');
+  }
+
+  setLocalPathControlsDisabled(false);
+  setUploadControlsDisabled(false);
+  setExtraControlsLocked(false);
+
+  // 업로드 분석이 취소된 경우: 서버에 남은 스테이징 파일을 정리한다 (write-back은 하지 않음 - 결과가 불완전하므로).
+  if (isUploadModeSession && uploadSessionIdForWriteback) {
+    fetch(`/api/upload-session/${uploadSessionIdForWriteback}/cleanup`, { method: 'POST' }).catch(() => {});
+  }
+  uploadSessionIdForWriteback = null;
   isUploadModeSession = false;
 
   clearSessionFromStorage();

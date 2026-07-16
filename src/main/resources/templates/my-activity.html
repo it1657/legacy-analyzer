@@ -315,6 +315,7 @@
     <div class="modal-title">📝 이 분석에 사용된 CLAUDE.md</div>
     <pre id="claudeMdContent">불러오는 중...</pre>
     <div class="modal-actions">
+      <button class="btn-sm btn-claudemd" onclick="downloadClaudeMd()">⬇ 다운로드</button>
       <button class="btn-cancel" onclick="closeClaudeMdModal()">닫기</button>
     </div>
   </div>
@@ -386,7 +387,10 @@
       } else if (h.status === 'PAUSED' && h.sessionId) {
         actionBtn = `<button class="btn-sm btn-resume" onclick="resumeAnalysis('${h.sessionId}', ${h.id})" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
       }
-      if (h.hasClaudeMd) {
+      // CANCELLED/FAILED는 파일 분석이 실제로 진행되지 못했을 수 있어 다운로드할 의미 있는 결과물이
+      // 없다 - CLAUDE.md는 파일 처리 시작 전(취소돼도 이미 저장됨)에 생성되므로 상태와 별개로
+      // hasClaudeMd만 보고 버튼을 띄우면 취소된 항목에도 노출되던 문제가 있었다.
+      if (h.hasClaudeMd && (h.status === 'COMPLETED' || h.status === 'PAUSED')) {
         actionBtn += `<button class="btn-sm btn-claudemd" onclick="openClaudeMdModal(${h.id})" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기">📝 CLAUDE.md</button>`;
       }
       return `<tr>
@@ -424,6 +428,21 @@
 
   function closeClaudeMdModal() {
     document.getElementById('claudeMdModal').classList.remove('active');
+  }
+
+  // 모달에 이미 불러와진 내용을 그대로 파일로 내려받는다 (별도 API 호출 없이 클라이언트에서 Blob 생성).
+  function downloadClaudeMd() {
+    const content = document.getElementById('claudeMdContent').textContent;
+    if (!content || content === '불러오는 중...') return;
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'CLAUDE.md';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   // 이어서 분석 (PAUSED 세션 재개)

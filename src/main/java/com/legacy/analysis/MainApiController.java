@@ -677,6 +677,21 @@ public class MainApiController {
     session.setPausedAt(LocalDateTime.now());
     session.setCurrentPhase("PAUSED");
     session.setStatus("PAUSED");
+
+    // AnalysisHistory("내 분석 이력" 목록에 표시되는 값)도 즉시 갱신한다. 실제 파일 처리 루프는
+    // 이미 진행 중이던 파일들(스레드풀 동시 처리분)이 다 끝나야 pauseDetected를 감지해 history를
+    // 저장하므로, 이 즉시 반영이 없으면 클릭 직후 잠깐(길게는 수십 초) "IN_PROGRESS"로 잘못 보인다.
+    // 최종 카운트가 반영된 저장은 그 처리 루프가 끝난 뒤 다시 한 번 일어나므로 여기서는 상태만 앞당겨 반영한다.
+    try {
+      AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
+      if (history != null && !"COMPLETED".equals(history.getStatus())) {
+        history.setStatus("PAUSED");
+        analysisHistoryRepository.save(history);
+      }
+    } catch (Exception e) {
+      log.warn("[일시정지 이력 상태 갱신 실패] sessionId={}", sessionId, e);
+    }
+
     response.put("success", true);
     response.put("message", "분석이 일시 중지되었습니다.");
     return response;
@@ -737,6 +752,20 @@ public class MainApiController {
         session.setCurrentPhase("CANCELLED");
         session.addRecentLog("[취소됨] 분석이 사용자에 의해 취소되었습니다.");
       }
+
+      // AnalysisHistory("내 분석 이력" 목록에 표시되는 값)도 즉시 갱신한다. CLAUDE.md 생성 같은
+      // 블로킹 API 호출 도중에 취소하면, 그 호출이 끝나고 파일 처리 루프까지 돌아야(때로는 수십 초)
+      // runAnalysis()가 취소를 감지해 history를 저장하므로, 이 즉시 반영이 없으면 그 사이 계속
+      // "IN_PROGRESS"로 잘못 보인다. 최종 카운트가 반영된 저장은 그 처리 루프가 끝난 뒤 다시 일어난다.
+      try {
+        AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
+        if (history != null && !"COMPLETED".equals(history.getStatus())) {
+          history.setStatus("CANCELLED");
+          analysisHistoryRepository.save(history);
+        }
+      } catch (Exception e) {
+        log.warn("[취소 이력 상태 갱신 실패] sessionId={}", sessionId, e);
+      }
     }
     response.put("success", true);
     return response;
@@ -789,12 +818,18 @@ public class MainApiController {
 
       // [1단계] 파일 복사
       log.info("[복사 단계 시작] sessionId={}", sessionId);
+      // 업로드 분석은 sourceRootPath 자체가 서버 임시 스테이징 폴더라 outputPath 개념이 없다
+      // (실제 출력 폴더 선택은 브라우저 쪽 write-back 단계에서 처리되며 서버로는 전달되지 않는다).
+      // 이 경고는 "서버 경로 직접 지정" 모드에서 출력 경로를 비워 원본을 직접 수정하는 경우에만 의미가 있다.
+      boolean isUploadSession = sourceRootPath.startsWith(getUploadStorageRoot());
       if (isCopyMode) {
         session.setCurrentPhase("COPYING");
         performCopy(session, sourceRootPath, finalProjectOutputPath);
       } else {
         session.setCurrentPhase("ANALYZING");
-        session.addRecentLog("[경고/시스템] 출력 경로 미지정으로 원본 직접 수정 모드가 활성화되었습니다.\n");
+        if (!isUploadSession) {
+          session.addRecentLog("[경고/시스템] 출력 경로 미지정으로 원본 직접 수정 모드가 활성화되었습니다.\n");
+        }
       }
       log.info("[복사 단계 완료] sessionId={}", sessionId);
 
@@ -1016,6 +1051,23 @@ public class MainApiController {
         return;
       }
 
+      // 사용자가 취소한 경우 - 아래로 흘러가면 finalizeAnalysis()가 COMPLETED로 기록해버리므로
+      // (취소된 파일들은 성공도 실패도 아니라 카운트 자체가 없어 "전부 실패" 분기에도 안 걸림)
+      // 여기서 명시적으로 CANCELLED로 마무리한다.
+      if (session.isCancelled()) {
+        if (history != null) {
+          history.setStatus("CANCELLED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.setCurrentPhase("CANCELLED");
+        return;
+      }
+
       // 전부 실패한 경우 - COMPLETED로 표시하면 정상 완료로 오인할 수 있으므로
       // 크레딧 소진과 동일하게 PAUSED로 저장해 '이어서 분석'으로 재시도할 수 있게 한다.
       if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
@@ -1199,6 +1251,30 @@ public class MainApiController {
       latch.await();
       executor.shutdown();
 
+      // 크레딧 소진으로 중단 - PAUSED로 저장하여 충전 후 재개 가능하게 한다 (누락되어 있던 처리를 보강).
+      // 이 체크가 없으면 아래 취소 체크에 걸려 "재시도 가능한 PAUSED"가 아니라 "CANCELLED"로 잘못 기록된다.
+      if (creditExhausted.get()) {
+        List<String> newPending = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(newPending);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.setCurrentPhase("PAUSED");
+        session.addRecentLog(String.format(
+            "💳 [크레딧 소진 일시정지] %d개 완료, %d개 미처리. 충전 후 '이어서 분석'으로 재개하세요.",
+            completedFilePaths.size(), newPending.size()));
+        return;
+      }
+
       if (pauseDetected.get()) {
         List<String> newPending = fileList.stream()
             .map(Path::toString)
@@ -1213,6 +1289,21 @@ public class MainApiController {
         session.addRecentLog(String.format("[일시정지] %d개 완료, %d개 대기 중.",
             completedFilePaths.size(), newPending.size()));
         session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // 사용자가 취소한 경우 - 아래로 흘러가면 finalizeAnalysis()가 COMPLETED로 기록해버리므로 여기서 마무리한다.
+      if (session.isCancelled()) {
+        if (history != null) {
+          history.setStatus("CANCELLED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.setCurrentPhase("CANCELLED");
         return;
       }
 

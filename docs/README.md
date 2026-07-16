@@ -11,7 +11,8 @@ docs/
 ├── technical/        ← 기술 문서 및 명세
 │   ├── ANALYSIS_METRICS_DB_SCHEMA.md
 │   ├── TOKEN_EXTRACTION_IMPLEMENTATION.md
-│   └── PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
+│   ├── PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
+│   └── SESSION_STATUS_CONSISTENCY_FIXES.md
 └── README.md         ← 이 파일
 ```
 
@@ -118,6 +119,16 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
   - `ProjectStructureSnapshot`을 이용한 PPT 생성 아키텍처(분석 완료 시점 캡처 → 다운로드 시 순수 렌더링)
   - 화면 흐름(Screen Flow) 다이어그램 엣지 추출 방식(파일 기반 라우팅 / 라우터 설정 정규식 폴백)
 
+### SESSION_STATUS_CONSISTENCY_FIXES.md
+- **목적**: 분석 세션의 일시정지/취소/완료 상태가 "내 분석 이력"·실시간 화면에 정확히 반영되지 않던 문제들의 원인과 수정 내용
+- **대상**: 백엔드/프론트엔드 개발자
+- **주요 내용**:
+  - 취소된 분석이 COMPLETED로 잘못 기록되던 문제 및 재개 경로의 크레딧 소진 처리 누락
+  - 일시정지/취소 클릭 즉시 이력 상태가 반영되도록 한 수정
+  - 프론트엔드 취소 상태 전용 처리(`handleAnalysisCancelled`)
+  - 업로드 분석 출력 경로 경고 메시지 오표시 수정
+  - "내 분석 이력"의 CLAUDE.md 버튼 노출 조건 및 다운로드 기능
+
 ---
 
 ## 📌 문서 사용 가이드
@@ -149,7 +160,8 @@ docs/README.md (문서 인덱스)
     └─→ technical/ (기술 심화)
         ├─→ ANALYSIS_METRICS_DB_SCHEMA.md
         ├─→ TOKEN_EXTRACTION_IMPLEMENTATION.md
-        └─→ PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
+        ├─→ PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
+        └─→ SESSION_STATUS_CONSISTENCY_FIXES.md
 ```
 
 ---
@@ -164,6 +176,7 @@ docs/README.md (문서 인덱스)
 | DB 설계 | docs/technical/ | 데이터베이스 명세 |
 | 토큰 구현 | docs/technical/ | API 연동 상세 |
 | 부분 분석/PPT 스냅샷 | docs/technical/ | 파일 트리 선택 및 PPT 구조 스냅샷 구현 상세 |
+| 세션 상태 정합성 수정 | docs/technical/ | 일시정지/취소/완료 상태 반영 버그 수정 내역 |
 
 ---
 
@@ -188,6 +201,10 @@ docs/README.md (문서 인덱스)
   - 파일 트리 기반 부분 분석 선택
   - PPT 구조 스냅샷 아키텍처
   - 화면 흐름 다이어그램 추출 방식
+
+- `SESSION_STATUS_CONSISTENCY_FIXES.md`
+  - 취소/일시정지 상태 반영 버그 수정
+  - 세션·이력 상태 동기화 타이밍 이슈
 
 ---
 
