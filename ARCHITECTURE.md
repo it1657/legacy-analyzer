@@ -21,23 +21,24 @@
 ## 2. 시스템 구성도
 
 ```
-                         ┌─────────────────────────┐
-                         │        Browser           │
-                         │ (Thymeleaf + dashboard.js)│
-                         └────────────┬─────────────┘
-                                      │ HTTPS/HTTP (JWT Bearer, 8803)
-                         ┌────────────▼─────────────┐
-                         │   Spring Boot App (app)   │
-                         │  - JwtAuthenticationFilter │
-                         │  - ApiUsageFilter          │
-                         │  - MainApiController 등    │
-                         └──────┬─────────────┬──────┘
-                                │             │
-                 JDBC(H2/PG)    │             │  HTTPS
-                 ┌──────────────▼──┐   ┌──────▼───────────┐
-                 │  PostgreSQL 16   │   │   Claude API      │
-                 │  (postgres 서비스)│   │  (Anthropic, 외부) │
-                 └──────────────────┘   └───────────────────┘
+                         ┌────────────────────────────┐
+                         │ Browser                    │
+                         │ (Thymeleaf + dashboard.js) │
+                         └────────────────────────────┘
+                                        │ HTTPS/HTTP, JWT Bearer — port 8803
+                           ┌────────────▼────────────┐
+                           │ Spring Boot App (app)   │
+                           │ JwtAuthenticationFilter │
+                           │ ApiUsageFilter          │
+                           │ MainApiController 등    │
+                           └─────────────────────────┘
+                                        │
+                              ┌─────────┴───────────┐
+                              │  JDBC (H2/PG)       │  HTTPS
+                      ┌───────▼───────┐      ┌──────▼─────┐
+                      │ PostgreSQL 16 │      │ Claude API │
+                      │ (postgres)    │      │ (external) │
+                      └───────────────┘      └────────────┘
 ```
 
 로컬 파일시스템에는 두 종류의 소스 경로가 존재한다:
@@ -61,8 +62,7 @@
 User (users) ──M:N── Role (roles)                    [조인테이블 user_roles(user_seq, role_id)]
   │
   ├─ AnalysisHistory.user_id   (분석 실행 이력 - "내 분석 이력" 화면, PPT/README 산출물의 근거)
-  │     ▲
-  │     └─ session_id 값으로 SessionState.sessionId와 매칭 (FK 아님, 값 일치)
+  │     └─ AnalysisHistory.session_id는 SessionState.sessionId와 값으로만 매칭(FK 아님)
   │
   ├─ SessionState.user_id      (분석 세션의 실시간 진행 상태, sessionId=PK가 UUID 문자열)
   ├─ Notification.user_id      ── target_id → AnalysisHistory.id | User.seq  (target_type으로 구분, 다형 참조)
@@ -210,40 +210,29 @@ src/main/java/com/legacy/
 
 ### 5-2. 로그인 ~ 인증된 요청까지 시퀀스
 
-```
-[Browser]                          [AuthController]        [AuthenticationManager]   [CustomUserDetailsService]
-   │  POST /auth/login                    │                          │                        │
-   │  {userId, password}                  │                          │                        │
-   ├──────────────────────────────────────▶                          │                        │
-   │                                       │  authenticate(token)     │                        │
-   │                                       ├──────────────────────────▶ loadUserByUsername(id)  │
-   │                                       │                          ├────────────────────────▶
-   │                                       │                          │  User(BCrypt 해시 포함)  │
-   │                                       │                          ◀────────────────────────┤
-   │                                       │  비밀번호 matches() 검증   │                        │
-   │                                       ◀──────────────────────────┤                        │
-   │                                       │  JwtTokenProvider.generateToken(userId, seq)       │
-   │                                       │  AuditLogService.logLogin(userId, ip)              │
-   │  200 { token, seq, userId, roles[] }  │                          │                        │
-   ◀───────────────────────────────────────┤                          │                        │
-   │  localStorage.setItem('token', ...)   │                          │                        │
-   │  localStorage.setItem('userId'/'roles')                          │                        │
-   │                                       │                          │                        │
-   │  ── 이후 모든 API 요청 ──              │      [JwtAuthenticationFilter]                     │
-   │  GET/POST /api/**                     │              │                                     │
-   │  Authorization: Bearer <token>        │              │                                     │
-   ├────────────────────────────────────────────────────▶ extractToken → validateToken(HS256)   │
-   │                                       │              │  getUsernameFromToken(sub claim)     │
-   │                                       │              ├─────────────────────────────────────▶
-   │                                       │              │           loadUserByUsername          │
-   │                                       │              ◀─────────────────────────────────────┤
-   │                                       │  SecurityContextHolder.setAuthentication(...)        │
-   │                                       │              │  (권한: ROLE_ADMIN / ROLE_USER)        │
-   │                                       │              ▼                                       │
-   │                                       │      [ApiUsageFilter] → 요청 크기/소요시간 로깅       │
-   │                                       │              ▼                                       │
-   │                                       │        컨트롤러 진입 (@PreAuthorize / hasRole 평가)   │
-```
+**① 로그인** (`POST /auth/login`)
+
+| # | 주체 → 대상 | 내용 |
+|---|---|---|
+| 1 | Browser → AuthController | `POST /auth/login` `{userId, password}` |
+| 2 | AuthController → AuthenticationManager | `authenticate(UsernamePasswordAuthenticationToken)` |
+| 3 | AuthenticationManager → CustomUserDetailsService | `loadUserByUsername(userId)` |
+| 4 | CustomUserDetailsService → AuthenticationManager | `User` 반환 (BCrypt 해시 포함) |
+| 5 | AuthenticationManager → AuthController | 비밀번호 `matches()` 검증 통과 |
+| 6 | AuthController | `JwtTokenProvider.generateToken(userId, seq)` + `AuditLogService.logLogin(userId, ip)` |
+| 7 | AuthController → Browser | `200 { token, seq, userId, roles[] }` |
+| 8 | Browser | `localStorage.setItem('token'/'userId'/'roles', ...)` |
+
+**② 이후 모든 API 요청** (`GET/POST /api/**`, `Authorization: Bearer <token>`)
+
+| # | 주체 → 대상 | 내용 |
+|---|---|---|
+| 9 | Browser → JwtAuthenticationFilter | `Authorization: Bearer <token>` 헤더 포함 요청 |
+| 10 | JwtAuthenticationFilter | `extractToken` → `validateToken(HS256)` → `getUsernameFromToken(sub claim)` |
+| 11 | JwtAuthenticationFilter → CustomUserDetailsService | `loadUserByUsername(username)` |
+| 12 | JwtAuthenticationFilter | `SecurityContextHolder.setAuthentication(...)` (권한: `ROLE_ADMIN`/`ROLE_USER`) |
+| 13 | ApiUsageFilter | 요청 크기/소요시간 로깅 (인증된 사용자 기준) |
+| 14 | Controller | 요청 처리 진입 (`@PreAuthorize`/경로별 `hasRole` 평가) |
 
 로그인 실패 시(`AuthenticationManager.authenticate()`가 예외 던짐)에는 `AuditLogService.logLoginFailure(userId, ip)`를 기록하고 401을 반환한다 — 실패 횟수 제한(계정 잠금)은 없다.
 
@@ -292,10 +281,8 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
 ### 6-1. 분석 실행 흐름 (전체 개요)
 
 ```
-[프론트] 1단계 조회/업로드 미리보기
-   → 파일 트리에서 선택(선택 안 하면 전체) ─┐
-                                          │
-[프론트] 2단계 분석 시작 요청 ────────────┘
+[프론트] 1단계 조회/업로드 미리보기 → 파일 트리에서 선택(선택 안 하면 전체)
+[프론트] 2단계 분석 시작 요청
    POST /api/start-analysis (서버 경로, 관리자)
    POST /api/upload-analysis (업로드, MultipartFile[])
         │
@@ -382,10 +369,10 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
 
 ```
 IN_PROGRESS ──(사용자 일시정지 버튼)──▶ PAUSED ──(이어서 분석)──▶ IN_PROGRESS (runAnalysisResume)
-IN_PROGRESS ──(사용자 취소 버튼)──────▶ CANCELLED  (재개 불가 - pendingFilePaths 저장 안 함)
-IN_PROGRESS ──(Claude 크레딧 소진 감지)─▶ PAUSED (재시도 가능, "이어서 분석"으로 복구)
+IN_PROGRESS ──(사용자 취소 버튼)──▶ CANCELLED (재개 불가 - pendingFilePaths 저장 안 함)
+IN_PROGRESS ──(Claude 크레딧 소진 감지)──▶ PAUSED (재시도 가능, "이어서 분석"으로 복구)
 IN_PROGRESS ──(선택된 파일 전부 실패)──▶ PAUSED (재시도 가능)
-IN_PROGRESS ──(정상 종료)──────────────▶ COMPLETED
+IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 ```
 
 - 일시정지/취소는 클릭 즉시 `SessionState`(메모리)에 반영되고, `AnalysisHistory`(DB)도 `/api/session/pause`·`/api/session/cancel` 핸들러에서 낙관적으로 먼저 갱신한다. 그 뒤 진행 중이던 파일들(스레드풀 동시 처리분)이 처리를 마치고 `finalizeAnalysis()`가 최종 카운트를 반영해 다시 한번 저장한다.
