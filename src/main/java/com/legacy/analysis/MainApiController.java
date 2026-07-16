@@ -4,6 +4,8 @@ import com.legacy.auth.JwtTokenProvider;
 import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
+import com.legacy.core.PresentationGeneratorService;
+import com.legacy.core.ProjectStructureSnapshot;
 import com.legacy.core.ProjectTypeDetector;
 import com.legacy.notification.NotificationService;
 import jakarta.servlet.http.HttpServletResponse;
@@ -50,6 +52,7 @@ public class MainApiController {
   private final JwtTokenProvider jwtTokenProvider;
   private final NotificationService notificationService;
   private final ProjectTypeDetector projectTypeDetector;
+  private final PresentationGeneratorService presentationGeneratorService;
 
   @Value("${app.analysis.max-file-size-bytes:524288}")
   private long maxFileSizeBytes;
@@ -80,7 +83,8 @@ public class MainApiController {
       AnalysisHistoryRepository analysisHistoryRepository,
       JwtTokenProvider jwtTokenProvider,
       NotificationService notificationService,
-      ProjectTypeDetector projectTypeDetector) {
+      ProjectTypeDetector projectTypeDetector,
+      PresentationGeneratorService presentationGeneratorService) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -91,6 +95,7 @@ public class MainApiController {
     this.jwtTokenProvider = jwtTokenProvider;
     this.notificationService = notificationService;
     this.projectTypeDetector = projectTypeDetector;
+    this.presentationGeneratorService = presentationGeneratorService;
   }
 
   @GetMapping("/")
@@ -132,6 +137,8 @@ public class MainApiController {
     String selectedModel = request.getOrDefault("model", "").trim();
     String requirements = request.getOrDefault("requirements", "").trim();
     boolean forceActive = "true".equalsIgnoreCase(request.getOrDefault("forceActive", "false"));
+    // 프론트 파일 트리에서 일부만 선택했을 때만 값이 실려 온다 (없으면 전체 분석)
+    final Set<String> selectedRelativePaths = parseSelectedPaths(request.get("selectedPaths"));
 
     // 모델 선택 적용
     if (!selectedModel.isBlank()) {
@@ -171,7 +178,7 @@ public class MainApiController {
 
     // 비동기 분석 시작
     new Thread(() -> runAnalysis(sessionId, finalSourcePath, finalOutputPath, isForce,
-        finalUserId, finalUsername)).start();
+        finalUserId, finalUsername, selectedRelativePaths)).start();
 
     result.put("sessionId", sessionId);
     result.put("message", "분석을 시작했습니다.");
@@ -224,6 +231,26 @@ public class MainApiController {
   private boolean isAdmin(Authentication authentication) {
     return authentication != null && authentication.getAuthorities().stream()
         .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+  }
+
+  /**
+   * 프론트엔드 파일 트리에서 선택된 상대경로 목록(JSON 배열 문자열)을 파싱한다.
+   * 비어있거나 파싱 실패 시 null을 반환하며, 이는 "선택 없음 = 전체 분석"을 의미한다.
+   */
+  private Set<String> parseSelectedPaths(String selectedPathsJson) {
+    if (selectedPathsJson == null || selectedPathsJson.isBlank()) return null;
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      List<String> list = mapper.readValue(selectedPathsJson,
+          new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+      Set<String> normalized = list.stream()
+          .map(s -> s.replace("\\", "/"))
+          .collect(Collectors.toSet());
+      return normalized.isEmpty() ? null : normalized;
+    } catch (Exception e) {
+      log.warn("[선택 경로 파싱 실패] {}", e.getMessage());
+      return null;
+    }
   }
 
   /**
@@ -295,7 +322,8 @@ public class MainApiController {
     session.setCurrentPhase("STARTING");
     session.addRecentLog("[세션 시작] 업로드 분석 - 사용자: " + userLoginId + ", 파일 " + files.length + "개");
 
-    new Thread(() -> runAnalysis(sessionId, uploadRootStr, null, false, userSeq, userLoginId)).start();
+    // 업로드 모드는 프론트에서 이미 선택된 파일만 올라오므로 서버 단에서 추가 필터링할 필요가 없다.
+    new Thread(() -> runAnalysis(sessionId, uploadRootStr, null, false, userSeq, userLoginId, null)).start();
 
     result.put("sessionId", sessionId);
     result.put("message", "업로드 분석을 시작했습니다.");
@@ -719,7 +747,8 @@ public class MainApiController {
   // ===================================================================
 
   private void runAnalysis(String sessionId, String normalizedSourcePath,
-      String normalizedOutputPath, boolean isForceActive, Long userId, String username) {
+      String normalizedOutputPath, boolean isForceActive, Long userId, String username,
+      Set<String> selectedRelativePaths) {
 
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) {
@@ -775,7 +804,18 @@ public class MainApiController {
       List<Path> fileList;
       try {
         Path analysisRootPath = isCopyMode ? finalProjectOutputPath : sourceRootPath;
-        fileList = collectFileList(analysisRootPath);
+        List<Path> collectedFileList = collectFileList(analysisRootPath);
+        // 사용자가 프론트 파일 트리에서 일부만 선택한 경우, 이 지점에서 AI 분석 대상만 좁힌다.
+        // performCopy()는 이미 전체를 그대로 복사했으므로 선택 안 된 파일도 원본 그대로 출력 폴더에 남는다.
+        if (selectedRelativePaths != null && !selectedRelativePaths.isEmpty()) {
+          int beforeCount = collectedFileList.size();
+          collectedFileList = collectedFileList.stream()
+              .filter(p -> selectedRelativePaths.contains(
+                  analysisRootPath.relativize(p).toString().replace("\\", "/")))
+              .toList();
+          session.addRecentLog(String.format("[부분 선택] %d개 중 %d개 파일만 분석합니다.", beforeCount, collectedFileList.size()));
+        }
+        fileList = collectedFileList;
         log.info("[파일 목록 수집] {}개 파일 발견", fileList.size());
         sessionManager.initializeFileList(sessionId, fileList.size());
         session.addRecentLog(String.format("[분석 처리 진행 중] 총 %d개 파일 분석 시작...", fileList.size()));
@@ -800,6 +840,9 @@ public class MainApiController {
       if (userId != null) {
         try {
           history = new AnalysisHistory(userId, sessionId, normalizedSourcePath, finalOutputPath);
+          if (selectedRelativePaths != null && !selectedRelativePaths.isEmpty()) {
+            history.setSelectedRelativePaths(selectedRelativePaths);
+          }
           analysisHistoryRepository.save(history);
         } catch (Exception e) {
           log.error("[분석 기록 생성 실패]", e);
@@ -1296,6 +1339,12 @@ public class MainApiController {
               sourceStr.contains(".idea") || sourceStr.contains(".claude") ||
               sourceStr.contains(".vscode") || sourceStr.contains("target") ||
               sourceStr.contains("build") || sourceStr.contains("node_modules") ||
+              sourceStr.contains(".next") || sourceStr.contains(".nuxt") || sourceStr.contains("dist") ||
+              sourceStr.contains("coverage") || sourceStr.contains(".turbo") ||
+              sourceStr.contains(".vercel") || sourceStr.contains("storybook-static") ||
+              sourceStr.contains(".venv") || sourceStr.contains("__pycache__") ||
+              sourceStr.contains(".pytest_cache") || sourceStr.contains(".tox") ||
+              sourceStr.contains(".mypy_cache") ||
               sourceStr.endsWith(".mv.db") || sourceStr.endsWith(".trace.db") ||
               sourceStr.endsWith(".lock.db") || sourceStr.endsWith(".env") ||
               sourceStr.endsWith(".log")) {
@@ -1374,6 +1423,17 @@ public class MainApiController {
         } catch (Exception e) {
           log.warn("[토큰 저장 실패] {}", e.getMessage());
         }
+
+        // PPT 보고서 구조 스냅샷: 다운로드할 때마다 디스크를 재스캔하지 않도록, 결과물이 아직
+        // 확실히 디스크에 있는 지금 시점(업로드 분석의 스테이징 폴더 정리보다 항상 먼저)에 한 번 계산해 저장한다.
+        try {
+          ProjectStructureSnapshot snapshot = presentationGeneratorService.buildStructureSnapshot(
+              finalProjectOutputPath, history.getSelectedRelativePaths());
+          history.setStructureSnapshot(snapshot);
+        } catch (Exception e) {
+          log.warn("[구조 스냅샷 생성 실패] {}", e.getMessage());
+        }
+
         analysisHistoryRepository.save(history);
         notificationService.notifyAnalysisCompletion(history);
       }
@@ -1465,11 +1525,16 @@ public class MainApiController {
         pathStr.contains("/.gradle/") || pathStr.contains("/.idea/") ||
         pathStr.contains("/.claude/") || pathStr.contains("/.vscode/") ||
         pathStr.contains("/build/") || pathStr.contains("/target/") ||
-        pathStr.contains("/out/") || pathStr.contains("/bin/")) return false;
-    if (pathStr.contains("\\.git\\") || pathStr.contains("\\.claude\\") ||
-        pathStr.contains("\\.vscode\\") || pathStr.contains("\\build\\") ||
-        pathStr.contains("\\target\\") || pathStr.contains("\\node_modules\\") ||
-        pathStr.contains("\\.gradle\\") || pathStr.contains("\\.idea\\")) return false;
+        pathStr.contains("/out/") || pathStr.contains("/bin/") ||
+        // 프론트엔드 빌드/테스트 산출물 - 소스가 아니라 생성된 결과물이므로 분석 대상에서 제외
+        pathStr.contains("/.next/") || pathStr.contains("/.nuxt/") ||
+        pathStr.contains("/dist/") || pathStr.contains("/coverage/") ||
+        pathStr.contains("/.turbo/") || pathStr.contains("/.vercel/") ||
+        pathStr.contains("/storybook-static/") ||
+        // Python 가상환경/캐시 산출물
+        pathStr.contains("/.venv/") || pathStr.contains("/venv/") ||
+        pathStr.contains("/__pycache__/") || pathStr.contains("/.pytest_cache/") ||
+        pathStr.contains("/.tox/") || pathStr.contains("/.mypy_cache/")) return false;
 
     String name = path.getFileName().toString().toLowerCase();
     if (name.endsWith(".class") || name.endsWith(".jar") || name.endsWith(".war") ||

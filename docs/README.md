@@ -6,13 +6,12 @@
 
 ```
 docs/
-├── presentations/     ← 프레젠테이션 리소스
-│   └── FINAL_PROJECT_REPORT_Presentation.html
 ├── guides/           ← 사용 가이드 및 튜토리얼
 │   └── PowerPoint_변환가이드.md
 ├── technical/        ← 기술 문서 및 명세
 │   ├── ANALYSIS_METRICS_DB_SCHEMA.md
-│   └── TOKEN_EXTRACTION_IMPLEMENTATION.md
+│   ├── TOKEN_EXTRACTION_IMPLEMENTATION.md
+│   └── PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
 └── README.md         ← 이 파일
 ```
 
@@ -43,7 +42,6 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 ├── src/test/            ← 테스트 코드
 ├── docs/                ← 프로젝트 문서 (현재 디렉터리)
 ├── scripts/pptx/        ← PPTX 변환 자동화 스크립트 (PowerShell/Python)
-├── nginx/               ← nginx 설정 및 인증서 (리버스 프록시용, 현재 docker-compose 기본 구성에는 미포함)
 ├── data/                ← H2 로컬 DB 파일
 ├── Dockerfile, docker-compose.yml  ← 컨테이너 빌드/배포 구성 (app + postgres, 8803 포트)
 ├── build.gradle, settings.gradle, gradlew  ← Gradle 빌드 설정
@@ -66,29 +64,8 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 
 ### 배포 구성 참고
 - **Dockerfile**: Debian 기반 이미지 사용 (ARM64/PGX 서버 호환을 위해 Alpine에서 전환)
-- **docker-compose.yml**: `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스로 구성. nginx 서비스는 최근 배포 방식 변경으로 compose 구성에서 제외됨
+- **docker-compose.yml**: `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스로 구성 (nginx 리버스 프록시 설정은 미사용으로 제거됨)
 - **DB**: 로컬 개발은 H2(`data/`), 운영 배포는 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) 프로파일 사용
-
----
-
-## 📊 presentations/ - 프레젠테이션 리소스
-
-### FINAL_PROJECT_REPORT_Presentation.html
-- **형식**: HTML (Reveal.js 기반 인터랙티브 프레젠테이션)
-- **슬라이드**: 22개
-- **특징**: 
-  - 모든 웹 브라우저에서 즉시 열 수 있음
-  - 키보드 네비게이션 지원 (스페이스바, 화살표)
-  - 전체 화면 모드 지원 (F 키)
-  - 프린트 기능 지원 (Ctrl+P)
-
-#### 사용 방법:
-```bash
-# 웹 브라우저에서 열기
-1. 파일 탐색기 → HTML 파일 더블클릭
-2. 또는 브라우저에서 Ctrl+O로 파일 열기
-3. 스페이스바로 슬라이드 이동
-```
 
 ---
 
@@ -133,13 +110,21 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
   - 모델별 요금 적용
   - 구현 코드 예시
 
+### PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
+- **목적**: 파일 트리 기반 부분 분석 선택 기능, PPT 보고서 구조 스냅샷(다운로드 시 디스크 재스캔 제거) 및 화면 흐름 다이어그램 구현 상세 문서
+- **대상**: 백엔드/프론트엔드 개발자
+- **주요 내용**:
+  - 부분 분석 선택 UI(파일 트리) 및 서버 경로/업로드 두 모드의 필터링 지점
+  - `ProjectStructureSnapshot`을 이용한 PPT 생성 아키텍처(분석 완료 시점 캡처 → 다운로드 시 순수 렌더링)
+  - 화면 흐름(Screen Flow) 다이어그램 엣지 추출 방식(파일 기반 라우팅 / 라우터 설정 정규식 폴백)
+
 ---
 
 ## 📌 문서 사용 가이드
 
 ### 프로젝트 이해
 1. **docs/README.md** 읽기 → 문서 디렉터리 전체 개요
-2. **HTML 프레젠테이션** 보기 → 시각적 이해
+2. **technical/** 문서 읽기 → 주요 기능 구현 상세
 
 ### 기술 심화
 1. **technical/** 문서 읽기 → 시스템 설계
@@ -147,7 +132,7 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 3. **scripts/** 코드 분석 → 구현 방식
 
 ### 관리자 학습
-1. HTML 프레젠테이션 → 프로젝트 현황 파악
+1. 관리자 대시보드 → 프로젝트 현황 파악
 2. PowerPoint 변환 가이드 → PPT 생성 방법
 3. 기술 문서 → 시스템 심화 이해
 
@@ -158,15 +143,13 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 ```
 docs/README.md (문서 인덱스)
     │
-    ├─→ presentations/ (시각화)
-    │   └─→ FINAL_PROJECT_REPORT_Presentation.html
-    │
     ├─→ guides/ (사용 방법)
     │   └─→ PowerPoint_변환가이드.md
     │
     └─→ technical/ (기술 심화)
         ├─→ ANALYSIS_METRICS_DB_SCHEMA.md
-        └─→ TOKEN_EXTRACTION_IMPLEMENTATION.md
+        ├─→ TOKEN_EXTRACTION_IMPLEMENTATION.md
+        └─→ PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md
 ```
 
 ---
@@ -177,20 +160,14 @@ docs/README.md (문서 인덱스)
 |------|------|------|
 | 문서 인덱스 | docs/ | 문서 디렉터리 전체 안내 |
 | 스크립트 가이드 | scripts/ | 자동화 스크립트 사용법 |
-| HTML 프레젠테이션 | docs/presentations/ | 웹 기반 슬라이드 |
 | 변환 가이드 | docs/guides/ | 포맷 변환 방법 |
 | DB 설계 | docs/technical/ | 데이터베이스 명세 |
 | 토큰 구현 | docs/technical/ | API 연동 상세 |
+| 부분 분석/PPT 스냅샷 | docs/technical/ | 파일 트리 선택 및 PPT 구조 스냅샷 구현 상세 |
 
 ---
 
 ## 💾 파일 목록
-
-### presentations/ (프레젠테이션)
-- `FINAL_PROJECT_REPORT_Presentation.html` (27KB)
-  - 22개 슬라이드
-  - 전문적 디자인
-  - 대화형 네비게이션
 
 ### guides/ (가이드)
 - `PowerPoint_변환가이드.md` (5KB)
@@ -207,6 +184,11 @@ docs/README.md (문서 인덱스)
   - 토큰 추출 로직
   - 비용 계산
 
+- `PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md`
+  - 파일 트리 기반 부분 분석 선택
+  - PPT 구조 스냅샷 아키텍처
+  - 화면 흐름 다이어그램 추출 방식
+
 ---
 
 ## 🎯 자주 묻는 질문
@@ -215,8 +197,7 @@ docs/README.md (문서 인덱스)
 ```
 A: 프로젝트에 처음 온 경우
 1. docs/README.md (이 파일)
-2. HTML 프레젠테이션 보기
-3. docs/technical/ 기술 문서 확인
+2. docs/technical/ 기술 문서 확인
 ```
 
 **Q: PPT는 어떻게 얻나?**
@@ -239,7 +220,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-06-30
+- **마지막 업데이트**: 2026-07-16
 - **작성자**: 정재훈
 - **관리자**: 개발팀
 

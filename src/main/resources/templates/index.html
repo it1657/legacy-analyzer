@@ -100,6 +100,19 @@
                         </div>
                     </div>
                 </div>
+                <div id="fileTreeSection" style="display:none; flex-direction:column; gap:8px; border-top:1px dashed #30363d; padding-top:15px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                        <span style="font-weight:bold;">🌲 분석 대상 파일 선택
+                            <span style="font-weight:normal; color:#8b949e; font-size:12px;">(체크 해제한 파일은 분석에서 제외됩니다. 전부 선택 상태면 기존과 동일하게 전체 분석)</span>
+                        </span>
+                        <span id="txtTreeSelected" style="font-size:12px; color:#4e73df; font-weight:bold;"></span>
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" onclick="toggleTreeSelectAll()" class="btn" style="padding:4px 10px; font-size:12px;">전체 선택/해제</button>
+                        <button type="button" onclick="toggleTreeExpandAll()" class="btn" style="padding:4px 10px; font-size:12px;">모두 펼치기/접기</button>
+                    </div>
+                    <div id="fileTreeContainer" class="file-tree-container"></div>
+                </div>
                 <div class="control-row" id="sessionControlPanel" style="display: none; gap: 10px;">
                     <span style="font-weight: bold; color: #4e73df;">분석 중:</span>
                     <span id="sessionIdDisplay" style="font-size: 12px; color: #858796; font-family: monospace;"></span>
@@ -111,7 +124,7 @@
         </div>
     </div>
 
-    <div class="row">
+    <div class="row" id="analysisMonitorRow">
         <!-- 🟢 [좌측] 실시간 프로세스 콘솔 패널 -->
         <div class="col-left">
             <div class="card">

@@ -1,7 +1,10 @@
 package com.legacy.analysis;
 
+import com.legacy.core.ProjectStructureSnapshot;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Set;
 
 @Entity
 @Table(name = "analysis_history")
@@ -76,6 +79,16 @@ public class AnalysisHistory {
 
   @Column(name = "avg_time_per_file")
   private Double avgTimePerFile;
+
+  // 부분 분석 시 사용자가 선택한 파일들의 정규화(슬래시 통일)된 상대경로 목록 (JSON 배열).
+  // null이면 "전체 분석" - 보고서(PPT) 생성 시 이 값의 유무로 구조 슬라이드 범위를 판단한다.
+  @Column(name = "selected_paths_json", columnDefinition = "TEXT")
+  private String selectedPathsJson;
+
+  // 분석 완료 시점에 한 번 계산해 둔 PPT용 프로젝트 구조 스냅샷(JSON). 다운로드할 때마다 디스크를
+  // 재스캔하지 않기 위한 것 - null이면(이 기능 도입 전 완료된 이력) PPT 생성 시 라이브 스캔으로 폴백한다.
+  @Column(name = "structure_snapshot_json", columnDefinition = "TEXT")
+  private String structureSnapshotJson;
 
   // 생성자
   public AnalysisHistory() {
@@ -273,5 +286,68 @@ public class AnalysisHistory {
 
   public void setAvgTimePerFile(Double avgTimePerFile) {
     this.avgTimePerFile = avgTimePerFile;
+  }
+
+  public String getSelectedPathsJson() {
+    return selectedPathsJson;
+  }
+
+  public void setSelectedPathsJson(String selectedPathsJson) {
+    this.selectedPathsJson = selectedPathsJson;
+  }
+
+  public Set<String> getSelectedRelativePaths() {
+    if (selectedPathsJson == null || selectedPathsJson.isBlank()) return null;
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      return new HashSet<>(mapper.readValue(selectedPathsJson,
+          new com.fasterxml.jackson.core.type.TypeReference<java.util.List<String>>() {}));
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  public void setSelectedRelativePaths(Set<String> selectedRelativePaths) {
+    if (selectedRelativePaths == null || selectedRelativePaths.isEmpty()) {
+      this.selectedPathsJson = null;
+      return;
+    }
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      this.selectedPathsJson = mapper.writeValueAsString(selectedRelativePaths);
+    } catch (Exception e) {
+      this.selectedPathsJson = null;
+    }
+  }
+
+  public String getStructureSnapshotJson() {
+    return structureSnapshotJson;
+  }
+
+  public void setStructureSnapshotJson(String structureSnapshotJson) {
+    this.structureSnapshotJson = structureSnapshotJson;
+  }
+
+  public ProjectStructureSnapshot getStructureSnapshot() {
+    if (structureSnapshotJson == null || structureSnapshotJson.isBlank()) return null;
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      return mapper.readValue(structureSnapshotJson, ProjectStructureSnapshot.class);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  public void setStructureSnapshot(ProjectStructureSnapshot snapshot) {
+    if (snapshot == null) {
+      this.structureSnapshotJson = null;
+      return;
+    }
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      this.structureSnapshotJson = mapper.writeValueAsString(snapshot);
+    } catch (Exception e) {
+      this.structureSnapshotJson = null;
+    }
   }
 }

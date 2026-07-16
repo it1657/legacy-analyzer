@@ -2,6 +2,7 @@ package com.legacy.core;
 
 import com.legacy.analysis.AnalysisHistory;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.sl.usermodel.LineDecoration;
 import org.apache.poi.sl.usermodel.TextParagraph;
 import org.apache.poi.xslf.usermodel.*;
 import org.springframework.stereotype.Service;
@@ -77,22 +78,25 @@ public class PresentationGeneratorService {
     XMLSlideShow ppt = new XMLSlideShow();
     ppt.setPageSize(new Dimension(W, H));
 
-    // 프로젝트 타입은 슬라이드 생성 도중 바뀌지 않으므로 한 번만 감지해서 각 슬라이드에 전달한다
-    // (이전에는 슬라이드마다 detectProjectType을 재호출해 동일한 파일시스템 스캔이 반복됐다).
-    String sourcePath = h.getSourcePath();
-    Path root = (sourcePath != null && !sourcePath.isBlank()) ? Paths.get(sourcePath) : null;
-    String projectType = (root != null) ? projectTypeDetector.detectProjectType(root) : "general";
-    // "general" 타입일 때만 필요한 확장자별 파일 그룹도 한 번만 스캔해 두 슬라이드가 공유한다.
-    Map<String, List<String>> generalFilesByExt = (root != null && isUnknownType(projectType))
-        ? collectGeneralFilesByExtension(root, 4) : new LinkedHashMap<>();
+    // 분석 완료 시점에 저장해 둔 구조 스냅샷이 있으면 그것만 쓴다(디스크 재스캔 없음 - 업로드 분석처럼
+    // 나중에 소스가 삭제돼도 정상 동작하고, 다운로드할 때마다 항상 같은 내용이 나온다).
+    // 스냅샷이 없는 예전 이력(이 기능 도입 전에 완료된 분석)만 예전처럼 그 자리에서 라이브 스캔한다.
+    ProjectStructureSnapshot snapshot = h.getStructureSnapshot();
+    Set<String> selectedRelativePaths = h.getSelectedRelativePaths();
+    if (snapshot == null) {
+      String sourcePath = h.getSourcePath();
+      Path root = (sourcePath != null && !sourcePath.isBlank()) ? Paths.get(sourcePath) : null;
+      snapshot = buildStructureSnapshot(root, selectedRelativePaths);
+    }
 
     createProjectTitleSlide(ppt, h);
-    createProjectScopeSlide(ppt, h);
-    createArchitectureSlide(ppt, h, root, projectType, generalFilesByExt);
-    createDomainAnalysisSlide(ppt, h, root, projectType);
-    createLayerResponsibilitySlide(ppt, h, root, projectType, generalFilesByExt);
-    createProjectStructureSlide(ppt, h, root, projectType);
-    createResourceStructureSlide(ppt, h);    // resources/ 설정·XML mapper 구조
+    createProjectScopeSlide(ppt, h, selectedRelativePaths);
+    createArchitectureSlide(ppt, h, snapshot);
+    createDomainAnalysisSlide(ppt, h, snapshot);
+    createLayerResponsibilitySlide(ppt, h, snapshot);
+    createProjectStructureSlide(ppt, h, snapshot);
+    createResourceStructureSlide(ppt, h, snapshot);    // resources/ 설정·XML mapper 구조
+    createScreenFlowSlide(ppt, h, snapshot.screenFlowEdges);
     createReadmeSlides(ppt, h.getReadmeContent());
     createProjectClosingSlide(ppt, h);
 
@@ -104,9 +108,115 @@ public class PresentationGeneratorService {
     return baos.toByteArray();
   }
 
+  /**
+   * PPT가 필요로 하는 구조 데이터를 한 번에 계산해 스냅샷으로 묶는다. 분석 완료 시점에
+   * (MainApiController.finalizeAnalysis) 한 번 호출해 DB에 저장해 두면, 다운로드할 때마다
+   * 디스크를 다시 스캔하지 않아도 되고, 업로드 분석처럼 나중에 소스가 삭제되어도 PPT가 정상 생성된다.
+   */
+  public ProjectStructureSnapshot buildStructureSnapshot(Path root, Set<String> selectedRelativePaths) {
+    ProjectStructureSnapshot snapshot = new ProjectStructureSnapshot();
+    if (root == null || !Files.exists(root)) {
+      snapshot.projectType = "general";
+      return snapshot;
+    }
+
+    String projectType = projectTypeDetector.detectProjectType(root);
+    snapshot.projectType = projectType;
+    String projectName = root.getFileName() != null ? root.getFileName().toString() : "project";
+
+    Map<String, List<String>> generalFilesByExt = isUnknownType(projectType)
+        ? collectGeneralFilesByExtension(root, 4, selectedRelativePaths) : new LinkedHashMap<>();
+
+    switch (projectType) {
+      case "java" -> {
+        Path javaRoot = root.resolve("src").resolve("main").resolve("java");
+        snapshot.packages = toDirCards(buildPackageList(root, javaRoot, selectedRelativePaths));
+        snapshot.byLayer = collectJavaFilesByLayer(root, javaRoot, selectedRelativePaths);
+        String rootPkg = detectRootPackage(javaRoot);
+        snapshot.headerLabel = "📦 " + projectName + (rootPkg.isEmpty() ? "" : "  ·  " + rootPkg);
+        snapshot.hasPackageJsonOrResourcesDir =
+            Files.exists(root.resolve("src").resolve("main").resolve("resources"));
+      }
+      case "react", "nextjs", "vue" -> {
+        snapshot.packages = toDirCards(buildFrontendDirList(root, projectType, selectedRelativePaths));
+        snapshot.byLayer = collectFrontendFilesByLayer(root, projectType, selectedRelativePaths);
+        String typeBadge = switch (projectType) {
+          case "nextjs" -> "Next.js";
+          case "vue" -> "Vue 3";
+          default -> "React";
+        };
+        snapshot.headerLabel = "⚛ " + projectName + "  ·  " + typeBadge;
+        snapshot.hasPackageJsonOrResourcesDir = Files.exists(root.resolve("package.json"));
+      }
+      case "python" -> {
+        snapshot.packages = toDirCards(buildPythonModuleList(root, selectedRelativePaths));
+        snapshot.byLayer = collectPythonFilesByLayer(root, selectedRelativePaths);
+        snapshot.headerLabel = "🐍 " + projectName + "  ·  " + detectPythonFramework(root);
+      }
+      default -> {
+        snapshot.packages = toDirCards(buildGeneralDirList(root, selectedRelativePaths));
+        snapshot.byLayer = generalFilesByExt;
+        snapshot.generalTree = buildGeneralTree(root, selectedRelativePaths);
+      }
+    }
+
+    snapshot.screenFlowEdges = toSnapshotEdges(buildScreenFlowEdges(root, projectType, selectedRelativePaths));
+    collectResourceStructure(root, snapshot);
+    return snapshot;
+  }
+
+  private List<ProjectStructureSnapshot.DirCard> toDirCards(List<String[]> raw) {
+    List<ProjectStructureSnapshot.DirCard> result = new ArrayList<>();
+    for (String[] r : raw) result.add(new ProjectStructureSnapshot.DirCard(r[0], r[1], r[2]));
+    return result;
+  }
+
+  private List<ProjectStructureSnapshot.ScreenFlowEdge> toSnapshotEdges(List<ScreenFlowEdge> edges) {
+    List<ProjectStructureSnapshot.ScreenFlowEdge> result = new ArrayList<>();
+    for (ScreenFlowEdge e : edges) result.add(new ProjectStructureSnapshot.ScreenFlowEdge(e.from(), e.to()));
+    return result;
+  }
+
+  /** src/main/resources/ 하위 설정·MyBatis Mapper·템플릿 파일을 스냅샷에 채운다 (createResourceStructureSlide 전용 데이터). */
+  private void collectResourceStructure(Path root, ProjectStructureSnapshot snapshot) {
+    Path resRoot = root.resolve("src").resolve("main").resolve("resources");
+    if (!Files.exists(resRoot)) return;
+    snapshot.hasResourcesDir = true;
+
+    try (Stream<Path> files = Files.walk(resRoot, 5)) {
+      files.filter(Files::isRegularFile).forEach(p -> {
+        String name = p.getFileName().toString();
+        String rel = resRoot.relativize(p).toString().replace('\\', '/');
+        String content = "";
+        try { content = Files.readString(p); } catch (IOException ignored) {}
+
+        if (name.endsWith(".xml")) {
+          if (content.contains("<mapper") || rel.contains("mapper") || rel.contains("mybatis") || rel.contains("sqlmap")) {
+            snapshot.mapperFiles.add(new ProjectStructureSnapshot.ResourceEntry(
+                name, extractMapperNamespace(content), countMapperQueries(content)));
+          } else {
+            snapshot.configFiles.add(new ProjectStructureSnapshot.ResourceEntry(name, inferXmlDescription(name, rel), null));
+          }
+        } else if (name.endsWith(".properties") || name.endsWith(".yml") || name.endsWith(".yaml")) {
+          snapshot.configFiles.add(new ProjectStructureSnapshot.ResourceEntry(name, inferConfigDescription(name), null));
+        } else if (name.endsWith(".html") || name.endsWith(".ftl") || name.endsWith(".vm")) {
+          snapshot.templateFiles.add(new ProjectStructureSnapshot.ResourceEntry(name, rel, null));
+        }
+      });
+    } catch (IOException e) {
+      log.warn("리소스 파일 스캔 실패: {}", resRoot, e);
+    }
+  }
+
   private boolean isUnknownType(String projectType) {
     return !("java".equals(projectType) || "react".equals(projectType) || "nextjs".equals(projectType)
         || "vue".equals(projectType) || "python".equals(projectType));
+  }
+
+  /** 부분 분석 시 선택된 파일 범위인지 확인한다 (selectedRelativePaths가 null/비어있으면 항상 true = 전체 범위). */
+  private boolean isPathIncluded(Path root, Path file, Set<String> selectedRelativePaths) {
+    if (selectedRelativePaths == null || selectedRelativePaths.isEmpty()) return true;
+    return selectedRelativePaths.contains(root.relativize(file).toString().replace("\\", "/"));
   }
 
   // ── 고객 납품용: 표지 ────────────────────────────────────────
@@ -140,7 +250,7 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 분석 범위 ────────────────────────────────────
-  private void createProjectScopeSlide(XMLSlideShow ppt, AnalysisHistory h) {
+  private void createProjectScopeSlide(XMLSlideShow ppt, AnalysisHistory h, Set<String> selectedRelativePaths) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "분석 범위", "Analysis Scope");
@@ -182,43 +292,51 @@ public class PresentationGeneratorService {
     addRect(slide, 40, 360, W - 80, 1, BG_CARD);
     // 원격 업로드 분석의 경우 sourcePath/outputPath가 서버 내부 임시 저장소 경로라
     // 사용자가 인식하는 실제 절대경로가 아니므로 보고서에는 노출하지 않는다.
+
+    // 부분 분석(파일 트리에서 일부만 선택)이었다면, 이후 구조 슬라이드들이 전체 프로젝트가
+    // 아니라 이 범위만 반영한다는 점을 명시해 오해를 막는다.
+    if (selectedRelativePaths != null && !selectedRelativePaths.isEmpty()) {
+      addText(slide, "⚠ 이 보고서는 사용자가 선택한 " + selectedRelativePaths.size() + "개 파일만 반영되었습니다 (부분 분석)",
+          40, 372, W - 80, 20, 11, true, new Color(251, 191, 36), TextParagraph.TextAlign.LEFT);
+    }
   }
 
   // ── 고객 납품용: 프로젝트/패키지 구조 ───────────────────────
-  private void createProjectStructureSlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType) {
+  private void createProjectStructureSlide(XMLSlideShow ppt, AnalysisHistory h, ProjectStructureSnapshot snapshot) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "프로젝트 구조", "Project & Package Structure");
 
-    if (root == null) {
+    if (snapshot == null) {
       addText(slide, "(소스 경로 정보 없음)", 40, 200, W - 80, 40, 14, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
       return;
     }
 
-    switch (projectType) {
-      case "java"                   -> renderJavaPackageStructure(slide, root, root.resolve("src").resolve("main").resolve("java"));
-      case "react", "nextjs", "vue" -> renderFrontendStructure(slide, root, projectType);
-      case "python"                 -> renderPythonStructure(slide, root);
-      default -> {
-        String tree = buildGeneralTree(root);
-        addRoundCard(slide, 40, 125, W - 80, H - 155, BG_CARD);
-        addRect(slide, 40, 125, 4, H - 155, ACCENT2);
-        addText(slide, tree, 60, 136, W - 108, H - 178, 10, false, new Color(186, 230, 253), TextParagraph.TextAlign.LEFT);
-      }
+    if ("general".equals(snapshot.projectType)) {
+      String tree = (snapshot.generalTree != null && !snapshot.generalTree.isBlank())
+          ? snapshot.generalTree : "(디렉터리 구조를 읽을 수 없습니다)";
+      addRoundCard(slide, 40, 125, W - 80, H - 155, BG_CARD);
+      addRect(slide, 40, 125, 4, H - 155, ACCENT2);
+      addText(slide, tree, 60, 136, W - 108, H - 178, 10, false, new Color(186, 230, 253), TextParagraph.TextAlign.LEFT);
+      return;
     }
+
+    renderPackageCardSlideBody(slide, snapshot);
   }
 
-  /** Java 패키지 구조를 비즈니스 설명 카드 레이아웃으로 렌더링 */
-  private void renderJavaPackageStructure(XSLFSlide slide, Path projectRoot, Path javaRoot) {
-    String rootPkg = detectRootPackage(javaRoot);
-    String projectName = projectRoot.getFileName() != null ? projectRoot.getFileName().toString() : "project";
+  /**
+   * java/react/nextjs/vue/python 공통 패키지·디렉터리 카드 레이아웃 렌더링.
+   * (예전에는 renderJavaPackageStructure/renderFrontendStructure/renderPythonStructure로 타입별로
+   * 거의 동일한 코드가 중복돼 있었는데, ProjectStructureSnapshot 도입으로 데이터 셰이프가
+   * 통일되면서 렌더링도 하나로 합칠 수 있게 됐다.)
+   */
+  private void renderPackageCardSlideBody(XSLFSlide slide, ProjectStructureSnapshot snapshot) {
+    Color accent = structureAccentColor(snapshot.projectType);
+    if (snapshot.headerLabel != null && !snapshot.headerLabel.isBlank()) {
+      addText(slide, snapshot.headerLabel, 40, 110, W - 80, 18, 10, false, accent, TextParagraph.TextAlign.LEFT);
+    }
 
-    // 루트 패키지 헤더 표시
-    String header = "📦 " + projectName + (rootPkg.isEmpty() ? "" : "  ·  " + rootPkg);
-    addText(slide, header, 40, 110, W - 80, 18, 10, false, ACCENT2, TextParagraph.TextAlign.LEFT);
-
-    List<String[]> packages = buildPackageList(javaRoot);
-
+    List<ProjectStructureSnapshot.DirCard> packages = snapshot.packages;
     boolean twoCol = packages.size() > 7;
     int startY = 132;
     int cardH = 44;
@@ -233,29 +351,36 @@ public class PresentationGeneratorService {
       int y = startY + row * (cardH + gap);
       if (y + cardH > H - 22) break;
 
-      String[] pkg = packages.get(i); // [shortName, description, classSummary]
+      ProjectStructureSnapshot.DirCard pkg = packages.get(i);
       addRoundCard(slide, x, y, colW, cardH, BG_CARD);
-      addRect(slide, x, y, 3, cardH, ACCENT);
-      // 패키지명
-      addText(slide, "📁 " + pkg[0], x + 12, y + 4, 220, 17, 10, true, ACCENT, TextParagraph.TextAlign.LEFT);
-      // 클래스 타입 요약 (우측)
-      if (!pkg[2].isEmpty()) {
-        addText(slide, pkg[2], x + colW - 192, y + 4, 184, 17, 8, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
+      addRect(slide, x, y, 3, cardH, accent);
+      addText(slide, "📁 " + pkg.name(), x + 12, y + 4, 220, 17, 10, true, accent, TextParagraph.TextAlign.LEFT);
+      if (pkg.summary() != null && !pkg.summary().isEmpty()) {
+        addText(slide, pkg.summary(), x + colW - 192, y + 4, 184, 17, 8, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
       }
-      // 비즈니스 설명
-      addText(slide, pkg[1], x + 12, y + 23, colW - 24, 17, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      addText(slide, pkg.description(), x + 12, y + 23, colW - 24, 17, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
     }
 
-    // 하단 resources 한 줄 표시
-    Path resRoot = projectRoot.resolve("src").resolve("main").resolve("resources");
-    if (Files.exists(resRoot)) {
+    if (snapshot.hasPackageJsonOrResourcesDir) {
       int rows = twoCol ? half : packages.size();
       int bottomY = startY + rows * (cardH + gap) + 2;
       if (bottomY + 20 < H - 10) {
-        addText(slide, "📋 src/main/resources/  [설정 파일 · application.properties · 템플릿 등]",
-            40, bottomY, W - 80, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+        String bottomText = "java".equals(snapshot.projectType)
+            ? "📋 src/main/resources/  [설정 파일 · application.properties · 템플릿 등]"
+            : "📋 package.json  [의존성 및 빌드 스크립트 설정]";
+        addText(slide, bottomText, 40, bottomY, W - 80, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
       }
     }
+  }
+
+  private Color structureAccentColor(String projectType) {
+    return switch (projectType) {
+      case "vue"    -> new Color(65, 184, 131);   // Vue green
+      case "nextjs" -> new Color(200, 200, 200);  // Next.js light gray
+      case "react"  -> new Color(97, 218, 251);   // React cyan
+      case "python" -> new Color(255, 212, 59);
+      default       -> ACCENT2;                    // java 및 기타
+    };
   }
 
   /** src/main/java 하위 루트 패키지 경로 감지 (단일 자식 추적) */
@@ -281,7 +406,7 @@ public class PresentationGeneratorService {
   }
 
   /** 기본 패키지 하위 서브 패키지 목록 수집 → [shortName, description, classSummary] */
-  private List<String[]> buildPackageList(Path javaRoot) {
+  private List<String[]> buildPackageList(Path projectRoot, Path javaRoot, Set<String> selectedRelativePaths) {
     List<String[]> result = new ArrayList<>();
     if (!Files.exists(javaRoot)) return result;
     try {
@@ -307,9 +432,12 @@ public class PresentationGeneratorService {
         List<String> fileNames = new ArrayList<>();
         try (Stream<Path> files = Files.walk(subPkg, 5)) {
           files.filter(p -> p.toString().endsWith(".java"))
+               .filter(p -> isPathIncluded(projectRoot, p, selectedRelativePaths))
                .map(p -> p.getFileName().toString())
                .forEach(fileNames::add);
         }
+        // 부분 분석 범위일 때 해당 패키지에 선택된 파일이 하나도 없으면 카드 자체를 생략한다.
+        if (fileNames.isEmpty() && selectedRelativePaths != null) continue;
         result.add(new String[]{
             pkgName,
             inferPackageDescription(pkgName, fileNames),
@@ -322,6 +450,7 @@ public class PresentationGeneratorService {
         List<String> fileNames = new ArrayList<>();
         try (Stream<Path> files = Files.list(basePkg)) {
           files.filter(p -> p.toString().endsWith(".java"))
+               .filter(p -> isPathIncluded(projectRoot, p, selectedRelativePaths))
                .map(p -> p.getFileName().toString())
                .forEach(fileNames::add);
         }
@@ -502,59 +631,7 @@ public class PresentationGeneratorService {
   }
 
   // ── React / Vue / Next.js 프론트엔드 구조 ──────────────────
-  private void renderFrontendStructure(XSLFSlide slide, Path root, String projectType) {
-    String typeBadge = switch (projectType) {
-      case "nextjs" -> "Next.js";
-      case "vue"    -> "Vue 3";
-      default       -> "React";
-    };
-    Color accentColor = switch (projectType) {
-      case "vue"    -> new Color(65, 184, 131);   // Vue green
-      case "nextjs" -> new Color(200, 200, 200);  // Next.js light gray
-      default       -> new Color(97, 218, 251);   // React cyan
-    };
-
-    String projectName = root.getFileName() != null ? root.getFileName().toString() : "project";
-    addText(slide, "⚛ " + projectName + "  ·  " + typeBadge, 40, 110, W - 80, 18, 10, false, accentColor, TextParagraph.TextAlign.LEFT);
-
-    List<String[]> dirs = buildFrontendDirList(root, projectType);
-
-    boolean twoCol = dirs.size() > 7;
-    int startY = 132;
-    int cardH = 44;
-    int gap = 4;
-    int half = twoCol ? (dirs.size() + 1) / 2 : dirs.size();
-    int colW = twoCol ? (W - 100) / 2 : W - 80;
-
-    for (int i = 0; i < dirs.size(); i++) {
-      int col = twoCol ? i / half : 0;
-      int row = twoCol ? i % half : i;
-      int x = 40 + col * (colW + 20);
-      int y = startY + row * (cardH + gap);
-      if (y + cardH > H - 22) break;
-
-      String[] dir = dirs.get(i);
-      addRoundCard(slide, x, y, colW, cardH, BG_CARD);
-      addRect(slide, x, y, 3, cardH, accentColor);
-      addText(slide, "📁 " + dir[0], x + 12, y + 4, 220, 17, 10, true, accentColor, TextParagraph.TextAlign.LEFT);
-      if (!dir[2].isEmpty()) {
-        addText(slide, dir[2], x + colW - 192, y + 4, 184, 17, 8, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
-      }
-      addText(slide, dir[1], x + 12, y + 23, colW - 24, 17, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
-    }
-
-    // 하단 package.json 한 줄
-    if (Files.exists(root.resolve("package.json"))) {
-      int rows = twoCol ? half : dirs.size();
-      int bottomY = startY + rows * (cardH + gap) + 2;
-      if (bottomY + 20 < H - 10) {
-        addText(slide, "📋 package.json  [의존성 및 빌드 스크립트 설정]",
-            40, bottomY, W - 80, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
-      }
-    }
-  }
-
-  private List<String[]> buildFrontendDirList(Path root, String projectType) {
+  private List<String[]> buildFrontendDirList(Path root, String projectType, Set<String> selectedRelativePaths) {
     List<String[]> result = new ArrayList<>();
     Set<String> seen = new HashSet<>();
     Set<String> skipDirs = Set.of("node_modules", "dist", ".next", ".nuxt", "build", "out",
@@ -590,9 +667,13 @@ public class PresentationGeneratorService {
           List<String> fileNames = new ArrayList<>();
           try (Stream<Path> files = Files.walk(dir, 4)) {
             files.filter(Files::isRegularFile)
+                 .filter(p -> isPathIncluded(root, p, selectedRelativePaths))
                  .map(p -> p.getFileName().toString())
                  .forEach(fileNames::add);
           } catch (IOException ignored) {}
+
+          // 부분 분석 범위일 때 이 디렉터리에 선택된 파일이 하나도 없으면 카드 자체를 생략한다.
+          if (fileNames.isEmpty() && selectedRelativePaths != null) continue;
 
           result.add(new String[]{
               dirName,
@@ -665,39 +746,6 @@ public class PresentationGeneratorService {
   }
 
   // ── Python 프로젝트 구조 ────────────────────────────────────
-  private void renderPythonStructure(XSLFSlide slide, Path root) {
-    Color pyColor = new Color(255, 212, 59);
-    String projectName = root.getFileName() != null ? root.getFileName().toString() : "project";
-    String framework = detectPythonFramework(root);
-    addText(slide, "🐍 " + projectName + "  ·  " + framework, 40, 110, W - 80, 18, 10, false, pyColor, TextParagraph.TextAlign.LEFT);
-
-    List<String[]> modules = buildPythonModuleList(root);
-
-    boolean twoCol = modules.size() > 7;
-    int startY = 132;
-    int cardH = 44;
-    int gap = 4;
-    int half = twoCol ? (modules.size() + 1) / 2 : modules.size();
-    int colW = twoCol ? (W - 100) / 2 : W - 80;
-
-    for (int i = 0; i < modules.size(); i++) {
-      int col = twoCol ? i / half : 0;
-      int row = twoCol ? i % half : i;
-      int x = 40 + col * (colW + 20);
-      int y = startY + row * (cardH + gap);
-      if (y + cardH > H - 22) break;
-
-      String[] mod = modules.get(i);
-      addRoundCard(slide, x, y, colW, cardH, BG_CARD);
-      addRect(slide, x, y, 3, cardH, pyColor);
-      addText(slide, "📁 " + mod[0], x + 12, y + 4, 220, 17, 10, true, pyColor, TextParagraph.TextAlign.LEFT);
-      if (!mod[2].isEmpty()) {
-        addText(slide, mod[2], x + colW - 192, y + 4, 184, 17, 8, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
-      }
-      addText(slide, mod[1], x + 12, y + 23, colW - 24, 17, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
-    }
-  }
-
   private String detectPythonFramework(Path root) {
     try {
       Path reqFile = root.resolve("requirements.txt");
@@ -711,7 +759,7 @@ public class PresentationGeneratorService {
     return "Python";
   }
 
-  private List<String[]> buildPythonModuleList(Path root) {
+  private List<String[]> buildPythonModuleList(Path root, Set<String> selectedRelativePaths) {
     List<String[]> result = new ArrayList<>();
     Set<String> skipDirs = Set.of(".git", ".venv", "venv", "__pycache__", ".pytest_cache",
         "dist", "build", ".tox", "node_modules", ".idea", ".mypy_cache");
@@ -726,6 +774,7 @@ public class PresentationGeneratorService {
             List<String> fileNames = new ArrayList<>();
             try (Stream<Path> files = Files.walk(dir, 4)) {
               files.filter(p -> p.toString().endsWith(".py"))
+                   .filter(p -> isPathIncluded(root, p, selectedRelativePaths))
                    .map(p -> p.getFileName().toString())
                    .forEach(fileNames::add);
             } catch (IOException ignored) {}
@@ -760,7 +809,7 @@ public class PresentationGeneratorService {
   }
 
   /** 일반(비-Java) 프로젝트 파일 트리 */
-  private String buildGeneralTree(Path root) {
+  private String buildGeneralTree(Path root, Set<String> selectedRelativePaths) {
     List<String> lines = new ArrayList<>();
     lines.add("📦 " + (root.getFileName() != null ? root.getFileName().toString() : "project") + "/");
 
@@ -775,6 +824,9 @@ public class PresentationGeneratorService {
             }
             return true;
           })
+          // 디렉터리는 트리 구조 파악을 위해 그대로 두고, 파일만 선택 범위로 거른다
+          // (부분 분석 시 폴더는 보이되 선택 안 된 파일은 목록에서 빠지도록).
+          .filter(p -> Files.isDirectory(p) || isPathIncluded(root, p, selectedRelativePaths))
           .sorted()
           .limit(50)
           .forEach(p -> {
@@ -792,44 +844,16 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 리소스 & XML 구조 ──────────────────────────
-  private void createResourceStructureSlide(XMLSlideShow ppt, AnalysisHistory h) {
-    String sourcePath = h.getSourcePath();
-    if (sourcePath == null || sourcePath.isBlank()) return;
+  private void createResourceStructureSlide(XMLSlideShow ppt, AnalysisHistory h, ProjectStructureSnapshot snapshot) {
+    if (snapshot == null || !snapshot.hasResourcesDir) return;
 
-    Path root = Paths.get(sourcePath);
-    Path resRoot = root.resolve("src").resolve("main").resolve("resources");
-    if (!Files.exists(resRoot)) return;
+    List<ProjectStructureSnapshot.ResourceEntry> configFiles = snapshot.configFiles;
+    List<ProjectStructureSnapshot.ResourceEntry> mapperFiles = snapshot.mapperFiles;
+    List<ProjectStructureSnapshot.ResourceEntry> templateFiles = snapshot.templateFiles;
 
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "리소스 구조", "Resources & XML Configuration");
-
-    List<String[]> configFiles  = new ArrayList<>(); // [name, description]
-    List<String[]> mapperFiles  = new ArrayList<>(); // [name, namespace, querySummary]
-    List<String[]> templateFiles = new ArrayList<>(); // [name, relPath]
-
-    try (Stream<Path> files = Files.walk(resRoot, 5)) {
-      files.filter(Files::isRegularFile).forEach(p -> {
-        String name = p.getFileName().toString();
-        String rel  = resRoot.relativize(p).toString().replace('\\', '/');
-        String content = "";
-        try { content = Files.readString(p); } catch (IOException ignored) {}
-
-        if (name.endsWith(".xml")) {
-          if (content.contains("<mapper") || rel.contains("mapper") || rel.contains("mybatis") || rel.contains("sqlmap")) {
-            mapperFiles.add(new String[]{name, extractMapperNamespace(content), countMapperQueries(content)});
-          } else {
-            configFiles.add(new String[]{name, inferXmlDescription(name, rel)});
-          }
-        } else if (name.endsWith(".properties") || name.endsWith(".yml") || name.endsWith(".yaml")) {
-          configFiles.add(new String[]{name, inferConfigDescription(name)});
-        } else if (name.endsWith(".html") || name.endsWith(".ftl") || name.endsWith(".vm")) {
-          templateFiles.add(new String[]{name, rel});
-        }
-      });
-    } catch (IOException e) {
-      log.warn("리소스 파일 스캔 실패: {}", resRoot, e);
-    }
 
     int y = 120;
     Color mapperColor = new Color(251, 191, 36);
@@ -838,12 +862,12 @@ public class PresentationGeneratorService {
     if (!configFiles.isEmpty()) {
       addText(slide, "⚙️ 설정 파일 (Config)", 40, y, W - 80, 18, 11, true, ACCENT, TextParagraph.TextAlign.LEFT);
       y += 22;
-      for (String[] cfg : configFiles) {
+      for (ProjectStructureSnapshot.ResourceEntry cfg : configFiles) {
         if (y + 30 > H - 40) break;
         addRoundCard(slide, 40, y, W - 80, 28, BG_CARD);
         addRect(slide, 40, y, 3, 28, ACCENT);
-        addText(slide, "📄 " + cfg[0], 52, y + 5, 320, 18, 10, true, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
-        addText(slide, cfg[1], 380, y + 5, W - 420, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
+        addText(slide, "📄 " + cfg.a(), 52, y + 5, 320, 18, 10, true, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+        addText(slide, cfg.b(), 380, y + 5, W - 420, 18, 9, false, TEXT_GRAY, TextParagraph.TextAlign.LEFT);
         y += 32;
       }
       y += 10;
@@ -853,15 +877,15 @@ public class PresentationGeneratorService {
     if (!mapperFiles.isEmpty()) {
       addText(slide, "🗃️ MyBatis Mapper XML", 40, y, W - 80, 18, 11, true, mapperColor, TextParagraph.TextAlign.LEFT);
       y += 22;
-      for (String[] mapper : mapperFiles) {
+      for (ProjectStructureSnapshot.ResourceEntry mapper : mapperFiles) {
         if (y + 48 > H - 20) break;
         addRoundCard(slide, 40, y, W - 80, 44, BG_CARD);
         addRect(slide, 40, y, 3, 44, mapperColor);
-        addText(slide, "📄 " + mapper[0], 52, y + 4, 350, 17, 10, true, mapperColor, TextParagraph.TextAlign.LEFT);
-        if (!mapper[2].isEmpty()) {
-          addText(slide, mapper[2], W - 270, y + 4, 230, 17, 9, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
+        addText(slide, "📄 " + mapper.a(), 52, y + 4, 350, 17, 10, true, mapperColor, TextParagraph.TextAlign.LEFT);
+        if (mapper.c() != null && !mapper.c().isEmpty()) {
+          addText(slide, mapper.c(), W - 270, y + 4, 230, 17, 9, false, TEXT_GRAY, TextParagraph.TextAlign.RIGHT);
         }
-        String ns = mapper[1].isEmpty() ? "(namespace 없음)" : "namespace: " + mapper[1];
+        String ns = (mapper.b() == null || mapper.b().isEmpty()) ? "(namespace 없음)" : "namespace: " + mapper.b();
         addText(slide, ns, 52, y + 23, W - 92, 17, 9, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
         y += 48;
       }
@@ -874,10 +898,10 @@ public class PresentationGeneratorService {
       y += 22;
       StringBuilder tmplNames = new StringBuilder();
       int shown = 0;
-      for (String[] t : templateFiles) {
+      for (ProjectStructureSnapshot.ResourceEntry t : templateFiles) {
         if (shown++ > 6) { tmplNames.append("  외 ").append(templateFiles.size() - 6).append("개 ..."); break; }
         if (tmplNames.length() > 0) tmplNames.append("  ·  ");
-        tmplNames.append(t[0]);
+        tmplNames.append(t.a());
       }
       addRoundCard(slide, 40, y, W - 80, 28, BG_CARD);
       addRect(slide, 40, y, 3, 28, ACCENT2);
@@ -888,6 +912,100 @@ public class PresentationGeneratorService {
     if (configFiles.isEmpty() && mapperFiles.isEmpty() && templateFiles.isEmpty()) {
       addText(slide, "src/main/resources/ 에 분석 대상 파일이 없습니다.",
           40, 250, W - 80, 40, 13, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
+    }
+  }
+
+  // ── 고객 납품용: 화면 흐름 다이어그램 (박스 + 화살표) ────────
+  /**
+   * 라우터/페이지 구조에서 뽑은 엣지로 실제 다이어그램을 그린다.
+   * edges가 비어있으면(=그릴 근거가 없으면) 슬라이드 자체를 추가하지 않고 조용히 리턴한다 —
+   * "화면 흐름" 서브섹션 텍스트가 비어 보이는 문제를 빈 슬라이드로 다시 만들지 않기 위함이다.
+   */
+  private void createScreenFlowSlide(XMLSlideShow ppt, AnalysisHistory h,
+      List<ProjectStructureSnapshot.ScreenFlowEdge> edges) {
+    if (edges == null || edges.isEmpty()) return;
+
+    // from에는 있지만 to에는 없는 노드를 루트(레벨 0)로 보고, BFS로 각 노드의 레벨(깊이)을 매긴다.
+    java.util.LinkedHashSet<String> allNodes = new java.util.LinkedHashSet<>();
+    Set<String> toNodes = new HashSet<>();
+    Map<String, List<String>> childrenOf = new LinkedHashMap<>();
+    for (ProjectStructureSnapshot.ScreenFlowEdge e : edges) {
+      allNodes.add(e.from());
+      allNodes.add(e.to());
+      toNodes.add(e.to());
+      childrenOf.computeIfAbsent(e.from(), k -> new ArrayList<>()).add(e.to());
+    }
+
+    Map<String, Integer> level = new LinkedHashMap<>();
+    java.util.ArrayDeque<String> queue = new java.util.ArrayDeque<>();
+    for (String n : allNodes) {
+      if (!toNodes.contains(n)) { level.put(n, 0); queue.add(n); }
+    }
+    if (queue.isEmpty()) { // 전부 순환 참조 등으로 루트를 못 찾으면 첫 노드를 임의로 루트로 취급
+      String first = allNodes.iterator().next();
+      level.put(first, 0);
+      queue.add(first);
+    }
+    while (!queue.isEmpty()) {
+      String cur = queue.poll();
+      int lv = level.get(cur);
+      for (String child : childrenOf.getOrDefault(cur, List.of())) {
+        if (!level.containsKey(child) || level.get(child) < lv + 1) {
+          level.put(child, lv + 1);
+          queue.add(child);
+        }
+      }
+    }
+    int maxLevelFound = level.values().stream().max(Integer::compareTo).orElse(0);
+    for (String n : allNodes) level.putIfAbsent(n, maxLevelFound + 1); // 도달 못한 노드 방어
+
+    Map<Integer, List<String>> byLevel = new java.util.TreeMap<>();
+    level.forEach((node, lv) -> byLevel.computeIfAbsent(lv, k -> new ArrayList<>()).add(node));
+
+    XSLFSlide slide = ppt.createSlide();
+    fillBackground(slide, BG_DARK);
+    addSlideHeader(slide, "화면 흐름", "Screen Flow");
+
+    int boxW = 148, boxH = 40, gapX = 20;
+    int topY = 122, bottomY = H - 24;
+    int levelCount = byLevel.size();
+    int levelGapY = levelCount > 1 ? (bottomY - topY - boxH) / (levelCount - 1) : 0;
+
+    Map<String, Rectangle2D> boxPos = new LinkedHashMap<>();
+    int levelIdx = 0;
+    for (List<String> nodes : byLevel.values()) {
+      int n = nodes.size();
+      int totalW = n * boxW + (n - 1) * gapX;
+      int startX = Math.max(24, (W - totalW) / 2);
+      int y = topY + levelIdx * levelGapY;
+      for (int i = 0; i < n; i++) {
+        int x = startX + i * (boxW + gapX);
+        String label = nodes.get(i);
+        Rectangle2D rect = new Rectangle2D.Double(x, y, boxW, boxH);
+        boxPos.put(label, rect);
+        addRoundCard(slide, x, y, boxW, boxH, BG_CARD);
+        addRect(slide, x, y, 4, boxH, ACCENT);
+        String shown = label.length() > 18 ? label.substring(0, 17) + "…" : label;
+        addText(slide, shown, x + 10, y + 8, boxW - 20, boxH - 16, 10, true, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
+      }
+      levelIdx++;
+    }
+
+    for (ProjectStructureSnapshot.ScreenFlowEdge e : edges) {
+      Rectangle2D from = boxPos.get(e.from());
+      Rectangle2D to = boxPos.get(e.to());
+      if (from == null || to == null || from.equals(to)) continue;
+
+      double x1 = from.getCenterX(), y1 = from.getMaxY();
+      double x2 = to.getCenterX(), y2 = to.getMinY();
+      if (y2 < y1) { double t = y1; y1 = y2; y2 = t; } // 레벨 계산상 항상 to가 아래지만 방어적으로 정렬
+
+      XSLFConnectorShape connector = slide.createConnector();
+      connector.setAnchor(new Rectangle2D.Double(Math.min(x1, x2), y1, Math.abs(x2 - x1), Math.max(y2 - y1, 1)));
+      connector.setLineColor(ACCENT);
+      connector.setLineWidth(1.5);
+      connector.setLineTailDecoration(LineDecoration.DecorationShape.ARROW);
+      if (x2 < x1) connector.setFlipHorizontal(true); // 자식이 왼쪽에 있어도 화살표가 자식 쪽에 오도록 보정
     }
   }
 
@@ -1007,28 +1125,56 @@ public class PresentationGeneratorService {
       String title = lines[0].replaceAll("^#+\\s*", "").trim();
       if (title.isEmpty()) continue;
 
+      // ### 서브헤더는 그 아래 실질 내용이 하나도 없으면(AI가 못 채웠으면) "▸ 제목" 불릿 자체를
+      // 생략한다 — 예전에는 항상 불릿부터 찍어놓고 봐서, 근거 없이 채우지 못한 서브섹션(예: "화면 흐름")이
+      // 제목만 있고 텅 빈 것처럼 보이는 문제가 있었다.
       StringBuilder body = new StringBuilder();
       boolean inCode = false;
+      String pendingSubTitle = null;
+      StringBuilder pendingSubBody = null;
       for (int i = 1; i < lines.length; i++) {
         String line = lines[i];
         if (line.startsWith("```")) { inCode = !inCode; continue; }
         if (inCode) continue;
-        String clean = line
-            .replaceAll("^###\\s+", "▸ ")   // ### 서브헤더 → 강조 표시
-            .replaceAll("^#+\\s*", "")        // 나머지 # 제거
-            .replaceAll("\\*\\*(.+?)\\*\\*", "[$1]") // 볼드 → 대괄호
-            .replaceAll("\\*(.+?)\\*",   "$1")
-            .replaceAll("`(.+?)`",        "$1")
-            .replaceAll("^[-*]\\s+",      "• ")
-            .replaceAll("^\\d+\\.\\s+",   "• ")
-            .trim();
-        if (!clean.isEmpty()) body.append(clean).append("\n");
+
+        if (line.startsWith("### ")) {
+          appendSubsectionIfNotEmpty(body, pendingSubTitle, pendingSubBody);
+          pendingSubTitle = line.replaceAll("^###\\s+", "").trim();
+          pendingSubBody = new StringBuilder();
+          continue;
+        }
+
+        String clean = cleanReadmeLine(line);
+        if (clean.isEmpty()) continue;
+        if (pendingSubBody != null) pendingSubBody.append(clean).append("\n");
+        else body.append(clean).append("\n");
       }
+      appendSubsectionIfNotEmpty(body, pendingSubTitle, pendingSubBody);
 
       String bodyText = body.toString().trim();
       if (bodyText.isEmpty()) continue;
       createReadmeSectionSlide(ppt, title, bodyText, ++slideCount);
     }
+  }
+
+  /** 마크다운 서식(볼드·리스트 기호·백틱)을 슬라이드용 텍스트로 변환한다 (### 헤더 처리는 호출부에서 별도 담당). */
+  private String cleanReadmeLine(String line) {
+    return line
+        .replaceAll("^#+\\s*", "")
+        .replaceAll("\\*\\*(.+?)\\*\\*", "[$1]")
+        .replaceAll("\\*(.+?)\\*", "$1")
+        .replaceAll("`(.+?)`", "$1")
+        .replaceAll("^[-*]\\s+", "• ")
+        .replaceAll("^\\d+\\.\\s+", "• ")
+        .trim();
+  }
+
+  /** ### 서브섹션 본문이 실제로 있을 때만 "▸ 제목" 불릿 + 본문을 body에 붙인다. */
+  private void appendSubsectionIfNotEmpty(StringBuilder body, String title, StringBuilder subBody) {
+    if (title == null || subBody == null) return;
+    String content = subBody.toString().trim();
+    if (content.isEmpty()) return;
+    body.append("▸ ").append(title).append("\n").append(content).append("\n");
   }
 
   private void createReadmeSectionSlide(XMLSlideShow ppt, String title, String body, int idx) {
@@ -1250,7 +1396,8 @@ public class PresentationGeneratorService {
   }
 
   // ── 소스 직접 파싱: Java 파일을 계층별로 분류 ──────────────
-  private Map<String, List<String>> collectJavaFilesByLayer(Path javaRoot) {
+  private Map<String, List<String>> collectJavaFilesByLayer(Path projectRoot, Path javaRoot,
+      Set<String> selectedRelativePaths) {
     Map<String, List<String>> result = new java.util.LinkedHashMap<>();
     result.put("Controller", new ArrayList<>());
     result.put("Service",    new ArrayList<>());
@@ -1262,6 +1409,7 @@ public class PresentationGeneratorService {
     if (!Files.exists(javaRoot)) return result;
     try (Stream<Path> files = Files.walk(javaRoot, 10)) {
       files.filter(p -> p.toString().endsWith(".java"))
+           .filter(p -> isPathIncluded(projectRoot, p, selectedRelativePaths))
            .map(p -> p.getFileName().toString().replace(".java", ""))
            .forEach(name -> {
              String lw = name.toLowerCase();
@@ -1279,7 +1427,8 @@ public class PresentationGeneratorService {
   }
 
   // ── 소스 직접 파싱: 프론트엔드 파일을 4개 계층 버킷으로 분류 ──
-  private Map<String, List<String>> collectFrontendFilesByLayer(Path root, String projectType) {
+  private Map<String, List<String>> collectFrontendFilesByLayer(Path root, String projectType,
+      Set<String> selectedRelativePaths) {
     Map<String, List<String>> result = new LinkedHashMap<>();
     for (String label : new String[]{"Pages/Routes", "Components", "State/Hooks", "API/Services"}) {
       result.put(label, new ArrayList<>());
@@ -1313,7 +1462,7 @@ public class PresentationGeneratorService {
                          : stateDirs.contains(name) ? "State/Hooks"
                          : apiDirs.contains(name)   ? "API/Services" : null;
           if (bucket != null) {
-            collectBucketFiles(result, bucket, dir);
+            collectBucketFiles(result, bucket, dir, root, selectedRelativePaths);
             return;
           }
           if (!wrapperDirs.contains(name)) return;
@@ -1324,7 +1473,7 @@ public class PresentationGeneratorService {
                                 : compDirs.contains(subName)  ? "Components"
                                 : stateDirs.contains(subName) ? "State/Hooks"
                                 : apiDirs.contains(subName)   ? "API/Services" : null;
-              if (subBucket != null) collectBucketFiles(result, subBucket, subDir);
+              if (subBucket != null) collectBucketFiles(result, subBucket, subDir, root, selectedRelativePaths);
             });
           } catch (IOException ignored) {}
         });
@@ -1335,16 +1484,147 @@ public class PresentationGeneratorService {
     return result;
   }
 
-  private void collectBucketFiles(Map<String, List<String>> result, String bucket, Path dir) {
+  private void collectBucketFiles(Map<String, List<String>> result, String bucket, Path dir,
+      Path projectRoot, Set<String> selectedRelativePaths) {
     try (Stream<Path> files = Files.walk(dir, 4)) {
       files.filter(Files::isRegularFile)
+           .filter(p -> isPathIncluded(projectRoot, p, selectedRelativePaths))
            .map(p -> p.getFileName().toString())
            .forEach(f -> result.get(bucket).add(f));
     } catch (IOException ignored) {}
   }
 
+  // ── 화면 흐름 다이어그램: 엣지(from → to) 추출 ──────────────
+  private record ScreenFlowEdge(String from, String to) {}
+
+  private static final Set<String> PAGE_INDEX_FILE_NAMES = Set.of(
+      "page.tsx", "page.jsx", "page.ts", "page.js",
+      "index.tsx", "index.jsx", "index.ts", "index.js", "index.vue");
+
+  private static final java.util.regex.Pattern ROUTE_CONFIG_PATTERN = java.util.regex.Pattern.compile(
+      "<Route\\s+[^>]*?path=[\"']([^\"']*)[\"'][^>]*?(?:element=\\{\\s*<\\s*(\\w+)|component=\\{?\\s*(\\w+))",
+      java.util.regex.Pattern.CASE_INSENSITIVE);
+
+  /**
+   * 라우터/페이지 파일이 있으면 화면 흐름(박스+화살표) 다이어그램용 엣지 목록을 만든다.
+   * 1) 파일 기반 라우팅(Next.js app/pages, Vue views 등)이면 폴더 중첩 구조 자체를 엣지로 변환.
+   * 2) 그걸로 하나도 못 찾으면 App.tsx 등 진입 파일의 &lt;Route path=... element={'<X/>'}&gt; 패턴을 정규식으로 파싱.
+   * 근거가 전혀 없으면 빈 리스트를 반환하고, 호출부(createScreenFlowSlide)는 이 경우 슬라이드 자체를 생략한다.
+   */
+  private List<ScreenFlowEdge> buildScreenFlowEdges(Path root, String projectType, Set<String> selectedRelativePaths) {
+    if (root == null || !Files.exists(root)) return List.of();
+
+    List<Path> pageRoots = new ArrayList<>();
+    if ("nextjs".equals(projectType)) {
+      Path appDir = root.resolve("app"), pagesDir = root.resolve("pages");
+      if (Files.exists(appDir)) pageRoots.add(appDir);
+      if (Files.exists(pagesDir)) pageRoots.add(pagesDir);
+    }
+    if (pageRoots.isEmpty()) {
+      Set<String> pageDirNames = Set.of("pages", "app", "views", "router", "routes");
+      Path scanBase = Files.exists(root.resolve("src")) ? root.resolve("src") : root;
+      try (Stream<Path> children = Files.list(scanBase)) {
+        children.filter(Files::isDirectory)
+            .filter(p -> pageDirNames.contains(p.getFileName().toString().toLowerCase()))
+            .forEach(pageRoots::add);
+      } catch (IOException ignored) {}
+    }
+
+    List<ScreenFlowEdge> edges = new ArrayList<>();
+    for (Path pageRoot : pageRoots) {
+      try {
+        walkPageTree(root, pageRoot, pageRoot.getFileName().toString(), 0, 3, selectedRelativePaths, edges);
+      } catch (IOException ignored) {}
+    }
+    if (!edges.isEmpty()) return dedupeEdges(edges, 14);
+
+    edges.addAll(buildRouterConfigEdges(root, selectedRelativePaths));
+    return dedupeEdges(edges, 14);
+  }
+
+  /** pages/app류 디렉터리를 재귀적으로 훑어 폴더·파일 중첩 관계를 부모→자식 엣지로 변환한다. */
+  private void walkPageTree(Path projectRoot, Path dir, String parentLabel, int depth, int maxDepth,
+      Set<String> selectedRelativePaths, List<ScreenFlowEdge> edges) throws IOException {
+    if (depth >= maxDepth) return;
+    try (Stream<Path> children = Files.list(dir)) {
+      List<Path> sorted = children
+          .filter(p -> !p.getFileName().toString().startsWith("."))
+          .filter(p -> !p.getFileName().toString().equals("node_modules"))
+          .sorted()
+          .toList();
+      for (Path child : sorted) {
+        boolean isDir = Files.isDirectory(child);
+        boolean included = isDir
+            ? hasIncludedDescendant(projectRoot, child, selectedRelativePaths)
+            : isPathIncluded(projectRoot, child, selectedRelativePaths);
+        if (!included) continue;
+
+        String childName = child.getFileName().toString();
+        if (!isDir && PAGE_INDEX_FILE_NAMES.contains(childName.toLowerCase())) {
+          // page.tsx/index.tsx 자체는 부모 폴더가 곧 그 화면이라는 의미라 별도 노드로 만들지 않는다
+          continue;
+        }
+        String childLabel = isDir ? childName : stripExtension(childName);
+        edges.add(new ScreenFlowEdge(parentLabel, childLabel));
+        if (isDir) {
+          walkPageTree(projectRoot, child, childLabel, depth + 1, maxDepth, selectedRelativePaths, edges);
+        }
+      }
+    }
+  }
+
+  private boolean hasIncludedDescendant(Path projectRoot, Path dir, Set<String> selectedRelativePaths) {
+    if (selectedRelativePaths == null || selectedRelativePaths.isEmpty()) return true;
+    try (Stream<Path> files = Files.walk(dir, 6)) {
+      return files.filter(Files::isRegularFile).anyMatch(p -> isPathIncluded(projectRoot, p, selectedRelativePaths));
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  private String stripExtension(String fileName) {
+    int i = fileName.lastIndexOf('.');
+    return i > 0 ? fileName.substring(0, i) : fileName;
+  }
+
+  /** 파일 기반 라우팅이 없을 때, 진입 파일의 &lt;Route path=... element={'<X/>'}&gt; 류 선언을 느슨하게 정규식으로 파싱한다. */
+  private List<ScreenFlowEdge> buildRouterConfigEdges(Path root, Set<String> selectedRelativePaths) {
+    List<ScreenFlowEdge> edges = new ArrayList<>();
+    Set<String> candidateNames = Set.of("app.tsx", "app.jsx", "app.js", "app.vue",
+        "main.tsx", "main.jsx", "router.tsx", "router.jsx", "routes.tsx", "routes.jsx", "index.tsx");
+    try (Stream<Path> stream = Files.walk(root, 4)) {
+      List<Path> candidates = stream
+          .filter(Files::isRegularFile)
+          .filter(p -> candidateNames.contains(p.getFileName().toString().toLowerCase()))
+          .filter(p -> isPathIncluded(root, p, selectedRelativePaths))
+          .limit(5)
+          .toList();
+      for (Path file : candidates) {
+        String entryLabel = stripExtension(file.getFileName().toString());
+        String content;
+        try {
+          content = Files.readString(file);
+        } catch (IOException e) {
+          continue;
+        }
+        java.util.regex.Matcher m = ROUTE_CONFIG_PATTERN.matcher(content);
+        while (m.find()) {
+          String component = m.group(2) != null ? m.group(2) : m.group(3);
+          if (component == null || component.isBlank()) continue;
+          edges.add(new ScreenFlowEdge(entryLabel, component));
+        }
+      }
+    } catch (IOException ignored) {}
+    return edges;
+  }
+
+  private List<ScreenFlowEdge> dedupeEdges(List<ScreenFlowEdge> edges, int max) {
+    List<ScreenFlowEdge> unique = new ArrayList<>(new java.util.LinkedHashSet<>(edges));
+    return unique.size() > max ? unique.subList(0, max) : unique;
+  }
+
   // ── 소스 직접 파싱: Python 파일을 4개 계층 버킷으로 분류 ────
-  private Map<String, List<String>> collectPythonFilesByLayer(Path root) {
+  private Map<String, List<String>> collectPythonFilesByLayer(Path root, Set<String> selectedRelativePaths) {
     Map<String, List<String>> result = new LinkedHashMap<>();
     for (String label : new String[]{"Router/View", "Service/Logic", "Model", "Config"}) {
       result.put(label, new ArrayList<>());
@@ -1367,6 +1647,7 @@ public class PresentationGeneratorService {
         try (Stream<Path> files = Files.walk(dir, 4)) {
           files.filter(Files::isRegularFile)
                .filter(p -> p.toString().endsWith(".py"))
+               .filter(p -> isPathIncluded(root, p, selectedRelativePaths))
                .map(p -> p.getFileName().toString())
                .forEach(f -> result.get(bucket).add(f));
         } catch (IOException ignored) {}
@@ -1382,7 +1663,8 @@ public class PresentationGeneratorService {
       "__pycache__", ".venv", "venv", "dist", ".next", ".idea", ".gradle");
 
   // ── 소스 직접 파싱: 확장자 기준 상위 N개 그룹 (general 타입용) ──
-  private LinkedHashMap<String, List<String>> collectGeneralFilesByExtension(Path root, int topN) {
+  private LinkedHashMap<String, List<String>> collectGeneralFilesByExtension(Path root, int topN,
+      Set<String> selectedRelativePaths) {
     Map<String, List<String>> byExt = new java.util.HashMap<>();
     if (!Files.exists(root)) return new LinkedHashMap<>();
     try (Stream<Path> stream = Files.walk(root, 8)) {
@@ -1395,6 +1677,7 @@ public class PresentationGeneratorService {
             }
             return true;
           })
+          .filter(p -> isPathIncluded(root, p, selectedRelativePaths))
           .forEach(p -> {
             String name = p.getFileName().toString();
             int i = name.lastIndexOf('.');
@@ -1433,7 +1716,7 @@ public class PresentationGeneratorService {
   }
 
   /** general 타입: 최상위 폴더별 파일 목록. 폴더가 없는 완전 평면 구조면 확장자 그룹으로 폴백 */
-  private List<String[]> buildGeneralDirList(Path root) {
+  private List<String[]> buildGeneralDirList(Path root, Set<String> selectedRelativePaths) {
     List<String[]> result = new ArrayList<>();
     if (!Files.exists(root)) return result;
     try (Stream<Path> children = Files.list(root)) {
@@ -1445,6 +1728,7 @@ public class PresentationGeneratorService {
             List<String> fileNames = new ArrayList<>();
             try (Stream<Path> files = Files.walk(dir, 4)) {
               files.filter(Files::isRegularFile)
+                   .filter(p -> isPathIncluded(root, p, selectedRelativePaths))
                    .map(p -> p.getFileName().toString())
                    .forEach(fileNames::add);
             } catch (IOException ignored) {}
@@ -1468,18 +1752,18 @@ public class PresentationGeneratorService {
     }
 
     if (result.isEmpty()) {
-      collectGeneralFilesByExtension(root, 6).forEach((ext, files) ->
+      collectGeneralFilesByExtension(root, 6, selectedRelativePaths).forEach((ext, files) ->
           result.add(new String[]{ext, inferExtensionDescription(ext), files.size() + "개"}));
     }
     return result;
   }
 
   // ── 고객 납품용: 시스템 아키텍처 슬라이드 ──────────────────
-  private void createArchitectureSlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType,
-      Map<String, List<String>> generalFilesByExt) {
+  private void createArchitectureSlide(XMLSlideShow ppt, AnalysisHistory h, ProjectStructureSnapshot snapshot) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "시스템 아키텍처", "System Architecture");
+    String projectType = snapshot != null ? snapshot.projectType : "general";
 
     // 계층 흐름 다이어그램 (프로젝트 타입별 라벨) — 소스 경로가 없어도 항상 렌더링한다.
     String[] flowNames;
@@ -1521,16 +1805,15 @@ public class PresentationGeneratorService {
       }
     }
     addRect(slide, 40, 182, W - 80, 1, BG_CARD);
-    if (root == null) return;
+    if (snapshot == null) return;
 
     // 계층별 파일 현황 (프로젝트 타입별 카드)
-    Map<String, List<String>> byLayer;
+    Map<String, List<String>> byLayer = snapshot.byLayer;
     String[] keys;
     String[] icons;
     String[] roles;
     switch (projectType) {
       case "react", "nextjs", "vue" -> {
-        byLayer = collectFrontendFilesByLayer(root, projectType);
         keys = new String[]{"Pages/Routes", "Components", "State/Hooks", "API/Services"};
         icons = new String[]{"🧭", "🧩", "🪝", "🔌"};
         roles = new String[]{
@@ -1541,7 +1824,6 @@ public class PresentationGeneratorService {
         };
       }
       case "python" -> {
-        byLayer = collectPythonFilesByLayer(root);
         keys = new String[]{"Router/View", "Service/Logic", "Model", "Config"};
         icons = new String[]{"🧭", "⚙️", "🗄️", "🔧"};
         roles = new String[]{
@@ -1552,8 +1834,6 @@ public class PresentationGeneratorService {
         };
       }
       case "java" -> {
-        Path javaRoot = root.resolve("src").resolve("main").resolve("java");
-        byLayer = collectJavaFilesByLayer(javaRoot);
         keys = new String[]{"Controller", "Service", "Repository", "Entity"};
         icons = new String[]{"🎮", "⚙️", "🗄️", "📦"};
         roles = new String[]{
@@ -1564,8 +1844,7 @@ public class PresentationGeneratorService {
         };
       }
       default -> {
-        byLayer = generalFilesByExt;
-        keys = generalFilesByExt.keySet().toArray(new String[0]);
+        keys = byLayer.keySet().toArray(new String[0]);
         icons = new String[keys.length];
         java.util.Arrays.fill(icons, "📄");
         roles = new String[keys.length];
@@ -1610,31 +1889,28 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 도메인별 기능 분석 슬라이드 ────────────────
-  private void createDomainAnalysisSlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType) {
+  private void createDomainAnalysisSlide(XMLSlideShow ppt, AnalysisHistory h, ProjectStructureSnapshot snapshot) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "도메인별 기능 분석", "Domain Function Analysis");
 
-    if (root == null) {
+    if (snapshot == null) {
       addText(slide, "(소스 경로 정보 없음)", 40, 280, W - 80, 40, 14, false, TEXT_GRAY, TextParagraph.TextAlign.CENTER);
       return;
     }
 
-    List<String[]> packages = switch (projectType) {
-      case "java" -> buildPackageList(root.resolve("src").resolve("main").resolve("java"));
-      case "react", "nextjs", "vue" -> buildFrontendDirList(root, projectType);
-      case "python" -> buildPythonModuleList(root);
-      default -> buildGeneralDirList(root);
-    };
+    List<ProjectStructureSnapshot.DirCard> packages = new ArrayList<>(snapshot.packages);
 
     // Claude가 실제로 분석한 README의 "도메인별 기능 분석" 섹션이 있으면 그 설명을 우선 사용하고,
     // 언급이 없는 패키지만 파일명 기반 추론(inferPackageDescription)으로 보완한다.
     String domainSection = extractReadmeSection(h.getReadmeContent(), "도메인별 기능 분석");
     if (domainSection != null) {
-      for (String[] pkg : packages) {
-        String readmeDesc = findPackageDescriptionInReadme(domainSection, pkg[0]);
+      for (int i = 0; i < packages.size(); i++) {
+        ProjectStructureSnapshot.DirCard pkg = packages.get(i);
+        String readmeDesc = findPackageDescriptionInReadme(domainSection, pkg.name());
         if (readmeDesc != null) {
-          pkg[1] = cleanMarkdownSnippet(readmeDesc, 120);
+          packages.set(i, new ProjectStructureSnapshot.DirCard(
+              pkg.name(), cleanMarkdownSnippet(readmeDesc, 120), pkg.summary()));
         }
       }
     }
@@ -1663,7 +1939,7 @@ public class PresentationGeneratorService {
       int x = 40 + col * (colW + 20);
       int y = startY + row * (cardH + gap);
 
-      String[] pkg = packages.get(i);
+      ProjectStructureSnapshot.DirCard pkg = packages.get(i);
       Color dc = domainColors[shown % domainColors.length];
 
       // 카드 배경 + 좌측 컬러 바 (5px)
@@ -1671,11 +1947,11 @@ public class PresentationGeneratorService {
       addRect(slide, x, y, 5, cardH, dc);
 
       // 도메인명 (12pt, bold) — 고정 Y 위치
-      addText(slide, pkg[0], x + 16, y + 10, colW - 110, 22, 12, true, dc, TextParagraph.TextAlign.LEFT);
+      addText(slide, pkg.name(), x + 16, y + 10, colW - 110, 22, 12, true, dc, TextParagraph.TextAlign.LEFT);
 
       // 클래스 타입 요약 (9pt, 우측) — 도메인명과 같은 행
-      if (pkg[2] != null && !pkg[2].isEmpty()) {
-        String typeShort = pkg[2].length() > 28 ? pkg[2].substring(0, 26) + "…" : pkg[2];
+      if (pkg.summary() != null && !pkg.summary().isEmpty()) {
+        String typeShort = pkg.summary().length() > 28 ? pkg.summary().substring(0, 26) + "…" : pkg.summary();
         addText(slide, typeShort, x + colW - 100, y + 12, 90, 18, 8, false,
             new Color(148, 163, 184), TextParagraph.TextAlign.RIGHT);
       }
@@ -1684,7 +1960,7 @@ public class PresentationGeneratorService {
       addRect(slide, x + 16, y + 38, colW - 30, 1, new Color(51, 65, 85));
 
       // 기능 설명 (10pt, 흰색) — 구분선 아래 고정, 최대 2줄 표시
-      String desc = pkg[1] != null ? pkg[1] : "";
+      String desc = pkg.description() != null ? pkg.description() : "";
       if (desc.length() > 60) desc = desc.substring(0, 58) + "…";
       addText(slide, desc, x + 16, y + 44, colW - 28, 44, 10, false, TEXT_WHITE, TextParagraph.TextAlign.LEFT);
 
@@ -1699,18 +1975,17 @@ public class PresentationGeneratorService {
   }
 
   // ── 고객 납품용: 계층별 역할 정의 슬라이드 ──────────────────
-  private void createLayerResponsibilitySlide(XMLSlideShow ppt, AnalysisHistory h, Path root, String projectType,
-      Map<String, List<String>> generalFilesByExt) {
+  private void createLayerResponsibilitySlide(XMLSlideShow ppt, AnalysisHistory h, ProjectStructureSnapshot snapshot) {
     XSLFSlide slide = ppt.createSlide();
     fillBackground(slide, BG_DARK);
     addSlideHeader(slide, "계층별 역할 정의", "Layer Responsibility");
 
-    Map<String, List<String>> byLayer;
+    String projectType = snapshot != null ? snapshot.projectType : "general";
+    Map<String, List<String>> byLayer = snapshot != null ? snapshot.byLayer : new LinkedHashMap<>();
     // 각 행의 4번째 항목은 Claude README의 "### OO" 하위 섹션명 — null이면 매칭을 시도하지 않는다.
     String[][] layerDef;
     switch (projectType) {
       case "react", "nextjs", "vue" -> {
-        byLayer = (root != null) ? collectFrontendFilesByLayer(root, projectType) : new LinkedHashMap<>();
         layerDef = new String[][]{
             {"🧭  Pages/Routes",
              "화면 라우팅 및 페이지 구성\n• URL 경로별 화면 매핑\n• 데이터 로딩 및 초기 렌더\n• 레이아웃 조합",
@@ -1727,7 +2002,6 @@ public class PresentationGeneratorService {
         };
       }
       case "python" -> {
-        byLayer = (root != null) ? collectPythonFilesByLayer(root) : new LinkedHashMap<>();
         layerDef = new String[][]{
             {"🧭  Router/View",
              "요청 라우팅 및 뷰 처리\n• URL 매핑·요청 파라미터 검증\n• 응답 포맷팅",
@@ -1744,8 +2018,6 @@ public class PresentationGeneratorService {
         };
       }
       case "java" -> {
-        Path javaRoot = (root != null) ? root.resolve("src").resolve("main").resolve("java") : null;
-        byLayer = (javaRoot != null) ? collectJavaFilesByLayer(javaRoot) : new LinkedHashMap<>();
         layerDef = new String[][]{
             {"🎮  Controller",
              "HTTP 요청 수신 및 응답 처리\n• @GetMapping / @PostMapping 등 매핑\n• 입력값 검증 및 응답 포맷팅\n• 인증·인가 검사 (Spring Security)\n• Service 계층 위임 처리",
@@ -1762,8 +2034,7 @@ public class PresentationGeneratorService {
         };
       }
       default -> {
-        byLayer = generalFilesByExt;
-        layerDef = generalFilesByExt.keySet().stream()
+        layerDef = byLayer.keySet().stream()
             .map(ext -> new String[]{"📄  " + ext, inferExtensionDescription(ext) + "\n실제 프로젝트에 존재하는 파일 그룹입니다.", ext, null})
             .toArray(String[][]::new);
       }
