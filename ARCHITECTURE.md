@@ -48,29 +48,131 @@
 
 ## 3. 도메인 모델 (ERD)
 
-모든 엔티티가 진짜 JPA 연관관계(`@ManyToOne`) 대신 **`Long userId` 컬럼만 갖는 느슨한 FK 패턴**을 쓴다(`User`↔`Role`의 `@ManyToMany` 하나만 예외). DB 레벨 외래키 제약도 걸지 않는다 — 세션/이력처럼 자주 생성·삭제되는 데이터가 사용자 삭제 등과 강하게 얽히지 않도록 하기 위한 의도적 선택으로 보인다.
+### 3-1. 설계 원칙: 느슨한 FK
+
+`@Entity`는 정확히 7개(`User`, `Role`, `AnalysisHistory`, `SessionState`, `Notification`, `AuditLog`, `ApiUsage`)이고, 이 중 진짜 JPA 연관관계는 `User`↔`Role`의 `@ManyToMany` **하나뿐**이다. 나머지는 전부 `Long userId` 값 컬럼만 갖고, **DB 레벨 외래키 제약도 걸지 않는다**(`ddl-auto=update`가 관리하는 스키마에 FK 제약 자체가 없음).
+
+- **장점**: 세션/이력/로그처럼 자주 생성되는 데이터가 사용자 테이블과 강하게 결합되지 않아, 마이그레이션이나 부분 정리가 자유롭다.
+- **트레이드오프**: 3-4에서 다루듯 사용자 삭제 시 참조 무결성을 애플리케이션이 전혀 보장하지 않는다 — **고아 레코드가 남는다.**
+
+### 3-2. ERD
 
 ```
-User (users) ──M:N── Role (roles)                         [조인테이블 user_roles]
+User (users) ──M:N── Role (roles)                    [조인테이블 user_roles(user_seq, role_id)]
   │
-  ├─ AnalysisHistory.user_id   (분석 실행 이력, PPT/README 산출물의 근거 데이터)
-  ├─ SessionState.user_id      (분석 세션의 실시간 진행 상태 - AnalysisHistory.session_id와 값으로 매칭)
-  ├─ Notification.user_id      (target_id가 상황에 따라 AnalysisHistory.id | User.seq를 가리키는 다형 참조)
-  ├─ AuditLog.user_id          (target_id도 대상 타입에 따라 다른 엔티티를 가리키는 다형 참조)
-  └─ ApiUsage.user_id          (이 앱 자체의 HTTP 요청 트래픽/성능 로그)
+  ├─ AnalysisHistory.user_id   (분석 실행 이력 - "내 분석 이력" 화면, PPT/README 산출물의 근거)
+  │     ▲
+  │     └─ session_id 값으로 SessionState.sessionId와 매칭 (FK 아님, 값 일치)
+  │
+  ├─ SessionState.user_id      (분석 세션의 실시간 진행 상태, sessionId=PK가 UUID 문자열)
+  ├─ Notification.user_id      ── target_id → AnalysisHistory.id | User.seq  (target_type으로 구분, 다형 참조)
+  ├─ AuditLog.user_id          ── target_id → User.seq | AnalysisHistory.id  (target으로 구분, 다형 참조)
+  └─ ApiUsage.user_id          (이 앱 자체의 HTTP 요청 트래픽/성능 로그, 순수 기록용 - 다른 엔티티가 참조 안 함)
 ```
 
-| 엔티티 | 테이블 | 주요 필드 |
-|---|---|---|
-| `User` | `users` | seq(PK), userId(로그인ID, unique), email(unique), passwordHash, isActive |
-| `Role` | `roles` | id(PK), name(unique), description |
-| `AnalysisHistory` | `analysis_history` | id(PK), userId, sessionId, sourcePath/outputPath, total/success/skip/failureCount, status, modelName, input/output/totalTokens, estimatedCost, readmeContent/claudeMdContent(TEXT), **selectedPathsJson**(부분 분석 범위), **structureSnapshotJson**(PPT 구조 스냅샷) |
-| `SessionState` | `analysis_sessions` | sessionId(PK, UUID), userId, username, sourcePath, status, totalFiles/processedFiles, requirements(TEXT), pendingFilePathsJson(재개용) |
-| `Notification` | `notifications` | id(PK), userId, type, title, message, targetId/targetType, isRead |
-| `AuditLog` | `audit_logs` | id(PK), userId, action, target/targetId/targetName, status, changes(JSON TEXT), ipAddress |
-| `ApiUsage` | `api_usage` | id(PK), userId, endpoint, method, request/responseSize, statusCode, executionTimeMs |
+### 3-3. 엔티티별 전체 필드
 
-`AnalysisHistory`와 `SessionState`가 나뉜 이유: `SessionState`는 진행 중 실시간 폴링(2초 간격)용 휘발성 상태(메모리 우선, `ConcurrentHashMap`)이고, `AnalysisHistory`는 "내 분석 이력" 화면과 PPT 생성이 참조하는 영속 기록이다. 진행 중에는 `SessionState`가 진실이고, 완료/일시정지/취소 시점에 그 결과가 `AnalysisHistory`로 반영된다(이 반영 타이밍이 어긋나 발생했던 버그와 수정 내역은 [`SESSION_STATUS_CONSISTENCY_FIXES.md`](docs/technical/SESSION_STATUS_CONSISTENCY_FIXES.md) 참고).
+**`User`** (`users`) — Spring Security `UserDetails` 구현체
+| 컬럼 | 타입/제약 | 비고 |
+|---|---|---|
+| seq | PK, IDENTITY | JWT의 `seq` claim과 동일 |
+| user_id | unique, not null, 50자 | 로그인 ID, `UserDetails.getUsername()` |
+| display_name | 100자 | null이면 `getDisplayName()`이 userId로 폴백 |
+| email | unique, not null, 100자 | |
+| password_hash | not null | BCrypt 해시 |
+| is_active | boolean, 기본 true | `UserDetails.isEnabled()`에 매핑 - false면 로그인 거부 |
+| created_at / updated_at | | |
+| roles | `@ManyToMany(EAGER)` | 조인테이블 `user_roles` |
+
+**`Role`** (`roles`)
+| 컬럼 | 타입/제약 |
+|---|---|
+| id | PK, IDENTITY |
+| name | unique, not null, 50자 (예: `ADMIN`, `USER`) |
+| description | 200자 |
+
+**`AnalysisHistory`** (`analysis_history`) — "내 분석 이력"/PPT의 영속 기록
+| 컬럼 | 타입/제약 | 비고 |
+|---|---|---|
+| id | PK, IDENTITY | |
+| user_id | not null | 소유자 - `history.getUserId().equals(user.getSeq())`로 접근 제어 |
+| session_id | 36자 | `SessionState.sessionId`(UUID)와 값으로 매칭 |
+| source_path / output_path | | |
+| total/success/skip/failure_count | Integer | |
+| processing_time_ms | Long | |
+| status | String | `IN_PROGRESS`\|`PAUSED`\|`CANCELLED`\|`FAILED`\|`COMPLETED` |
+| created_at / completed_at | | |
+| model_name | 100자 | 사용된 Claude 모델 |
+| input/output/total_tokens | Long | |
+| estimated_cost | Double | |
+| readme_path / readme_content(TEXT) | | |
+| claude_md_content(TEXT) | | 이 분석 세션 전용으로 AI가 생성한 CLAUDE.md 원문 |
+| avg_time_per_file | Double | |
+| **selected_paths_json**(TEXT) | | 부분 분석 시 선택된 상대경로 목록(JSON 배열). null=전체 분석 |
+| **structure_snapshot_json**(TEXT) | | PPT용 `ProjectStructureSnapshot`(JSON). null이면 다운로드 시 라이브 스캔 폴백 |
+
+**`SessionState`** (`analysis_sessions`) — 진행 중 세션의 폴링용 상태(메모리 우선, DB는 재개용 백업)
+| 컬럼 | 타입/제약 | 비고 |
+|---|---|---|
+| session_id | PK, 36자, UUID | AnalysisHistory와 값으로 매칭되는 유일한 연결고리 |
+| user_id | | |
+| username | 100자 | 재개 시 스레드 재시작에 필요 |
+| source_path / output_path | | |
+| status | | `IN_PROGRESS`\|`PAUSED`\|`CANCELLED` 등 |
+| total_files / processed_files | int | |
+| is_cancelled / is_analysis_completed | boolean | |
+| paused_at / resumed_at | | |
+| pending_file_paths_json(TEXT) | | 일시정지 시점 미처리 파일 목록 - 재개 시 이걸로 이어감 |
+| requirements(TEXT) | | 사용자가 입력한 세션별 추가 요구사항(CLAUDE.md 생성 재료) |
+| force_active | boolean | |
+
+`currentPhase`, `recentLogs`, `patchedFilePaths`, `statistics` 등 실시간 폴링에 쓰이는 필드들은 `@Transient`(DB 미저장, 메모리 전용)다 — 서버가 재시작되면 진행 중 로그/상세 통계는 사라지고 `pending_file_paths_json` 등 DB에 남은 최소 정보로만 재개 가능하다.
+
+**`Notification`** (`notifications`)
+| 컬럼 | 타입/제약 | 비고 |
+|---|---|---|
+| id | PK | |
+| user_id | not null | 수신자 |
+| type | 50자, not null | `ANALYSIS_COMPLETED`, `ANALYSIS_FAILED`, `USER_CREATED`, `ERROR` 등 |
+| title | 200자, not null | |
+| message | 1000자 | |
+| target_id / target_type | | 다형 참조(예: `ANALYSIS`→`AnalysisHistory.id`) |
+| is_read / read_at | | |
+| created_at | not null | |
+| action_url | 255자 | 클릭 시 이동 경로 |
+
+**`AuditLog`** (`audit_logs`)
+| 컬럼 | 타입/제약 | 비고 |
+|---|---|---|
+| id | PK | |
+| user_id | | 행위자 (로그인 실패 등은 대상 사용자가 없을 수도 있어 nullable) |
+| username | 100자 | userId가 없어도 문자열로 남기기 위한 스냅샷 |
+| action | 50자, not null | `CREATE`\|`UPDATE`\|`DELETE`\|`LOGIN`\|`LOGOUT` |
+| target | 50자, not null | `USER`\|`ANALYSIS`\|`ANALYSIS_HISTORY`\|`SETTINGS` 등 |
+| target_id / target_name | | |
+| status | 20자 | `SUCCESS`\|`FAILURE` |
+| changes | 2000자 | 변경 전/후 JSON |
+| details | 500자 | |
+| timestamp | not null | |
+| ip_address | 50자 | |
+
+**`ApiUsage`** (`api_usage`)
+| 컬럼 | 타입/제약 |
+|---|---|
+| id | PK |
+| user_id, endpoint, method | |
+| request_size / response_size | long, 바이트 |
+| status_code | int |
+| execution_time_ms | long |
+| timestamp, ip_address | |
+
+### 3-4. 알려진 트레이드오프: 사용자 삭제 시 고아 레코드
+
+`UserController.deleteUser()`(`DELETE /api/users/{userSeq}`)는 `user.getRoles().clear()` 후 `User` 로우만 삭제한다. **`AnalysisHistory`/`SessionState`/`Notification`/`AuditLog`/`ApiUsage`에 남아있는 `user_id`는 정리되지 않는다** — FK 제약도 cascade도 없으므로 그대로 존재하지 않는 `seq`를 가리키는 고아 레코드가 된다. 통계/이력 조회 화면에서 이런 사용자를 "탈퇴한 사용자"로 표시하는 별도 처리는 없으므로, 실제로 사용자를 자주 삭제하는 운영 환경이라면 이 부분을 보강해야 한다(소프트 삭제로 전환하거나, 삭제 시 관련 레코드를 정리/익명화하는 배치 추가 등).
+
+### 3-5. `AnalysisHistory` ↔ `SessionState`의 관계
+
+`AnalysisHistory`는 `SessionState`는 **같은 `sessionId` 값을 공유**할 뿐 JPA 연관관계가 아니다. 분석이 시작되면 `SessionState`(메모리, 폴링용)가 먼저 만들어지고, 파일 목록 수집이 끝난 직후 같은 `sessionId`로 `AnalysisHistory`(DB, 영속 기록)가 생성된다. 진행 중에는 `SessionState`가 진실이고, 완료/일시정지/취소 시점에 그 결과가 `AnalysisHistory`로 반영된다 — 이 반영 타이밍이 어긋나 발생했던 버그(취소했는데 COMPLETED로 기록, 일시정지 직후 한동안 IN_PROGRESS로 보임 등)와 수정 내역은 [`SESSION_STATUS_CONSISTENCY_FIXES.md`](docs/technical/SESSION_STATUS_CONSISTENCY_FIXES.md) 참고.
 
 ---
 
