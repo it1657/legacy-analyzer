@@ -98,12 +98,90 @@ src/main/java/com/legacy/
 
 ## 5. 인증/인가
 
-- Stateless JWT (`SessionCreationPolicy.STATELESS`), 세션 쿠키 없음. `jwt.expiration-ms` 기본 15분.
-- 토큰은 `Authorization: Bearer` 헤더가 기본이고, SSE/EventSource처럼 헤더를 못 쓰는 요청은 쿼리 파라미터 `?token=`으로도 허용한다(`JwtAuthenticationFilter`).
-- 권한 규칙(`SecurityConfig`): `/`, `/auth/login`, 정적 리소스는 공개. `/api/admin/**`은 `ROLE_ADMIN`. 그 외 `/api/**`은 인증 필요.
-- **회원가입(self-signup) 엔드포인트가 없다** — 계정 생성은 `POST /api/admin/users/register`(관리자 전용)로만 가능. 기본 admin 계정은 앱 최초 기동 시 `DataInitializer`가 생성한다.
-- 필터 체인 순서: `JwtAuthenticationFilter`(인증) → `ApiUsageFilter`(로깅, 인증된 사용자 기준으로 기록하기 위해 반드시 뒤에 위치).
-- 서버 경로 직접 지정 분석(관리자 전용)이 `ROLE_ADMIN`으로 제한된 이유: 이 서버가 실행 중인 머신의 임의 파일시스템 경로를 읽고 쓸 수 있는 기능이라 일반 사용자에게는 원격 업로드 분석만 노출한다.
+### 5-1. 설계 요약
+
+- **Stateless JWT** (`SessionCreationPolicy.STATELESS`) — 서버가 세션을 전혀 들고 있지 않는다. 매 요청마다 토큰만으로 인증 상태를 재구성한다.
+- **HS256 서명**, 비밀키는 `jwt.secret-key`(환경변수/properties, 기본값 내장), **만료 15분**(`jwt.expiration-ms:900000`).
+- **리프레시 토큰 없음** — 토큰이 만료되면 재로그인 외에 복구 수단이 없다. 프론트엔드도 401을 가로채 자동으로 재로그인시키는 로직이 없어서, 만료 후에는 그다음 API 호출이 개별적으로 실패한다(사용자가 새로고침/재로그인해야 함). 장시간 걸리는 대량 분석 작업 중에는 이 부분이 실사용 시 걸림돌이 될 수 있다는 점을 알아두는 게 좋다.
+- **로그아웃은 순수 클라이언트 동작**이다 — 서버에 토큰 무효화(블랙리스트) 엔드포인트가 없고, 프론트엔드가 `localStorage.removeItem('token')`만 하면 끝. 즉 발급된 토큰은 만료 전까지는 서버가 강제로 무효화할 방법이 없다.
+- **회원가입(self-signup) 엔드포인트가 없다** — 계정 생성은 `POST /api/admin/users/register`(관리자 전용)로만 가능.
+
+### 5-2. 로그인 ~ 인증된 요청까지 시퀀스
+
+```
+[Browser]                          [AuthController]        [AuthenticationManager]   [CustomUserDetailsService]
+   │  POST /auth/login                    │                          │                        │
+   │  {userId, password}                  │                          │                        │
+   ├──────────────────────────────────────▶                          │                        │
+   │                                       │  authenticate(token)     │                        │
+   │                                       ├──────────────────────────▶ loadUserByUsername(id)  │
+   │                                       │                          ├────────────────────────▶
+   │                                       │                          │  User(BCrypt 해시 포함)  │
+   │                                       │                          ◀────────────────────────┤
+   │                                       │  비밀번호 matches() 검증   │                        │
+   │                                       ◀──────────────────────────┤                        │
+   │                                       │  JwtTokenProvider.generateToken(userId, seq)       │
+   │                                       │  AuditLogService.logLogin(userId, ip)              │
+   │  200 { token, seq, userId, roles[] }  │                          │                        │
+   ◀───────────────────────────────────────┤                          │                        │
+   │  localStorage.setItem('token', ...)   │                          │                        │
+   │  localStorage.setItem('userId'/'roles')                          │                        │
+   │                                       │                          │                        │
+   │  ── 이후 모든 API 요청 ──              │      [JwtAuthenticationFilter]                     │
+   │  GET/POST /api/**                     │              │                                     │
+   │  Authorization: Bearer <token>        │              │                                     │
+   ├────────────────────────────────────────────────────▶ extractToken → validateToken(HS256)   │
+   │                                       │              │  getUsernameFromToken(sub claim)     │
+   │                                       │              ├─────────────────────────────────────▶
+   │                                       │              │           loadUserByUsername          │
+   │                                       │              ◀─────────────────────────────────────┤
+   │                                       │  SecurityContextHolder.setAuthentication(...)        │
+   │                                       │              │  (권한: ROLE_ADMIN / ROLE_USER)        │
+   │                                       │              ▼                                       │
+   │                                       │      [ApiUsageFilter] → 요청 크기/소요시간 로깅       │
+   │                                       │              ▼                                       │
+   │                                       │        컨트롤러 진입 (@PreAuthorize / hasRole 평가)   │
+```
+
+로그인 실패 시(`AuthenticationManager.authenticate()`가 예외 던짐)에는 `AuditLogService.logLoginFailure(userId, ip)`를 기록하고 401을 반환한다 — 실패 횟수 제한(계정 잠금)은 없다.
+
+SSE/EventSource처럼 커스텀 헤더를 못 붙이는 요청(`analyze-folder-stream` 등)은 `Authorization` 헤더 대신 쿼리 파라미터 `?token=`으로도 토큰을 받는다(`JwtAuthenticationFilter.extractTokenFromRequest()` 2순위 경로) — URL에 토큰이 노출되므로 로그/브라우저 히스토리에 남을 수 있다는 트레이드오프가 있다.
+
+### 5-3. JWT 페이로드
+
+```json
+{
+  "sub": "admin",        // userId(로그인 ID) - Spring Security principal name
+  "seq": 1,               // User.seq (DB PK) - 커스텀 claim, 파일/이력 소유권 검사에 사용
+  "iat": 1752633600,
+  "exp": 1752634500        // iat + 15분
+}
+```
+컨트롤러 단에서 `Authentication`으로 `User` 엔티티(principal) 전체를 받을 수 있어 `user.getSeq()`를 바로 꺼내 쓴다(예: `AnalysisHistory.userId` 소유권 비교 시 `history.getUserId().equals(user.getSeq())`).
+
+### 5-4. 권한 규칙 (`SecurityConfig.filterChain`)
+
+| 경로 패턴 | 규칙 |
+|---|---|
+| `/`, `/auth/login`, `/h2-console/**`, `/css\|js\|images/**` | `permitAll` |
+| `/admin/**`, `/my-activity` | `permitAll` (페이지 자체는 열려있고, 페이지 내 JS가 `localStorage` 토큰 유무/역할로 클라이언트 사이드 가드) |
+| `/api/admin/**` | `hasRole("ADMIN")` |
+| `/api/**` (그 외) | `authenticated()` |
+| 나머지 전부 | `authenticated()` |
+
+CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 쿠키를 안 쓰고 매 요청에 `Authorization` 헤더로 토큰을 실어야만 인증되는 구조라(브라우저가 자동으로 붙여주지 않음) 전통적 CSRF 공격 벡터 자체가 성립하지 않기 때문이다.
+
+`@EnableMethodSecurity(prePostEnabled = true)`가 켜져 있어 컨트롤러 메서드에 `@PreAuthorize`도 쓸 수 있지만, 이 프로젝트는 대부분 `SecurityConfig`의 경로 매처와 컨트롤러 내부의 수동 `if (!isAdmin(authentication)) ...` 체크(예: `MainApiController.isAdmin()`, `MonitoringController`의 소유자/ADMIN 체크)를 조합해서 권한을 검사한다.
+
+### 5-5. 비밀번호/계정 부트스트랩
+
+- 비밀번호는 `BCryptPasswordEncoder`로 해시(`User.passwordHash`), 평문 저장 없음.
+- 최초 기동 시 `DataInitializer`(`CommandLineRunner`)가 `ADMIN`/`USER` 역할과 기본 계정 2개를 존재하지 않을 때만 생성: **`admin`/`admin`**(ROLE_ADMIN), **`test`/`1`**(ROLE_USER). 운영 배포 시 반드시 변경해야 하는 부분.
+- 계정 활성화 여부는 `User.isActive`(`UserDetails.isEnabled()`에 매핑) — 관리자가 `PUT /api/users/{seq}/activate`로 토글. 비활성 계정은 로그인 시점에 Spring Security가 자동으로 거부한다.
+
+### 5-6. 왜 서버 경로 직접 지정을 ROLE_ADMIN으로 제한하는가
+
+이 서버가 실행 중인 머신의 임의 파일시스템 경로를 읽고 쓸 수 있는 기능이라(사실상 서버 로컬 파일 접근권), 일반 사용자에게는 노출하지 않고 원격 업로드 분석(브라우저 File System Access API로 읽은 바이트만 서버로 전송)만 제공한다.
 
 ---
 
