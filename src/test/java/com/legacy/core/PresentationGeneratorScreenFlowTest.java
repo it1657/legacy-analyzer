@@ -225,4 +225,35 @@ class PresentationGeneratorScreenFlowTest {
       assertTrue(foundConnector, "화면 흐름 슬라이드에 커넥터(화살표) 도형이 있어야 함");
     }
   }
+
+  @Test
+  void singleEdgeScreenFlow_slideOmitted(@TempDir Path tempDir) throws Exception {
+    // 부분 분석으로 app/ 바로 하위 파일 하나만 선택하면 엣지가 1개("app -> layout")뿐인데,
+    // 이건 "화면 흐름"이라 부를 만한 정보가 아니므로 슬라이드 자체가 생략돼야 한다.
+    ProjectTypeDetector detector = new ProjectTypeDetector();
+    PresentationGeneratorService svc = new PresentationGeneratorService(detector);
+    Path root = buildFakeNextjsProject(tempDir);
+
+    List<String> edges = edgeStrings(buildEdges(svc, root, "nextjs", Set.of("app/layout.tsx")));
+    assertEquals(1, edges.size(), "이 시나리오는 엣지가 정확히 1개여야 함(테스트 전제 확인)");
+
+    AnalysisHistory h = new AnalysisHistory(1L, "test-session", root.toString(), root.toString());
+    h.setTotalFiles(1);
+    h.setSuccessCount(1);
+    h.setSkipCount(0);
+    h.setFailureCount(0);
+    h.setSelectedRelativePaths(Set.of("app/layout.tsx"));
+
+    byte[] pptx = svc.generateProjectReportPresentation(h);
+    try (org.apache.poi.xslf.usermodel.XMLSlideShow ppt =
+        new org.apache.poi.xslf.usermodel.XMLSlideShow(new java.io.ByteArrayInputStream(pptx))) {
+      boolean foundConnector = false;
+      for (var slide : ppt.getSlides()) {
+        for (var shape : slide.getShapes()) {
+          if (shape instanceof org.apache.poi.xslf.usermodel.XSLFConnectorShape) foundConnector = true;
+        }
+      }
+      assertFalse(foundConnector, "엣지 1개뿐이면 화면 흐름 슬라이드(커넥터)가 생성되면 안 됨");
+    }
+  }
 }

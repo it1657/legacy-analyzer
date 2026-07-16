@@ -921,9 +921,14 @@ public class PresentationGeneratorService {
    * edges가 비어있으면(=그릴 근거가 없으면) 슬라이드 자체를 추가하지 않고 조용히 리턴한다 —
    * "화면 흐름" 서브섹션 텍스트가 비어 보이는 문제를 빈 슬라이드로 다시 만들지 않기 위함이다.
    */
+  // 엣지 1개(박스 2개 + 화살표 1개)는 "어느 파일이 어느 폴더 밑에 있다"는 정보일 뿐 화면 간
+  // 흐름이라 부를 만한 내용이 아니다. 특히 부분 분석으로 파일 하나만 선택했을 때 우연히 그 파일이
+  // app/pages 바로 하위에 있으면 이런 무의미한 1엣지 다이어그램이 나오므로, 최소 2개는 있어야 그린다.
+  private static final int MIN_SCREEN_FLOW_EDGES = 2;
+
   private void createScreenFlowSlide(XMLSlideShow ppt, AnalysisHistory h,
       List<ProjectStructureSnapshot.ScreenFlowEdge> edges) {
-    if (edges == null || edges.isEmpty()) return;
+    if (edges == null || edges.size() < MIN_SCREEN_FLOW_EDGES) return;
 
     // from에는 있지만 to에는 없는 노드를 루트(레벨 0)로 보고, BFS로 각 노드의 레벨(깊이)을 매긴다.
     java.util.LinkedHashSet<String> allNodes = new java.util.LinkedHashSet<>();
