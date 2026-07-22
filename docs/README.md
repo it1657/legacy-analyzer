@@ -5,11 +5,20 @@
 > 시스템 전체 구조(도메인 모델/ERD, API 지도, 핵심 흐름, 설계 결정)를 한 번에 보려면
 > 프로젝트 루트의 [`ARCHITECTURE.md`](../ARCHITECTURE.md)를 먼저 읽는 것을 권장한다.
 > 아래 `docs/`는 개별 기능의 상세 구현·버그 수정 이력을 다룬다.
+>
+> 진행 중인 작업(Claude API ↔ 로컬/사내 LLM 전환)은 [`advancement/`](./advancement/) 참고 —
+> 특히 [`advancement/ing/handOff.md`](./advancement/ing/handOff.md)가 현재 진척 상황 핸드오프 문서.
 
 ## 📁 구조
 
 ```
 docs/
+├── advancement/      ← 진행 중인 작업: Claude API ↔ 로컬/사내 LLM 전환
+│   ├── plan/plan.md          ← 인덱스 + 공통 설계
+│   ├── scenario/scenario_0~3.md  ← 배포 시나리오별 설계 문서
+│   └── ing/
+│       ├── handOff.md        ← 진행 현황 핸드오프 (세션 간 인계용)
+│       └── testResult.md     ← handOff.md 갱신분에 대한 테스트 실행 결과
 ├── guides/           ← 사용 가이드 및 튜토리얼
 │   └── PowerPoint_변환가이드.md
 ├── technical/        ← 기술 문서 및 명세
@@ -71,6 +80,19 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 - **Dockerfile**: Debian 기반 이미지 사용 (ARM64/PGX 서버 호환을 위해 Alpine에서 전환)
 - **docker-compose.yml**: `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스로 구성 (nginx 리버스 프록시 설정은 미사용으로 제거됨)
 - **DB**: 로컬 개발은 H2(`data/`), 운영 배포는 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) 프로파일 사용
+
+---
+
+## 🔄 advancement/ - 진행 중인 작업 (Claude API ↔ 로컬/사내 LLM 전환)
+
+- **목표**: 설정 프로퍼티(`llm.provider`) 하나만 바꾸면 재빌드 없이 Anthropic API ↔ 로컬/사내 LLM으로 전환되도록 리팩터링. 이후 경량(`scenario_1`)/폐쇄망(`scenario_2`)/선택형(`scenario_3`) 배포판 순으로 진행.
+- **현재 상태(2026-07-22 기준)**: `LlmClient` 추상화(`AnthropicLlmClient`/`OpenAiCompatibleLlmClient`) 도입, `ClaudeServiceImpl` 리팩터링, `application.properties`/`docker-compose.yml`의 `llm.provider`·`llm.local.*` 설정 배선, `calculateEstimatedCost()` local 분기, `GET /api/config/llm-provider` 조회 API, 프런트엔드(`index.html`/`dashboard.js`) 모델 드롭다운 동적화까지 구현 완료. 관련 테스트 6개 클래스 28건 전부 통과.
+- 상세 진척/설계/테스트 결과는 아래 문서 참고:
+  - [`advancement/ing/handOff.md`](./advancement/ing/handOff.md) — 세션 간 인계용 진행 현황 핸드오프(가장 최신 상태)
+  - [`advancement/ing/testResult.md`](./advancement/ing/testResult.md) — handOff.md 갱신분에 대한 테스트 실행 결과
+  - [`advancement/plan/plan.md`](./advancement/plan/plan.md) — 공통 설계 결정(Provider 선택 구조, RAG 조건부 설계 등)
+  - [`advancement/scenario/scenario_0.md`](./advancement/scenario/scenario_0.md) — `LlmClient` 추상화 설계(선행 작업)
+  - [`advancement/scenario/scenario_1~3.md`](./advancement/scenario/) — 배포 시나리오별(경량/폐쇄망/선택형) 설계
 
 ---
 
@@ -241,7 +263,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-07-16
+- **마지막 업데이트**: 2026-07-22 (Claude API ↔ 로컬/사내 LLM 전환 작업 진척 반영)
 - **작성자**: 정재훈
 - **관리자**: 개발팀
 

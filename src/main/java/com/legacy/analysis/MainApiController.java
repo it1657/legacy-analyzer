@@ -72,6 +72,10 @@ public class MainApiController {
   @Value("${app.analysis.upload-storage-path:.uploads}")
   private String uploadStoragePath;
 
+  // Claude API ↔ 로컬/사내 LLM 전환 스위치 (ClaudeServiceImpl.isAnthropicMode()와 동일 기준)
+  @Value("${llm.provider:anthropic}")
+  private String llmProvider;
+
   @Autowired
   public MainApiController(
       ClaudeService claudeService,
@@ -101,6 +105,21 @@ public class MainApiController {
   @GetMapping("/")
   public String index() {
     return "index";
+  }
+
+  /**
+   * 현재 활성화된 LLM provider와 모델을 프런트엔드에 알려주는 조회 엔드포인트 (scenario_0.md).
+   * provider가 local이면 모델 드롭다운을 고정 표시로 바꾸는 등 UI 분기에 사용한다.
+   * 응답은 지금은 이 단순한 스키마로 가고, 사용자별 provider 권한(P2)을 도입하는 시점에
+   * 별도로 확장한다(plan.md P2 설계 참고) — 지금 이 스키마를 미리 키우지 않기로 결정.
+   */
+  @GetMapping("/api/config/llm-provider")
+  @ResponseBody
+  public Map<String, Object> getLlmProviderConfig() {
+    Map<String, Object> result = new HashMap<>();
+    result.put("provider", isAnthropicMode() ? "anthropic" : "local");
+    result.put("model", claudeService.getCurrentModel());
+    return result;
   }
 
   // ===================================================================
@@ -2368,7 +2387,17 @@ public class MainApiController {
     return "";
   }
 
+  /** ClaudeServiceImpl.isAnthropicMode()와 동일한 판정 기준 — llm.provider 미설정 시 기본값 anthropic */
+  private boolean isAnthropicMode() {
+    return llmProvider == null || "anthropic".equalsIgnoreCase(llmProvider.trim());
+  }
+
   private double calculateEstimatedCost(long inputTokens, long outputTokens, String modelName) {
+    // 로컬/사내 LLM은 자체 호스팅이라 토큰당 과금이 없음 — scenario_0.md
+    if (!isAnthropicMode()) {
+      return 0.0;
+    }
+
     // 모델별 가격 (USD per 1M tokens, 2025 기준)
     double inputPrice, outputPrice;
     if (modelName != null && modelName.contains("opus")) {

@@ -35,6 +35,13 @@ services:
       SPRING_DATASOURCE_USERNAME: analyzer
       SPRING_DATASOURCE_PASSWORD: analyzer123
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      # Claude API ↔ 로컬/사내 LLM 전환 스위치 (scenario_0.md). 기본값 anthropic이라
+      # 아래 값들을 안 건드리면 기존 동작 그대로 — 롤백은 LLM_PROVIDER만 anthropic으로
+      # 되돌리고 컨테이너 재시작하면 됨(이미지 재빌드 불필요).
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_LOCAL_URL: ${LLM_LOCAL_URL:-}
+      LLM_LOCAL_MODEL: ${LLM_LOCAL_MODEL:-}
+      LLM_LOCAL_API_KEY: ${LLM_LOCAL_API_KEY:-}
       TZ: Asia/Seoul
     ports:
       - "8803:8803"

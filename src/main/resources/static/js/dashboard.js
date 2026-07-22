@@ -515,8 +515,36 @@ function toggleTreeExpandAll() {
   });
 }
 
+// scenario_0.md: 현재 활성화된 LLM provider를 물어봐서, local이면 모델 드롭다운을
+// "로컬 모델: {model} (무료·자체 호스팅)" 단일 표시로 바꾼다. anthropic(기본값)이면 아무것도 안 바꾼다 —
+// 기존 3개 Claude 모델 선택 동작 그대로 유지.
+async function initLlmProviderConfig() {
+  const select = document.getElementById('modelSelect');
+  const hint = document.getElementById('modelSelectHint');
+  if (!select) return;
+
+  try {
+    const resp = await fetch('/api/config/llm-provider');
+    if (!resp.ok) return; // 조회 실패 시 기존 Claude 드롭다운 그대로 둔다 (안전한 기본 동작)
+    const config = await resp.json();
+
+    if (config.provider === 'local') {
+      const modelName = config.model || '(모델명 미설정)';
+      select.innerHTML = `<option value="${modelName}" selected>로컬 모델: ${modelName} (무료 · 자체 호스팅)</option>`;
+      select.disabled = true; // 선택지가 하나뿐이라 조작 불가로 표시
+      if (hint) hint.textContent = '자체 호스팅 LLM · 과금 없음';
+    }
+    // provider === 'anthropic'이면 기존 드롭다운(3개 Claude 모델)을 그대로 둔다.
+  } catch (e) {
+    // 네트워크 오류 등으로 조회 실패해도 기존 Claude 드롭다운으로 동작해야 하므로 조용히 무시
+    console.warn('[LLM provider 조회 실패]', e);
+  }
+}
+
 // 컨테이너 레벨 이벤트 위임: 체크박스/토글 개수만큼 리스너를 달지 않아 대량 파일에서도 가볍다.
 document.addEventListener('DOMContentLoaded', () => {
+  initLlmProviderConfig();
+
   const container = document.getElementById('fileTreeContainer');
   if (!container) return;
 

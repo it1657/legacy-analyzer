@@ -1,4 +1,6 @@
 package com.legacy.analysis;
+import com.legacy.analysis.llm.LlmClient;
+import com.legacy.analysis.llm.LlmResult;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
 import com.legacy.core.LayerLabels;
@@ -6,13 +8,9 @@ import com.legacy.core.ProjectTypeDetector;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import reactor.core.publisher.Mono;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.InputStream;
@@ -35,11 +33,9 @@ public class ClaudeServiceImpl implements ClaudeService {
     private final AtomicLong accumulatedCacheCreationTokens = new AtomicLong(0);
     private volatile String lastModelName = "";
 
+    // API KEY 미설정 가드(isAnthropicMode() 참고)에서만 사용 — 실제 HTTP 호출은 llmClient(AnthropicLlmClient)가 전담
     @Value("${anthropic.api.key}")
     private String apiKey;
-
-    @Value("${anthropic.api.url}")
-    private String apiUrl;
 
     @Value("${anthropic.api.model}")
     private String apiModel;
@@ -67,18 +63,38 @@ public class ClaudeServiceImpl implements ClaudeService {
     @Value("${app.analysis.system-prompt-filename:CLAUDE.md}")
     private String systemPromptFilename;
 
+    // Claude API ↔ 로컬/사내 LLM 전환 스위치 (기본값 anthropic — LlmClient 빈 선택과 동일한 기본값)
+    @Value("${llm.provider:anthropic}")
+    private String llmProvider;
+
+    // local 모드에서 실제로 호출할 모델명 — SUPPORTED_MODELS 화이트리스트 검증 대상이 아님
+    // (서버가 로컬/사내 인프라에 어떤 모델이 서빙 중인지 알 수 없으므로 설정값을 그대로 신뢰)
+    @Value("${llm.local.model:}")
+    private String llmLocalModel;
+
     private final ApiErrorHandler apiErrorHandler;
     private final FileIoErrorHandler fileIoErrorHandler;
     private final SessionConfig sessionConfig;
     private final ProjectTypeDetector projectTypeDetector;
+    private final LlmClient llmClient;
 
     @Autowired
     public ClaudeServiceImpl(ApiErrorHandler apiErrorHandler, FileIoErrorHandler fileIoErrorHandler,
-        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector) {
+        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector, LlmClient llmClient) {
       this.apiErrorHandler = apiErrorHandler;
       this.fileIoErrorHandler = fileIoErrorHandler;
       this.sessionConfig = sessionConfig;
       this.projectTypeDetector = projectTypeDetector;
+      this.llmClient = llmClient;
+    }
+
+    /**
+     * Anthropic API 키 미설정 가드는 anthropic 모드에서만 의미가 있다. local 모드에서는
+     * anthropic.api.key가 비어 있어도(또는 MOCK 값이어도) llmClient(OpenAiCompatibleLlmClient) 호출을
+     * 막으면 안 되므로, 이 가드 앞에 이 메서드로 모드를 먼저 확인한다.
+     */
+    private boolean isAnthropicMode() {
+        return llmProvider == null || "anthropic".equalsIgnoreCase(llmProvider.trim());
     }
 
     @Override
@@ -101,6 +117,11 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Override
     public String getCurrentModel() {
+        // local 모드에서는 Anthropic 모델명을 반환하면 안 됨 — llmClient.call()에 그대로 넘어가
+        // 자체 LLM 서버로 "claude-sonnet-4-6" 같은 존재하지 않는 모델명이 전송되는 버그를 방지
+        if (!isAnthropicMode()) {
+            return llmLocalModel;
+        }
         return modelOverride != null ? modelOverride : apiModel;
     }
 
@@ -136,7 +157,7 @@ public class ClaudeServiceImpl implements ClaudeService {
         String baseTemplate = loadBaseSystemPromptTemplate();
         boolean hasRequirements = customRequirements != null && !customRequirements.isBlank();
 
-        if (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty()) {
+        if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
             log.warn("[CLAUDE.md 생성] API KEY 미설정으로 표준 템플릿을 그대로 사용합니다.");
             return baseTemplate;
         }
@@ -153,46 +174,11 @@ public class ClaudeServiceImpl implements ClaudeService {
                 ? "\n\n## 추가 요구사항 (사용자 지정)\n\n" + customRequirements
                 : "\n\n## 추가 요구사항\n\n(없음 — 표준 기본 지침을 그대로 사용)");
 
-        WebClient claudeMdWebClient = WebClient.builder()
-            .baseUrl(apiUrl)
-            .defaultHeader("x-api-key", apiKey)
-            .defaultHeader("anthropic-version", "2023-06-01")
-            .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-            .build();
-
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", getCurrentModel());
-        requestBody.put("max_tokens", 4096);
-        requestBody.put("system", systemPrompt);
-
-        Map<String, String> userMsg = new HashMap<>();
-        userMsg.put("role", "user");
-        userMsg.put("content", userContent);
-        requestBody.put("messages", Collections.singletonList(userMsg));
-
         try {
-            Map<?, ?> response = claudeMdWebClient.post()
-                .uri("/v1/messages")
-                .header("anthropic-version", "2023-06-01")
-                .bodyValue(requestBody)
-                .retrieve()
-                .onStatus(status -> !status.is2xxSuccessful(),
-                    cr -> cr.bodyToMono(String.class).defaultIfEmpty("")
-                        .flatMap(body -> Mono.error(new RuntimeException("CLAUDE.md 생성 API 오류: " + body))))
-                .bodyToMono(Map.class)
-                .block();
-
-            if (response != null && response.containsKey("content")) {
-                List<?> contentList = (List<?>) response.get("content");
-                if (contentList != null && !contentList.isEmpty()) {
-                    Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
-                    String generated = String.valueOf(contentMap.get("text"));
-                    extractAndStoreTokenUsage(response);
-                    log.info("[CLAUDE.md 생성 완료] 요구사항 반영={}, 길이={}자", hasRequirements, generated.length());
-                    return generated;
-                }
-            }
-            log.warn("[CLAUDE.md 생성 응답 파싱 실패] 표준 템플릿 사용");
+            LlmResult result = llmClient.call(systemPrompt, userContent, getCurrentModel(), 4096);
+            extractAndStoreTokenUsage(result);
+            log.info("[CLAUDE.md 생성 완료] 요구사항 반영={}, 길이={}자", hasRequirements, result.text().length());
+            return result.text();
         } catch (Exception e) {
             log.warn("[CLAUDE.md 생성 API 호출 실패, 표준 템플릿 사용] {}", e.getMessage());
         }
@@ -426,7 +412,7 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         // README.md: Claude AI로 실제 프로젝트 분석 보고서 생성
         if ("README.md".equalsIgnoreCase(fileName) || "README_AI_SUMMARY.md".equalsIgnoreCase(fileName)) {
-            if (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty()) {
+            if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
                 throw new AnalysisException(ApiErrorHandler.ErrorType.API_AUTHENTICATION,
                     new RuntimeException("Claude API KEY가 설정되지 않았습니다. application.properties를 확인하세요."));
             }
@@ -435,20 +421,12 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         String customSpecData = loadCustomSpec(extension);
 
-        if (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty()) {
+        if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
             // API KEY 미설정 시 파일을 수정하지 않고 예외 발생 (원본 보호)
             log.warn("[API KEY 미설정] 파일 처리 건너뜀: {}", fileName);
             throw new AnalysisException(ApiErrorHandler.ErrorType.API_AUTHENTICATION,
                 new RuntimeException("Claude API KEY가 설정되지 않았습니다. application.properties를 확인하세요."));
         }
-
-        WebClient webClient = WebClient.builder()
-                .baseUrl(apiUrl)
-                .defaultHeader("x-api-key", apiKey)
-                .defaultHeader("anthropic-version", "2023-06-01")
-                .defaultHeader("anthropic-beta", "prompt-caching-2024-07-31")
-                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                .build();
 
         String baseSystemPrompt = resolveSystemPrompt(sourceFolderPath);
 
@@ -457,26 +435,12 @@ public class ClaudeServiceImpl implements ClaudeService {
                 .replace("${extension}", extension)
                 .replace("${customSpecData}", customSpecData);
 
-        // 프롬프트 캐싱: system을 배열 형식으로 전송하여 두 번째 호출부터 캐시 히트
-        Map<String, Object> systemBlock = new HashMap<>();
-        systemBlock.put("type", "text");
-        systemBlock.put("text", finalSystemPrompt);
-        systemBlock.put("cache_control", Collections.singletonMap("type", "ephemeral"));
-
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", getCurrentModel());
-        requestBody.put("max_tokens", apiMaxTokens);
-        requestBody.put("system", Collections.singletonList(systemBlock));
-
-        Map<String, String> userMessage = new HashMap<>();
-        userMessage.put("role", "user");
-        userMessage.put("content", "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
+        String userContent = "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
                 "\n\n⚠️ 절대 중요: 다음 JSON 배열 형식으로만 응답하세요. 마크다운(```), 설명, 쉼표 오류 금지:\n" +
                 "[{\"lineNumber\": 숫자, \"comment\": \"내용\"}, {\"lineNumber\": 숫자, \"comment\": \"내용\"}]\n" +
                 "- 각 객체는 { }로 완전히 감싸기\n" +
                 "- 객체 사이에 쉼표(,) 필수\n" +
-                "- JSON 외의 모든 텍스트 금지");
-        requestBody.put("messages", Collections.singletonList(userMessage));
+                "- JSON 외의 모든 텍스트 금지";
 
         // 설정값에서 재시도 정책 로드
         int maxRetries = sessionConfig.getMaxRetries();
@@ -485,42 +449,14 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         for (int retry = 0; retry < maxRetries; retry++) {
             try {
-                Map<?, ?> response = webClient.post()
-                        .uri("/v1/messages")
-                        .header("anthropic-version", "2023-06-01")
-                        .bodyValue(requestBody)
-                        .retrieve()
-                        .onStatus(
-                            status -> !status.is2xxSuccessful(),
-                            clientResponse -> clientResponse.bodyToMono(String.class)
-                                .defaultIfEmpty("")
-                                .flatMap(body -> {
-                                    int statusCode = clientResponse.statusCode().value();
-                                    String msg = String.format("Claude API %d 오류: %s", statusCode,
-                                        body.isEmpty() ? "응답 없음" : body.substring(0, Math.min(300, body.length())));
-                                    log.error("[Claude API 응답 오류] {}", msg);
-                                    return Mono.error(new WebClientResponseException(
-                                        statusCode, msg,
-                                        clientResponse.headers().asHttpHeaders(), null, null));
-                                })
-                        )
-                        .bodyToMono(Map.class)
-                        .block();
+                LlmResult result = llmClient.call(finalSystemPrompt, userContent, getCurrentModel(), apiMaxTokens);
+                String aiJsonResponse = result.text();
 
-                if (response != null && response.containsKey("content")) {
-                    List<?> contentList = (List<?>) response.get("content");
-                    if (contentList != null && !contentList.isEmpty()) {
-                        Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
-                        String aiJsonResponse = String.valueOf(contentMap.get("text"));
+                // 토큰 사용량 추출 및 저장
+                extractAndStoreTokenUsage(result);
 
-                        // 토큰 사용량 추출 및 저장
-                        extractAndStoreTokenUsage(response);
-
-                        log.info("[API 분석 성공] 파일명: {}", fileName);
-                        return mergeCommentsIntoCode(sourceCode, aiJsonResponse, extension);
-                    }
-                }
-                throw new RuntimeException("AI 응답 바디 구조 파싱 예외 공정 발생");
+                log.info("[API 분석 성공] 파일명: {}", fileName);
+                return mergeCommentsIntoCode(sourceCode, aiJsonResponse, extension);
 
             } catch (AnalysisException ae) {
                 // 이미 분류된 예외는 그대로 재발생
@@ -602,46 +538,11 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         String userContent = "프로젝트명: " + projectName + "\n\n" + projectStructure;
 
-        WebClient readmeWebClient = WebClient.builder()
-            .baseUrl(apiUrl)
-            .defaultHeader("x-api-key", apiKey)
-            .defaultHeader("anthropic-version", "2023-06-01")
-            .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-            .build();
-
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", getCurrentModel());
-        requestBody.put("max_tokens", 4096);
-        requestBody.put("system", systemPrompt);
-
-        Map<String, String> userMsg = new HashMap<>();
-        userMsg.put("role", "user");
-        userMsg.put("content", userContent);
-        requestBody.put("messages", Collections.singletonList(userMsg));
-
         try {
-            Map<?, ?> response = readmeWebClient.post()
-                .uri("/v1/messages")
-                .header("anthropic-version", "2023-06-01")
-                .bodyValue(requestBody)
-                .retrieve()
-                .onStatus(status -> !status.is2xxSuccessful(),
-                    cr -> cr.bodyToMono(String.class).defaultIfEmpty("")
-                        .flatMap(body -> Mono.error(new RuntimeException("README API 오류: " + body))))
-                .bodyToMono(Map.class)
-                .block();
-
-            if (response != null && response.containsKey("content")) {
-                List<?> contentList = (List<?>) response.get("content");
-                if (contentList != null && !contentList.isEmpty()) {
-                    Map<?, ?> contentMap = (Map<?, ?>) contentList.get(0);
-                    String readmeText = String.valueOf(contentMap.get("text"));
-                    extractAndStoreTokenUsage(response);
-                    log.info("[README 생성 완료] 프로젝트: {}, 길이: {}자", projectName, readmeText.length());
-                    return readmeText;
-                }
-            }
-            log.warn("[README API 응답 파싱 실패] 구조 기반 폴백 사용");
+            LlmResult result = llmClient.call(systemPrompt, userContent, getCurrentModel(), 4096);
+            extractAndStoreTokenUsage(result);
+            log.info("[README 생성 완료] 프로젝트: {}, 길이: {}자", projectName, result.text().length());
+            return result.text();
         } catch (Exception e) {
             log.warn("[README API 호출 실패, 폴백 사용] {}", e.getMessage());
         }
@@ -1193,45 +1094,34 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     /**
-     * Claude API 응답에서 토큰 사용량 정보를 추출하여 누적 저장
+     * LlmClient 호출 결과에서 토큰 사용량 정보를 추출하여 누적 저장.
+     * (이전엔 Anthropic 원시 응답 Map을 직접 파싱했으나, LlmClient 추상화 도입 이후
+     * 각 구현체가 이미 파싱해 담아둔 LlmResult를 받는 형태로 단순화됨)
      */
-    private void extractAndStoreTokenUsage(Map<?, ?> response) {
+    private void extractAndStoreTokenUsage(LlmResult result) {
         try {
-            Map<?, ?> usage = (Map<?, ?>) response.get("usage");
-            if (usage != null) {
-                long inputTokens = 0;
-                long outputTokens = 0;
-                long cacheReadTokens = 0;
-                long cacheCreationTokens = 0;
+            if (result == null) return;
 
-                Object inputObj = usage.get("input_tokens");
-                if (inputObj != null) inputTokens = ((Number) inputObj).longValue();
+            long inputTokens = result.inputTokens();
+            long outputTokens = result.outputTokens();
+            long cacheReadTokens = result.cacheReadTokens();
+            long cacheCreationTokens = result.cacheCreationTokens();
 
-                Object outputObj = usage.get("output_tokens");
-                if (outputObj != null) outputTokens = ((Number) outputObj).longValue();
+            long totalInput = accumulatedInputTokens.addAndGet(inputTokens);
+            long totalOutput = accumulatedOutputTokens.addAndGet(outputTokens);
+            accumulatedCacheReadTokens.addAndGet(cacheReadTokens);
+            accumulatedCacheCreationTokens.addAndGet(cacheCreationTokens);
+            lastModelName = getCurrentModel();
 
-                Object cacheReadObj = usage.get("cache_read_input_tokens");
-                if (cacheReadObj != null) cacheReadTokens = ((Number) cacheReadObj).longValue();
-
-                Object cacheCreationObj = usage.get("cache_creation_input_tokens");
-                if (cacheCreationObj != null) cacheCreationTokens = ((Number) cacheCreationObj).longValue();
-
-                long totalInput = accumulatedInputTokens.addAndGet(inputTokens);
-                long totalOutput = accumulatedOutputTokens.addAndGet(outputTokens);
-                accumulatedCacheReadTokens.addAndGet(cacheReadTokens);
-                accumulatedCacheCreationTokens.addAndGet(cacheCreationTokens);
-                lastModelName = getCurrentModel();
-
-                if (cacheReadTokens > 0) {
-                    log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시히트: {} (90% 절약), 누적: {}",
-                        inputTokens, outputTokens, cacheReadTokens, totalInput + totalOutput);
-                } else if (cacheCreationTokens > 0) {
-                    log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시생성: {}, 누적: {}",
-                        inputTokens, outputTokens, cacheCreationTokens, totalInput + totalOutput);
-                } else {
-                    log.info("[토큰 사용량] 입력: {}, 출력: {}, 누적 합계: {}",
-                        inputTokens, outputTokens, totalInput + totalOutput);
-                }
+            if (cacheReadTokens > 0) {
+                log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시히트: {} (90% 절약), 누적: {}",
+                    inputTokens, outputTokens, cacheReadTokens, totalInput + totalOutput);
+            } else if (cacheCreationTokens > 0) {
+                log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시생성: {}, 누적: {}",
+                    inputTokens, outputTokens, cacheCreationTokens, totalInput + totalOutput);
+            } else {
+                log.info("[토큰 사용량] 입력: {}, 출력: {}, 누적 합계: {}",
+                    inputTokens, outputTokens, totalInput + totalOutput);
             }
         } catch (Exception e) {
             log.warn("[토큰 추출 실패] {}", e.getMessage());

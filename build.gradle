@@ -41,6 +41,8 @@ dependencies {
 
     // 6. 최초 원본 스프링 기본 테스트 사양
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // 6-1. LlmClient 구현체를 실제 서버 없이 검증하기 위한 가짜 HTTP 서버
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
 
     // 7. PowerPoint PPTX 생성 (Apache POI)
     implementation 'org.apache.poi:poi:5.2.5'
@@ -50,4 +52,13 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // 터미널에서 테스트 하나하나의 PASSED/FAILED를 실시간으로 색깔로 보여줌
+    // (기본값은 마지막에 BUILD SUCCESSFUL/FAILED 한 줄만 나와서 어떤 테스트가 어떻게 됐는지 안 보임)
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+        showStandardStreams = false
+    }
+    // 실행 후 build/reports/tests/test/index.html 을 브라우저로 열면
+    // 초록/빨강 막대와 클래스별·메서드별 통과 여부를 시각적으로 볼 수 있음
 }
