@@ -198,7 +198,7 @@ ollama:
 1. ~~기존 `docker-compose.yml`에 `ollama`/`chroma`(profiles)·`app`의 `image:`+`build:` 병행 배선 반영, `docker-compose.gpu.yml`·`docker/ollama-entrypoint.sh`·`.env.lite.example` 신규 작성.~~ — **완료**(2026-07-23).
 2. ~~`ollama` 서비스 entrypoint 자동 모델 pull 스크립트 + healthcheck 배선.~~ — **완료**.
 3. ~~`cp .env.lite.example .env && docker compose build && docker compose up -d` 한 번으로 전체 스택 기동 확인.~~ — **완료**(클린 환경 스모크 테스트).
-4. **RAG 채택 확정, 구현 착수(2026-07-23)** — `plan.md`의 RAG 섹션 "구현 순서"를 그대로 따른다: Chroma v2 API 스모크 테스트(사용자 로컬 환경) → `ollama-entrypoint.sh` 임베딩 모델 pull 추가 → `com.legacy.rag` 패키지 구현 → 설정 배선(`rag.chroma.url=http://chroma:8000`, 기본 `rag.enabled=false`) → `finalizeAnalysis` try-finally 전환 → `rag.enabled=true` 실측.
+4. **RAG 채택 확정, 코드 구현 완료(2026-07-23)** — `com.legacy.rag` 패키지(`ChromaClient`/`OpenAiCompatibleEmbeddingClient`/`ProjectStructureRagService`), `ollama-entrypoint.sh` 임베딩 모델 pull, 설정 배선(`rag.chroma.url=http://chroma:8000`, 기본 `rag.enabled=false`), `MainApiController` 통합 지점(Java 프로젝트의 "패키지 구조" 섹션만 압축 대상)까지 전부 반영. **남은 건 실측뿐**: Chroma v2 API 실서버 스모크 테스트(개발 샌드박스에 Docker가 없어 미착수) → 이미지 재빌드 → `rag.enabled=true`로 실제 대형 Java 프로젝트 압축 효과 실측(`4.tested/scenario_1_test.md`에 기록). 자세한 설계 변경 내역은 `plan.md`의 RAG 섹션 참고.
 
 ### 2단계(후속, 별도 착수) — pull 전환
 

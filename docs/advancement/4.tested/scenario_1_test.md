@@ -56,6 +56,15 @@
 - **참고**: 비교 도중 `OpenAiCompatibleLlmClient.java`에 다른 세션이 `llm.local.temperature` 필드(기본값 0.2)를 실제로 추가한 걸 확인 — 위 "7b가 few-shot 예시를 베낀다" 근본 원인 발견에 대한 후속 대응으로 보이며(주석에 "2026-07-23 실측: qwen2.5-coder:7b가 prompt.md의 예시 문장을 거의 그대로 재사용한 사례 확인"이라고 직접 인용돼 있음), 이 세션이 건드린 파일이 아니라 그대로 둠.
 - **결론**: 같은 조건(같은 파일, 같은 프롬프트)에서 anthropic(Haiku)이 7b보다 **속도(16.5배)·정확도(주석 위치 오류 0건)·품질(WHY 중심 서술, 아키텍처 패턴 정확히 식별)** 모두 뚜렷하게 앞섬. 시나리오1(GPU 없는 노트북 경량판)의 트레이드오프가 문서에 적힌 "느리지만 무료" 수준이 아니라 "느리고 품질도 눈에 띄게 낮음"이라는 게 실측으로 확인된 셈 — README/문서에 이 트레이드오프를 명시할지는 사용자 판단 필요.
 
+## RAG(Chroma) 구현 완료, 실행 검증은 미착수 (2026-07-23)
+
+`plan.md`/`scenario_1.md`에서 채택을 확정하고 곧바로 구현까지 진행했다. `com.legacy.rag` 패키지(`EmbeddingClient`/`OpenAiCompatibleEmbeddingClient`/`ChromaClient`/`ProjectStructureRagService`), `docker/ollama-entrypoint.sh` 임베딩 모델 pull, `application.properties`/`docker-compose.yml`/`.env.lite.example` 설정 배선, `MainApiController` 통합 지점(Java 프로젝트의 "프로젝트 패키지 구조" 섹션만 압축 대상 — 실제 코드 확인 결과 이 섹션만 프로젝트 크기에 비례해 무한정 커짐, "계층별 클래스 통계"는 이미 레이어당 8개로 고정돼 있어 대상에서 제외)까지 전부 커밋됨(`7a541df`).
+
+- **정적 검증만 완료**: `ChromaClientTest`/`OpenAiCompatibleEmbeddingClientTest`(MockWebServer로 Chroma v2 API/Ollama 임베딩 API 계약 흉내), `ProjectStructureRagServiceTest`(임베딩 서버+Chroma 서버 두 MockWebServer 조합으로 색인→쿼리→정리 전체 흐름 + 실패 시 원본 fallback 검증) 작성. 중괄호/괄호 짝 검사와 diff 리뷰로 구문 정합성만 확인.
+- **미검증**: 이 개발 샌드박스에 Docker 자체가 없어 (1) 실제 Chroma 1.5.9 서버 대상 v2 API 스모크 테스트, (2) `./gradlew test` 실행, (3) `rag.enabled=true`로 실제 대형 Java 프로젝트 압축 효과 실측을 전부 못 했다 — 사용자 쪽에서 이미지 재빌드 후 진행 필요.
+- **범위 한정**: 이번 구현은 Java 프로젝트만 대상(사용자 결정, React/Python/기타 프로젝트 타입은 각자 다른 텍스트 생성 방식이라 추후 별도 분석 필요).
+- 기본값은 여전히 `rag.enabled=false`라 이 커밋이 배포돼도 기존 동작(RAG 미개입)엔 영향 없음 — 켜기 전까지는 회귀 위험이 없는 상태.
+
 ## 검증 상태
 
 | 항목 | 상태 | 비고 |
@@ -71,6 +80,8 @@
 | (2단계) GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 | ✅ 완료 | 사용자가 직접 등록(2026-07-23) |
 | (2단계) 태그 push → Actions 실행 → Docker Hub 반영 | ✅ 완료(정정 후 재확인) | **1차 시도는 오판이었음**: `.github/workflows/docker-publish.yml`을 포함한 작업물이 git에 커밋된 적이 없어(untracked) 실제로는 아무 워크플로우도 존재하지 않았고, "Docker Hub에 올라갔다"고 봤던 건 `docker compose build`로 로컬에 태깅된 `it1657/legacy-analyzer:latest` 이미지를 착각한 것(Docker Hub API로 태그 0개 확인해 발견). 이후 파일 전체를 커밋 → 사용자가 직접 `git push origin master`(Claude sandbox는 GitHub 접근 프록시 차단으로 push 불가) → 태그 재push → Actions에서 "Docker Publish (legacy-analyzer lite)" 워크플로우 실제 GREEN, Docker Hub 반영까지 사용자가 확인(2026-07-23) |
 | (2단계) 클린 환경에서 `docker pull`만으로(build 없이) 수신 확인 | ❌ 미착수 | 지금까지는 이 노트북(이미 이미지가 로컬에 있음)에서만 확인 — "진짜 다른 머신"에서 pull-only로 받아지는지는 별도 검증 필요 |
+| RAG(Chroma) 코드 구현 | ✅ 완료(정적 검증만) | `com.legacy.rag` 패키지 + 통합 지점(Java 전용) + MockWebServer 단위 테스트, `7a541df` 커밋. gradle test 실행은 샌드박스 제약으로 미실행 |
+| RAG(Chroma) 실행 검증(실서버 스모크 테스트, `rag.enabled=true` 실측) | ❌ 미착수 | Docker 없는 샌드박스라 직접 불가 — 사용자 쪽 재빌드 후 진행 필요 |
 
 ## 다음에 이 문서를 갱신할 시점
 

@@ -246,6 +246,17 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 
 **결론**: 시나리오1(경량판)의 실제 트레이드오프는 "느리지만 무료" 수준이 아니라 "느리고 품질도 눈에 띄게 낮음"으로 확인됨. GPU 오버레이+14b로 격차가 줄어드는지는 아직 미검증(이 노트북은 GPU 없음) — 이 트레이드오프를 README/설치 가이드에 명시할지는 사용자 판단이 필요한 지점으로 남겨둠.
 
+## CLAUDE.md 생성 단계 JSON 오반환 버그 수정 + 관리자 기능 컨테이너 숨김 + RAG(Chroma) 구현 (20차, 2026-07-23)
+
+19차 이후 사용자가 temperature/prompt.md 수정 반영 후 재테스트했는데도 여전히 실망스러운 결과가 나왔고, 완료 화면 "CLAUDE.md 보기" 모달을 직접 열어보니 **CLAUDE.md 대신 가짜 분석 결과 JSON 배열이 그대로 들어있는** 훨씬 심각한 버그를 발견했다.
+
+- **근본 원인**: `generateSessionClaudeMd()`가 (추가 요구사항 유무와 무관하게) 매 세션 시작 시 7b 모델에게 "표준 지침(prompt.md)을 그대로 반환하라"고 LLM을 호출했는데, 모델이 그 지침 문서 안에 담긴 "## 응답 포맷" 예시(JSON 배열로만 응답하라는 지시문)를 자기가 지금 수행할 지시로 착각해 CLAUDE.md 대신 그 JSON을 반환. 이 잘못된 결과가 세션 시스템 프롬프트로 그대로 저장되어 이후 모든 파일 분석이 실제 코드와 무관한 출력을 반복하는 단일 장애점이었음.
+- **수정**(`927d1f6`): (1) 추가 요구사항이 없으면 이 LLM 호출 자체를 생략하고 표준 템플릿을 바로 반환(실패 지점 원천 차단), (2) 추가 요구사항이 있는 경로는 "예시를 실행하지 말라" 경고 추가 + 결과가 JSON처럼 보이면 폐기하고 표준 템플릿으로 안전 대체하는 `looksLikeClaudeMd` 가드 신설. `ClaudeServiceImplGenerateClaudeMdTest` 5개 테스트 추가. `scenario_1_test.md`에 기록(`3b803b2`).
+- **관리자 "서버 경로 직접 지정" 기능 컨테이너 숨김**(`37665ca`): Docker 컨테이너는 app 컨테이너에 임의 호스트 경로 bind mount가 없어 이 기능이 필연적으로 오류난다는 기존 논의(사용자와 대화 중 재확인)를 반영 — 완전 삭제 대신 `/.dockerenv` 존재 여부로 컨테이너 판별해 `GET /api/config/llm-provider` 응답에 `containerized` 필드 추가, 프런트엔드가 컨테이너면 해당 UI 섹션을 숨기도록 수정(로컬 IDE/jar 실행 시엔 계속 노출). `MainApiControllerLlmProviderTest`에 검증 테스트 추가.
+- **RAG(Chroma) 구현 착수부터 완료까지**(`5653b79`, `7a541df`): plan.md에 이미 있던 조건부 RAG 설계("scenario_0 배포 후 실사용 데이터로 관측되면 착수")를 사용자가 관측 없이 채택 확정으로 바꾸고 구현까지 진행. 실제 코드(`appendJavaStructure()`)를 보니 "계층별 클래스 통계"는 이미 레이어당 8개로 미리보기 제한이 걸려 있어 압축이 불필요했고, 진짜 무한정 커지는 부분은 "프로젝트 패키지 구조" 섹션뿐이라 여기로 압축 대상을 좁힘 + 적용 범위를 Java 프로젝트로 한정(사용자 결정). 새 패키지 `com.legacy.rag`(`EmbeddingClient`/`OpenAiCompatibleEmbeddingClient`/`ChromaClient`/`ProjectStructureRagService`) 신설, `ProjectStructureRagService.compactPackageGroups()` 하나로 색인→쿼리→컬렉션 정리가 자기완결적으로 끝나도록 설계해 plan.md 원안의 `finalizeAnalysis` try-finally 리팩터링이 불필요해짐. `MainApiController`에 `ObjectProvider`로 선택 주입, `docker/ollama-entrypoint.sh`에 임베딩 모델 pull 추가, `rag.*` 설정 배선(기본값 `rag.enabled=false` 유지, 기존 동작 영향 없음). MockWebServer 기반 단위 테스트 3종(`ChromaClientTest`/`OpenAiCompatibleEmbeddingClientTest`/`ProjectStructureRagServiceTest`) 작성. **실행 검증은 미착수** — 샌드박스에 Docker가 없어 실제 Chroma 서버 스모크 테스트·`gradle test`·`rag.enabled=true` 실측을 사용자 쪽에서 진행해야 함. `plan.md`/`scenario_1.md`/`scenario_1_confirmed.md`/`scenario_1_test.md` 전부 현행화.
+
+**남은 것**: 사용자가 이미지 재빌드 후 (1) CLAUDE.md 버그 수정이 실제로 정상적인 지침 문서를 생성하는지 재테스트, (2) RAG를 Chroma v2 API 실서버 대상으로 스모크 테스트 → `rag.enabled=true`로 켜서 실제 대형 Java 프로젝트 압축 효과 실측.
+
 ### 보류 중인 잡다한 항목 (급하지 않음)
 
 - ~~`docs/advancement/{plan,scenario}/` 폴더 이동 이후 문서 내부에 남아있는 옛 상대경로 참조(`docs/plan.md` 등) 정리~~ — **완료**. `scenario_0/1/2/3.md`에 남아있던 `` `docs/plan.md` `` 참조 9곳을 전부 `` `plan.md` ``(같은 폴더 기준 파일명, 다른 문서들과 동일한 참조 스타일)로 통일. `docs/scenario_*.md` 형태의 옛 경로는 이미 이전 세션에서 정리돼 있었음(재확인 완료). `grep -r "docs/plan\.md|docs/scenario_[0-9]" docs/advancement`로 잔존 여부 재확인 — 0건.

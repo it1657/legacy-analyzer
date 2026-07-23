@@ -24,7 +24,7 @@
 | 모델 기본값 | 코드 분석: `qwen2.5-coder:7b`(CPU), GPU 오버레이 사용자는 `qwen2.5-coder:14b` 권장. 임베딩(RAG 채택 시): `nomic-embed-text` |
 | `.env` 배포 | 전용 템플릿 파일 `.env.lite.example` 신규 추가 — `cp .env.lite.example .env`만으로 `LLM_PROVIDER=local` 등 기본값 세팅 완료 |
 | 네트워크 노출 | `ollama`/`chroma`는 로컬 전용 바인딩(`127.0.0.1:...`) 또는 `expose:`만 사용, 외부 노출 안 함 |
-| RAG(Chroma) | 기본 `rag.enabled=false`. 실사용 중 컨텍스트 초과 관측되면 그때 활성화 — 지금 미리 켜지 않음 |
+| RAG(Chroma) | **채택 확정, 구현 완료(2026-07-23)** — Java 프로젝트의 "프로젝트 패키지 구조" 섹션만 압축 대상(범위는 Java 우선, React/Python 등은 추후). 기본 `rag.enabled=false`로 배포하고, 실사용 검증 후 켤지 결정(코드/설정은 이미 준비됨) — 자세한 내용은 `plan.md` "RAG(Chroma)" 절, 실측 결과는 `4.tested/scenario_1_test.md` 참고 |
 | Provider 선택 UI | P2(관리자 승인형 선택)는 미적용 — 이 패키지는 `llm.provider=local` 고정. P2의 "로컬 LLM 헬스 상태 표시" 컴포넌트만 재사용 |
 
 ## 환경 확인 완료
@@ -35,7 +35,7 @@
 
 ## 미확정/확인 필요 (1단계 구현 착수 전 처리)
 
-1. RAG 미채택이 최종 확정되면 `chroma` 서비스 정의 자체를 compose에서 제거할지 — 지금은 `profiles`로 비활성 상태 유지가 기본.
+1. ~~RAG 미채택이 최종 확정되면 `chroma` 서비스 정의 자체를 compose에서 제거할지~~ — **해소(2026-07-23)**: RAG 채택이 확정되고 구현도 완료돼 더 이상 미정 사항이 아님. `chroma`는 `profiles`로 비활성 상태 유지, `rag.enabled=false` 기본값과 함께 배포.
 
 ## 아직 만들지 않은 것 (2단계, 이 문서 범위 밖)
 

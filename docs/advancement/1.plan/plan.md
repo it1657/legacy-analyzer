@@ -43,30 +43,25 @@ RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목
 
 `scenario_1.md`은 원래 "`scenario_0.md` 배포 후 실사용 데이터로 컨텍스트 초과/품질 저하가 관측되면 착수"라는 조건부 결정이었으나, **2026-07-23 사용자 결정으로 관측 없이 채택을 확정하고 구현에 착수**했다 — 아래는 실제 구현에 쓰는 최신 설계다(각 시나리오 문서에서 이 섹션을 참조). `scenario_2.md`/`scenario_3.md`는 여전히 조건부로 남겨둔다.
 
-### 문제 지점
+### 문제 지점 — 구현 착수 시 범위를 좁힘 (2026-07-23)
 
-`MainApiController.buildDetailedProjectStructure()`(2026-07-23 재확인: 1894줄)가 프로젝트 타입별로 `appendJavaStructure`(1925줄)/`appendFrontendStructure`/... 를 호출해 레이어별·패키지별 클래스 목록을 텍스트로 쌓은 뒤(`layerFiles`/`packageGroups` 맵), 이 전체 텍스트를 한 번에 `finalizeAnalysis()`(1513줄) 안에서 `claudeService.analyzeCodeWithClaude(projectStructureSummary, readmeFileName, ...)`(1576-1580줄)로 넘긴다. 클래스 수가 많은 대형 레거시 프로젝트에서는 이 텍스트가 매우 커져 컨텍스트 윈도우가 좁은 모델에서는 초과되거나 추론이 느려질 수 있다.
+원래는 `buildDetailedProjectStructure()`가 만드는 전체 텍스트가 다 문제라고 가정했으나, 실제 코드(`MainApiController.appendJavaStructure()`, 1925줄)를 보니 "계층별 클래스 통계" 섹션은 이미 레이어당 8개로 미리보기 제한이 걸려 있어(`files.subList(0, Math.min(files.size(), 8))`) 프로젝트가 아무리 커도 크기가 고정된다. **진짜로 프로젝트 크기에 비례해 무한정 커지는 부분은 "프로젝트 패키지 구조" 섹션(`packageGroups` 기반, 패키지별 파일을 전부 나열)뿐**이라 RAG 압축 대상을 여기로 좁혔다. 적용 범위도 Java 프로젝트로 한정(사용자 결정, 2026-07-23) — `appendFrontendStructure`/`appendPythonStructure`/`appendGeneralStructure`는 각자 다른 방식으로 텍스트를 만들어서 별도 분석·설계가 필요하므로 이번 구현에서 제외했다.
 
-### 설계: 임베딩 기반 대표 항목 검색으로 프롬프트 크기 상한 고정
+### 설계: 임베딩 기반 대표 항목 검색으로 프롬프트 크기 상한 고정 — **구현 완료(2026-07-23)**
 
-새 패키지 `com.legacy.rag`:
+새 패키지 `com.legacy.rag`(실제 구현 그대로):
 
-- **`OpenAiCompatibleEmbeddingClient`** — 임베딩도 채택 시점의 백엔드에 맞춘다. Ollama라면 `POST {llm.local.url}/api/embeddings`(model: `nomic-embed-text`), OpenAI 호환 표준 경로(`/v1/embeddings`)를 지원하는 백엔드라면 그쪽을 쓴다 — 실제 채택 시 대상 백엔드가 어느 쪽을 지원하는지 확인 후 구현.
-- **`ChromaClient`** — Chroma REST **v2** API(⚠️ Chroma 1.0.0부터 v1이 완전히 제거되고 `/api/v2/...`로 대체됨, 확인 완료)를 `WebClient`로 감싼 얇은 래퍼. 베이스 경로는 `{rag.chroma.url}/api/v2/tenants/{rag.chroma.tenant}/databases/{rag.chroma.database}/collections`이며, 컬렉션 생성 시 반환되는 `collection_id`(UUID)를 이후 add/query/delete 호출에 사용해야 한다. `createOrGetCollection(name)`(이름→id 캐싱 포함), `upsert(collectionId, ids, embeddings, documents, metadatas)`, `query(collectionId, embedding, topK)`, `deleteCollection(collectionId)`.
-- **`ProjectStructureRagService`** — 세션별 진입점:
-  - `index(String sessionId, Map<String, List<String>> layerFiles, Map<String, List<String>> packageGroups)`: 각 레이어/패키지의 클래스 항목을 문서화("{layer} :: {package} :: {className}")해 임베딩 후 Chroma에 upsert. 컬렉션명은 **`sessionId`**로 세션마다 격리(다중 사용자 환경에서 서로 다른 사용자가 같은 경로 패턴으로 업로드해도 충돌하지 않도록 — 단일 사용자 환경에도 손해 없는 선택).
-  - `buildCompactStructureText(String sessionId, String rawStructureText, String projectType)`: `rawStructureText` 길이가 `rag.trigger-threshold-chars`를 넘을 때만 동작. 레이어별로 고정 질의(예: "Controller 레이어의 대표 클래스", "Service 레이어의 핵심 비즈니스 로직 클래스")를 임베딩해 Chroma에서 레이어당 상위 `rag.top-k-per-layer`개만 검색해 재조립. 임계값 이하 프로젝트는 기존 동작 그대로(RAG 미개입 — 회귀 위험 최소화).
-  - `cleanup(String sessionId)`: README 생성 완료 후 해당 컬렉션 삭제 — `ClaudeService.clearSessionSystemPrompt()`와 동일한 세션 정리 패턴을 따른다.
+- **`EmbeddingClient`**(인터페이스) / **`OpenAiCompatibleEmbeddingClient`** — Ollama `POST {llm.local.url}/api/embeddings`(model: `rag.embedding.model`, 기본 `nomic-embed-text`) 대상. `LlmClient`/`AnthropicLlmClient` 패턴과 동일하게 인터페이스를 분리해뒀다(다른 백엔드가 필요해지면 구현체만 추가).
+- **`ChromaClient`** — Chroma REST **v2** API(⚠️ Chroma 1.0.0부터 v1이 완전히 제거되고 `/api/v2/...`로 대체됨, `chromadb/chroma:1.5.9`는 v2 전용)를 `WebClient`로 감싼 얇은 래퍼. `createOrGetCollection(name)`(이름→id 캐싱 포함), `upsert(collectionId, ids, embeddings, documents, metadatas)`, `query(collectionId, embedding, topK, where)`(메타데이터 필터 지원 — 패키지별로 결과를 좁히는 데 사용), `deleteCollection(collectionId)`.
+- **`ProjectStructureRagService`** — 원래 설계한 `index`/`buildCompactStructureText`/`cleanup` 3개 공개 메서드 대신, **`compactPackageGroups(sessionId, packageGroups)` 하나로 색인→쿼리→정리를 자기완결적으로 처리**하도록 단순화했다(아래 "예외 안전성" 참고 — 별도 try-finally 배선이 필요 없어짐). 문서 형식은 `"{package} :: {fileName}"`, 메타데이터 `{"package": pkg}`로 패키지별 필터링 지원. 패키지당 파일 수가 `rag.top-k-per-package` 이하면 압축 자체를 건너뛴다.
 
-### 통합 지점
+### 통합 지점 — **구현 완료, plan.md 원안과 다르게 조정됨**
 
-`MainApiController.buildDetailedProjectStructure()`가 반환하기 직전, 완성된 `sb`(레이어/패키지 통계 포함)를 `ProjectStructureRagService.buildCompactStructureText(...)`에 통과시켜 최종적으로 `analyzeCodeWithClaude()`에 넘길 텍스트를 결정한다. 빌드 도구 정보(`detectBuildTool`)와 설정 정보(`extractConfigInfo`)는 크기가 작으므로 압축 대상에서 제외하고 항상 그대로 포함한다.
+원안은 "완성된 전체 텍스트를 사후 압축"이었으나(`buildCompactStructureText(sessionId, rawStructureText, projectType)`), 실제로는 `layerFiles`/`packageGroups`가 `appendJavaStructure()` 안의 지역 변수라 텍스트를 사후 재파싱하는 것보다 **그 함수 안, 패키지 구조를 렌더링하기 직전 지점에서 구조화된 `packageGroups` 데이터에 직접 개입**하는 편이 훨씬 안전해 이렇게 바꿨다. `MainApiController`는 `ObjectProvider<ProjectStructureRagService>`로 선택 주입받아(`rag.enabled=false`면 빈 자체가 없어 컨텍스트 기동에 영향 없음) `getIfAvailable()`이 null이 아닐 때만 `compactPackageGroups()`를 호출한다. 압축됐으면 "(N개, RAG로 대표 M개만 표시)"로 원본 개수와 함께 표기해 압축 여부가 README에서도 드러나게 했다.
 
-### 예외 안전성 (Cleanup 보장) — 채택 시 필수 수정
+### 예외 안전성 (Cleanup 보장) — **원안 폐기, 자기완결형 설계로 대체(2026-07-23)**
 
-**(2026-07-23 재확인)** `MainApiController.finalizeAnalysis()`(1513줄)의 README 생성 블록(1575~1592줄, `readmeFullPath`/`generatedReadmeContent` 준비 구간)은 이미 자체 `try-catch`로 감싸여 있고, 예외가 나도 로그만 남기고 삼킨 뒤 계속 진행한다(라인 번호만 갱신됐을 뿐 구조는 최초 설계 당시와 동일). `ProjectStructureRagService.cleanup()`을 이 블록 뒤에 단순히 이어 붙이면, `buildDetailedProjectStructure`나 `analyzeCodeWithClaude` 호출에서 예외(타임아웃, 네트워크 오류 등)가 나는 순간 `cleanup()`이 스킵되어 Chroma 컬렉션이 영구히 남는다.
-
-→ **이 try 블록을 `try-finally`로 바꿔, 성공/실패와 무관하게 `finally`에서 `ProjectStructureRagService.cleanup(sessionId)`가 항상 실행되도록 한다.** 다중 사용자 환경에서는 사실상 필수 수정 — `scenario_1.md` 구현 착수 시 반영.
+원안은 `finalizeAnalysis()`의 README 생성 블록을 try-finally로 바꿔 cleanup을 보장하는 방식이었다. 실제 구현은 `compactPackageGroups()` 메서드 **하나 안에서** 색인 → 쿼리 → `finally`로 컬렉션 삭제까지 전부 끝내므로, 이 메서드 호출 범위를 벗어나는 순간 이미 정리가 끝나 있다 — `finalizeAnalysis()`를 건드릴 필요 자체가 없어졌다. 어떤 단계에서든 예외가 나면 로그만 남기고 원본 `packageGroups`를 그대로 반환한다(RAG 실패가 README 생성 전체를 막지 않음).
 
 ### 동시성 주의사항 — 단일 로컬 LLM 인스턴스 직렬화
 
@@ -74,20 +69,20 @@ RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목
 
 실제 병목은 다른 데 있다: 로컬/사내 LLM이 단일 인스턴스라면, RAG 임베딩 호출과 LLM 호출이 전부 거기로 몰린다. 동시 사용자가 1명이면 문제없지만, 여러 명이 동시에 대형 프로젝트를 분석하면 요청이 사실상 직렬로 처리돼 세션들이 뒤에서 대기하며 전체적으로 느려진다. 완화책은 `scenario_3.md`(다중 사용자 해당) 참고.
 
-### 설정 (`application.properties`, 채택 시)
+### 설정 (`application.properties`) — **구현 완료, 배선까지 반영됨**
 
 ```properties
-# RAG(Chroma) 설정 — 대형 프로젝트 README 생성 시 컨텍스트 압축 (P1, scenario_1.md 채택 확정)
-rag.enabled=false
-rag.chroma.url=
-rag.chroma.tenant=default_tenant
-rag.chroma.database=default_database
-rag.embedding.model=nomic-embed-text
-rag.trigger-threshold-chars=20000
-rag.top-k-per-layer=30
+# RAG(Chroma) 설정 — 대형 Java 프로젝트 README 생성 시 패키지 구조 텍스트 압축
+rag.enabled=${RAG_ENABLED:false}
+rag.chroma.url=${RAG_CHROMA_URL:}
+rag.chroma.tenant=${RAG_CHROMA_TENANT:default_tenant}
+rag.chroma.database=${RAG_CHROMA_DATABASE:default_database}
+rag.embedding.model=${RAG_EMBEDDING_MODEL:nomic-embed-text}
+rag.trigger-threshold-chars=${RAG_TRIGGER_THRESHOLD_CHARS:20000}
+rag.top-k-per-package=${RAG_TOP_K_PER_PACKAGE:30}
 ```
 
-`docker-compose.yml`의 `app` 서비스 environment에 `RAG_ENABLED`/`RAG_CHROMA_URL=http://chroma:8000`(같은 compose 네트워크 안이므로 서비스명으로 접근)을 배선하고, `.env.lite.example`에도 옵션으로 노출한다. `rag.enabled=false`가 기본값이므로 이 설정을 머지해도 켜기 전까지는 기존 동작과 100% 동일하다.
+통합 지점이 "레이어별"에서 "패키지별"로 바뀌면서 `rag.top-k-per-layer` → **`rag.top-k-per-package`로 이름도 바꿨다**(아직 아무도 쓰지 않는 미출시 설정이라 이름 변경에 호환성 부담 없음). `docker-compose.yml`의 `app` 서비스 environment에 `RAG_ENABLED`/`RAG_CHROMA_URL=http://chroma:8000`(같은 compose 네트워크 안이므로 서비스명으로 접근)/`RAG_EMBEDDING_MODEL`을 배선했고, `ollama` 서비스에도 `RAG_EMBEDDING_MODEL`을 배선해 entrypoint가 임베딩 모델을 pull하게 했다. `.env.lite.example`에도 옵션으로 노출. `rag.enabled=false`가 기본값이므로 이 설정이 머지돼도 켜기 전까지는 기존 동작과 100% 동일하다.
 
 ### 임베딩 모델 확보 (`scenario_1.md` 구현 시 추가로 필요, 최초 설계엔 없던 항목)
 
@@ -95,12 +90,12 @@ rag.top-k-per-layer=30
 
 ### 구현 순서 (`scenario_1.md` 기준, 2026-07-23 확정)
 
-1. Chroma v2 REST API 스모크 테스트 — 실제 컨테이너 대상으로 컬렉션 생성/upsert/query curl 호출해 API 계약 확인(사용자 쪽 로컬 환경에서 수행, 이 리포지토리의 개발 샌드박스엔 Docker 자체가 없어 직접 실행 불가).
-2. `ollama-entrypoint.sh`에 임베딩 모델 pull 추가.
-3. `com.legacy.rag` 패키지 구현: `ChromaClient` → `OpenAiCompatibleEmbeddingClient` → `ProjectStructureRagService` 순서, 각 클래스는 기존 `OpenAiCompatibleLlmClientTest`와 동일한 MockWebServer 패턴으로 단위 테스트.
-4. `application.properties`/`docker-compose.yml`/`.env.lite.example`에 `rag.*` 설정 배선(`rag.enabled=false` 기본 유지).
-5. `finalizeAnalysis()` try→try-finally 전환 + `buildDetailedProjectStructure()` 결과를 `buildCompactStructureText()`로 통과시키는 통합 지점 연결.
-6. `rag.enabled=true`로 전환해 실제 대형 프로젝트로 압축 효과·품질 변화 실측, `scenario_1_test.md`에 기록.
+1. ~~Chroma v2 REST API 스모크 테스트~~ — **보류(사용자 쪽에서 수행 필요)**: 이 리포지토리의 개발 샌드박스엔 Docker 자체가 없어 직접 실행 불가. 코드는 Chroma v2 공개 API 문서 기준으로 작성하고 MockWebServer 단위 테스트로만 계약을 검증함 — 실제 서버 상대 스모크 테스트는 아직 안 됨.
+2. ~~`ollama-entrypoint.sh`에 임베딩 모델 pull 추가.~~ — **완료**.
+3. ~~`com.legacy.rag` 패키지 구현~~ — **완료**. `EmbeddingClient`/`OpenAiCompatibleEmbeddingClient`/`ChromaClient`/`ProjectStructureRagService`, 각각 MockWebServer 단위 테스트(`ChromaClientTest`/`OpenAiCompatibleEmbeddingClientTest`) + 세 컴포넌트를 함께 엮은 `ProjectStructureRagServiceTest` 작성.
+4. ~~`application.properties`/`docker-compose.yml`/`.env.lite.example`에 `rag.*` 설정 배선~~ — **완료**(`rag.enabled=false` 기본 유지).
+5. ~~통합 지점 연결~~ — **완료, 설계 변경**: `finalizeAnalysis()` try-finally 전환은 불필요해짐(위 "예외 안전성" 참고). 대신 `MainApiController`에 `ObjectProvider<ProjectStructureRagService>` 주입 + `appendJavaStructure()`의 패키지 구조 렌더링 지점에 `compactPackageGroups()` 연결.
+6. `rag.enabled=true`로 전환해 실제 대형 프로젝트로 압축 효과·품질 변화 실측, `scenario_1_test.md`에 기록. — **미착수**: 1번(Chroma 실서버 스모크 테스트)이 선행돼야 함. 사용자가 이미지 재빌드 후 실제 대형 Java 프로젝트로 `rag.enabled=true` 테스트 예정.
 
 ---
 
