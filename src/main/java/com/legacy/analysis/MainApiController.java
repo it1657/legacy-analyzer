@@ -119,7 +119,19 @@ public class MainApiController {
     Map<String, Object> result = new HashMap<>();
     result.put("provider", isAnthropicMode() ? "anthropic" : "local");
     result.put("model", claudeService.getCurrentModel());
+    // Docker 컨테이너로 구동 중이면 관리자 전용 "서버 경로 직접 지정" 기능이 무의미하다
+    // (app 컨테이너에 임의 호스트 경로 bind mount가 없어 필연적으로 오류남 — 2026-07 확인).
+    // 프런트엔드가 이 값을 보고 해당 UI 섹션을 숨긴다.
+    result.put("containerized", isRunningInContainer());
     return result;
+  }
+
+  /**
+   * Docker(또는 호환 컨테이너 런타임)로 구동 중인지 판별한다. `/.dockerenv`는 Docker가
+   * 컨테이너 생성 시 항상 심어주는 표준 마커 파일이라 별도 환경변수 설정 없이도 동작한다.
+   */
+  private boolean isRunningInContainer() {
+    return new File("/.dockerenv").exists();
   }
 
   // ===================================================================

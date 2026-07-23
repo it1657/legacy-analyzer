@@ -521,20 +521,28 @@ function toggleTreeExpandAll() {
 async function initLlmProviderConfig() {
   const select = document.getElementById('modelSelect');
   const hint = document.getElementById('modelSelectHint');
-  if (!select) return;
 
   try {
     const resp = await fetch('/api/config/llm-provider');
     if (!resp.ok) return; // 조회 실패 시 기존 Claude 드롭다운 그대로 둔다 (안전한 기본 동작)
     const config = await resp.json();
 
-    if (config.provider === 'local') {
+    if (select && config.provider === 'local') {
       const modelName = config.model || '(모델명 미설정)';
       select.innerHTML = `<option value="${modelName}" selected>로컬 모델: ${modelName} (무료 · 자체 호스팅)</option>`;
       select.disabled = true; // 선택지가 하나뿐이라 조작 불가로 표시
       if (hint) hint.textContent = '자체 호스팅 LLM · 과금 없음';
     }
     // provider === 'anthropic'이면 기존 드롭다운(3개 Claude 모델)을 그대로 둔다.
+
+    // 컨테이너(Docker)로 구동 중이면 app 컨테이너에 임의 호스트 경로 bind mount가 없어
+    // "서버 경로 직접 지정" 기능이 필연적으로 오류난다(2026-07 확인). 관리자여서 window.onload에서
+    // 일단 노출됐더라도, 컨테이너 환경이면 여기서 다시 숨긴다. 로컬 IDE/jar 직접 실행 시엔
+    // containerized가 false라 계속 노출된다.
+    if (config.containerized) {
+      const localPathAnalysisSection = document.getElementById('localPathAnalysisSection');
+      if (localPathAnalysisSection) localPathAnalysisSection.style.display = 'none';
+    }
   } catch (e) {
     // 네트워크 오류 등으로 조회 실패해도 기존 Claude 드롭다운으로 동작해야 하므로 조용히 무시
     console.warn('[LLM provider 조회 실패]', e);

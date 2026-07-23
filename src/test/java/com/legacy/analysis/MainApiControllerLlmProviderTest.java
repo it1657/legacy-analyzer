@@ -133,4 +133,26 @@ class MainApiControllerLlmProviderTest {
     assertEquals("anthropic", result.get("provider"));
     assertEquals("claude-sonnet-5", result.get("model"));
   }
+
+  @Test
+  void llm_provider_조회_엔드포인트는_containerized_여부를_함께_반환한다() throws Exception {
+    // 관리자 전용 "서버 경로 직접 지정" UI를 컨테이너 환경에서 숨기기 위한 플래그.
+    // 테스트가 도는 이 환경(Docker 컨테이너 아님)에서는 /.dockerenv가 없으므로 false여야 한다.
+    MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "local");
+
+    java.util.Map<String, Object> result = getLlmProviderConfig(controller);
+
+    assertEquals(false, result.get("containerized"));
+  }
+
+  @Test
+  void isRunningInContainer는_dockerenv_파일이_없으면_false를_반환한다() throws Exception {
+    MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "local");
+    Method m = MainApiController.class.getDeclaredMethod("isRunningInContainer");
+    m.setAccessible(true);
+
+    boolean result = (boolean) m.invoke(controller);
+
+    assertEquals(false, result, "/.dockerenv가 없는 일반 환경(로컬/CI)에서는 false여야 함");
+  }
 }
