@@ -37,7 +37,7 @@ class OpenAiCompatibleLlmClientTest {
 
     @Test
     void api_key가_있으면_Authorization_Bearer_헤더가_포함된다() throws Exception {
-        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "secret-key", 300);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "secret-key", 300, 0.2);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -55,7 +55,7 @@ class OpenAiCompatibleLlmClientTest {
 
     @Test
     void api_key가_비어있으면_Authorization_헤더가_생략된다() throws Exception {
-        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300, 0.2);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -73,7 +73,7 @@ class OpenAiCompatibleLlmClientTest {
 
     @Test
     void 요청_경로와_바디가_OpenAI_호환_규격대로_전송된다() throws Exception {
-        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300, 0.2);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -95,11 +95,33 @@ class OpenAiCompatibleLlmClientTest {
         assertTrue(body.contains("\"role\":\"user\""));
         assertTrue(body.contains("system prompt"));
         assertTrue(body.contains("user content"));
+        assertTrue(body.contains("\"temperature\":0.2"));
+    }
+
+    @Test
+    void temperature_생성자_값이_요청_바디에_그대로_반영된다() throws Exception {
+        // 소형 로컬 모델의 할루시네이션/예시 문장 베끼기 완화를 위해 기본값을 낮게(0.2) 뒀는데
+        // (2026-07-23 scenario_1 실측 기반), 이 값이 실제 요청에 반영되는지 검증한다.
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300, 0.35);
+
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("""
+                    {"choices":[{"message":{"role":"assistant","content":"ok"}}],
+                     "usage":{"prompt_tokens":1,"completion_tokens":1}}
+                    """));
+
+        client.call("sys", "user", "qwen-test", 1024);
+
+        RecordedRequest recorded = server.takeRequest();
+        String body = recorded.getBody().readUtf8();
+        assertTrue(body.contains("\"temperature\":0.35"));
     }
 
     @Test
     void 응답의_텍스트와_토큰사용량을_파싱하고_캐시토큰은_항상_0이다() throws Exception {
-        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300, 0.2);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -120,7 +142,7 @@ class OpenAiCompatibleLlmClientTest {
 
     @Test
     void 오류_응답이면_상태코드를_포함한_WebClientResponseException을_던진다() {
-        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(baseUrl(), "", 300, 0.2);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(500)

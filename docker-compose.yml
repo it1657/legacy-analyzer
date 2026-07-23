@@ -53,6 +53,7 @@ services:
       LLM_LOCAL_URL: ${LLM_LOCAL_URL:-}
       LLM_LOCAL_MODEL: ${LLM_LOCAL_MODEL:-}
       LLM_LOCAL_API_KEY: ${LLM_LOCAL_API_KEY:-}
+      LLM_LOCAL_TEMPERATURE: ${LLM_LOCAL_TEMPERATURE:-0.2}
       TZ: Asia/Seoul
     ports:
       - "8803:8803"

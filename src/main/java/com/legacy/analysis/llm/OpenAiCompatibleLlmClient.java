@@ -35,11 +35,20 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmClient.class);
 
     private final WebClient webClient;
+    private final double temperature;
 
     public OpenAiCompatibleLlmClient(
             @Value("${llm.local.url}") String baseUrl,
             @Value("${llm.local.api-key:}") String apiKey,
-            @Value("${llm.local.read-timeout-sec:300}") long readTimeoutSec) {
+            @Value("${llm.local.read-timeout-sec:300}") long readTimeoutSec,
+            // 코드 분석·주석 생성은 "사실을 있는 그대로 추출"하는 작업이라 창의성이 필요 없다.
+            // OpenAI 호환 서버(Ollama 등)의 기본 temperature(보통 0.7~0.8)를 그대로 쓰면
+            // 소형 로컬 모델일수록 시스템 프롬프트의 형식 예시 문장을 창작하듯 베끼거나
+            // 근거 없는 내용을 지어내는 경향이 커진다(2026-07-23 실측: qwen2.5-coder:7b가
+            // prompt.md의 예시 문장을 거의 그대로 재사용한 사례 확인). 기본값을 낮게 잡아
+            // 입력에 더 충실하게(deterministic) 만든다 — 필요하면 시나리오/모델별로 조정.
+            @Value("${llm.local.temperature:0.2}") double temperature) {
+        this.temperature = temperature;
         HttpClient httpClient = HttpClient.create()
                 .responseTimeout(Duration.ofSeconds(readTimeoutSec));
 
@@ -69,6 +78,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", model);
         requestBody.put("max_tokens", maxTokens);
+        requestBody.put("temperature", temperature);
         requestBody.put("messages", List.of(systemMessage, userMessage));
 
         Map<?, ?> response = webClient.post()
