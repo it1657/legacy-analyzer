@@ -37,15 +37,17 @@
 
 1. ~~RAG 미채택이 최종 확정되면 `chroma` 서비스 정의 자체를 compose에서 제거할지~~ — **해소(2026-07-23)**: RAG 채택이 확정되고 구현도 완료돼 더 이상 미정 사항이 아님. `chroma`는 `profiles`로 비활성 상태 유지, `rag.enabled=false` 기본값과 함께 배포.
 
-## 아직 만들지 않은 것 (2단계, 이 문서 범위 밖)
+## 2단계 진행 상황 — **완료(2026-07-23)**
 
-- CI 이미지 빌드·푸시 파이프라인(`.github/workflows` 등) — 레지스트리는 확정됐으니(위 참고) 더 이상 "결정 대기"가 아니라 "구현 대기" 상태. 2단계 착수 시 진행.
+~~CI 이미지 빌드·푸시 파이프라인~~ — **완료**: `.github/workflows/docker-publish.yml` 작성, Docker Hub 태그 push → Actions 실행 → 이미지 반영까지 실사용 테스트 완료(자세한 경위는 `4.tested/scenario_1_test.md` 참고 — 1차 확인은 오판이었고 정정 후 재확인함).
 
-## 아직 실제로 만들어지지 않은 파일 (1단계 구현 대상)
+## 1단계 구현 대상 파일 — **전부 완료(2026-07-23)**
 
-- `docker/ollama-entrypoint.sh`
-- `docker-compose.gpu.yml`
-- `.env.lite.example`
-- 기존 `docker-compose.yml`에 `ollama`/`chroma` 서비스 정의 추가, `app`에 `image:` 키 추가, `depends_on` 배선
+이 절은 원래 "아직 만들어지지 않은 파일" 목록이었으나, 아래 전부 실제로 생성·반영됐다(오래된 스냅샷이 방치돼 있던 걸 뒤늦게 갱신):
 
-이 문서는 스펙 스냅샷이며 위 파일들은 아직 미생성 — 실제 구현은 다음 세션에서 진행.
+- ~~`docker/ollama-entrypoint.sh`~~ — 완료(이후 RAG 임베딩 모델 pull 로직 추가로 한 번 더 갱신, 2026-07-23)
+- ~~`docker-compose.gpu.yml`~~ — 완료
+- ~~`.env.lite.example`~~ — 완료(이후 RAG 옵션 추가로 한 번 더 갱신)
+- ~~기존 `docker-compose.yml`에 `ollama`/`chroma` 서비스 정의 추가, `app`에 `image:` 키 추가, `depends_on` 배선~~ — 완료
+
+남은 건 실제 실행 검증(런타임 스모크 테스트, 품질 실측 등)뿐이며 이건 `4.tested/scenario_1_test.md`에서 추적한다.
