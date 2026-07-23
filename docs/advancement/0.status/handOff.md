@@ -257,6 +257,16 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 
 **남은 것**: 사용자가 이미지 재빌드 후 (1) CLAUDE.md 버그 수정이 실제로 정상적인 지침 문서를 생성하는지 재테스트, (2) RAG를 Chroma v2 API 실서버 대상으로 스모크 테스트 → `rag.enabled=true`로 켜서 실제 대형 Java 프로젝트 압축 효과 실측.
 
+## 100파일 실측에서 성공률 7% 발견 → 로컬 LLM 동시 요청 과다 타임아웃 버그 수정 (21차, 2026-07-23)
+
+20차 수정을 반영해 재빌드한 뒤, 사용자가 실제 100개 파일짜리 프로젝트로 전체 분석을 돌렸더니 **주석 추가 7개·기존 스킵 2개·처리 실패 91개(성공률 7.0%)**라는 훨씬 심각한 결과가 나왔다.
+
+- **원인**: `app.analysis.thread-pool-size`(기본 16)가 파일마다 동시에 로컬 LLM을 호출하는데, CPU 전용 Ollama는 요청을 보통 하나씩만 처리한다. 16개가 한꺼번에 전송되면 뒤에 밀린 요청은 Ollama가 처리를 시작하기도 전에 클라이언트 read-timeout(기본 300초)을 넘겨버림 — 파일당 평균 처리 시간 120.8초(18차 실측) 기준 300초 안에 순번이 오는 건 2~3번째 요청뿐이라 91/100 실패율과 정확히 부합.
+- **수정**(`1cb130b`): `OpenAiCompatibleLlmClient`에 `Semaphore`를 추가해 실제 HTTP 요청 전송 자체를 `llm.local.max-concurrent-calls`(신규 설정, 기본 1)개로 제한 — 앱 내부 스레드 풀(16개)은 그대로 두고 로컬 LLM으로 나가는 실제 네트워크 요청만 직렬화. 대기 중인 호출은 요청을 아직 안 보낸 상태라 타임아웃 시계가 안 돌아 안전하게 큐잉됨. `application.properties`/`docker-compose.yml`/`.env.lite.example`에 `LLM_LOCAL_MAX_CONCURRENT_CALLS` 배선, `OpenAiCompatibleLlmClientTest`에 MockWebServer 커스텀 `Dispatcher`로 실제 동시 in-flight 요청 수를 관측하는 회귀 테스트 신규 추가. `scenario_1_test.md`에 원인·수정 내역 기록.
+- **주의**: 이건 속도 개선이 아니라 실패율 감소가 목적 — 완전 직렬화라 100파일 × 120초 ≈ 3.3시간이 걸릴 수 있다는 점은 그대로 남는 별도 이슈(GPU 오버레이/14b 비교 등 다른 트랙에서 다룰 문제).
+
+**남은 것**: 사용자가 재빌드 후 같은 100파일로 재테스트해 성공률이 실제로 개선됐는지 확인.
+
 ### 보류 중인 잡다한 항목 (급하지 않음)
 
 - ~~`docs/advancement/{plan,scenario}/` 폴더 이동 이후 문서 내부에 남아있는 옛 상대경로 참조(`docs/plan.md` 등) 정리~~ — **완료**. `scenario_0/1/2/3.md`에 남아있던 `` `docs/plan.md` `` 참조 9곳을 전부 `` `plan.md` ``(같은 폴더 기준 파일명, 다른 문서들과 동일한 참조 스타일)로 통일. `docs/scenario_*.md` 형태의 옛 경로는 이미 이전 세션에서 정리돼 있었음(재확인 완료). `grep -r "docs/plan\.md|docs/scenario_[0-9]" docs/advancement`로 잔존 여부 재확인 — 0건.
