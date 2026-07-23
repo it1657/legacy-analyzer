@@ -13,7 +13,7 @@
 - **`scenario_2.md`** — GPU·디스크는 여유 있지만 인터넷망을 쓸 수 없는 폐쇄망/에어갭 환경.
 - **`scenario_3.md`** — 인터넷망도 쓸 수 있고 리소스도 충분해서 Anthropic API와 로컬 LLM을 상황에 따라 선택하는 환경.
 
-이 문서(`plan.md`)에는 특정 시나리오에 속하지 않는 **공통 설계**만 남긴다: 컨테이너 구성 원칙, RAG(P1, 조건부), Provider 선택 UI/UX(P2). 로컬/사내 LLM 설치 절차, DB 선택(H2 vs Postgres), 네트워크 노출 정책 같은 시나리오별 결정은 각 `scenario_*.md`를 본다.
+이 문서(`plan.md`)에는 특정 시나리오에 속하지 않는 **공통 설계**만 남긴다: 컨테이너 구성 원칙, RAG(P1, `scenario_1.md` 기준 채택 확정·구현 착수), Provider 선택 UI/UX(P2). 로컬/사내 LLM 설치 절차, DB 선택(H2 vs Postgres), 네트워크 노출 정책 같은 시나리오별 결정은 각 `scenario_*.md`를 본다.
 
 ---
 
@@ -34,18 +34,18 @@ services:
 
 ---
 
-## RAG(Chroma) — P1, 조건부 (공통 설계 — 필요 여부는 시나리오별 판단)
+## RAG(Chroma) — P1, `scenario_1.md` 채택 확정 (2026-07-23, 구현 착수)
 
-RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목적으로 검토했다. 하지만 시나리오마다 필요성이 다르다:
+RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목적으로 검토했다. 시나리오마다 필요성이 다르다:
 
-- 선택형 환경(`scenario_3.md`)은 대상 모델에 따라 네이티브 컨텍스트가 매우 클 수 있어, 정확한 서빙 모델·컨텍스트 길이를 확인하기 전까지는 RAG가 아예 불필요할 가능성이 있다.
-- 경량 노트북(`scenario_1.md`)이나 폐쇄망(`scenario_2.md`)에서 상대적으로 작은 모델(7b~14b, 컨텍스트 8K~32K대)을 쓰면 여전히 의미가 있을 수 있다.
+- 선택형 환경(`scenario_3.md`)은 대상 모델에 따라 네이티브 컨텍스트가 매우 클 수 있어, 정확한 서빙 모델·컨텍스트 길이를 확인하기 전까지는 RAG가 아예 불필요할 가능성이 있다 — 여전히 조건부.
+- 경량 노트북(`scenario_1.md`)이나 폐쇄망(`scenario_2.md`)에서 상대적으로 작은 모델(7b~14b, 컨텍스트 8K~32K대)을 쓰면 여전히 의미가 있다.
 
-→ **먼저 `scenario_0.md`를 배포하고, 실제로 `projectStructureSummary`가 컨텍스트를 넘겨서 잘리거나 품질이 떨어지는 사례가 나오는지 관찰한 뒤 착수한다.** 아래는 채택하기로 결정했을 때 쓸 공통 설계(각 시나리오 문서에서 이 섹션을 참조).
+`scenario_1.md`은 원래 "`scenario_0.md` 배포 후 실사용 데이터로 컨텍스트 초과/품질 저하가 관측되면 착수"라는 조건부 결정이었으나, **2026-07-23 사용자 결정으로 관측 없이 채택을 확정하고 구현에 착수**했다 — 아래는 실제 구현에 쓰는 최신 설계다(각 시나리오 문서에서 이 섹션을 참조). `scenario_2.md`/`scenario_3.md`는 여전히 조건부로 남겨둔다.
 
 ### 문제 지점
 
-`MainApiController.buildDetailedProjectStructure()`(1863-1891줄)가 프로젝트 타입별로 `appendJavaStructure`/`appendFrontendStructure`/... 를 호출해 레이어별·패키지별 클래스 목록을 텍스트로 쌓은 뒤(예: `appendJavaStructure` 1894줄~, `layerFiles`/`packageGroups` 맵), 이 전체 텍스트를 한 번에 `claudeService.analyzeCodeWithClaude(projectStructureSummary, "README.md", ...)`(1545-1549줄)로 넘긴다. 클래스 수가 많은 대형 레거시 프로젝트에서는 이 텍스트가 매우 커져 컨텍스트 윈도우가 좁은 모델에서는 초과되거나 추론이 느려질 수 있다.
+`MainApiController.buildDetailedProjectStructure()`(2026-07-23 재확인: 1894줄)가 프로젝트 타입별로 `appendJavaStructure`(1925줄)/`appendFrontendStructure`/... 를 호출해 레이어별·패키지별 클래스 목록을 텍스트로 쌓은 뒤(`layerFiles`/`packageGroups` 맵), 이 전체 텍스트를 한 번에 `finalizeAnalysis()`(1513줄) 안에서 `claudeService.analyzeCodeWithClaude(projectStructureSummary, readmeFileName, ...)`(1576-1580줄)로 넘긴다. 클래스 수가 많은 대형 레거시 프로젝트에서는 이 텍스트가 매우 커져 컨텍스트 윈도우가 좁은 모델에서는 초과되거나 추론이 느려질 수 있다.
 
 ### 설계: 임베딩 기반 대표 항목 검색으로 프롬프트 크기 상한 고정
 
@@ -64,9 +64,9 @@ RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목
 
 ### 예외 안전성 (Cleanup 보장) — 채택 시 필수 수정
 
-**(검증 완료)** `MainApiController.finalizeAnalysis()`의 README 생성 블록(1544~1561줄)은 이미 자체 `try-catch`로 감싸여 있고, 예외가 나도 로그만 남기고 삼킨 뒤 계속 진행한다. `ProjectStructureRagService.cleanup()`을 이 블록 뒤에 단순히 이어 붙이면, `buildDetailedProjectStructure`나 `analyzeCodeWithClaude` 호출에서 예외(타임아웃, 네트워크 오류 등)가 나는 순간 `cleanup()`이 스킵되어 Chroma 컬렉션이 영구히 남는다.
+**(2026-07-23 재확인)** `MainApiController.finalizeAnalysis()`(1513줄)의 README 생성 블록(1575~1592줄, `readmeFullPath`/`generatedReadmeContent` 준비 구간)은 이미 자체 `try-catch`로 감싸여 있고, 예외가 나도 로그만 남기고 삼킨 뒤 계속 진행한다(라인 번호만 갱신됐을 뿐 구조는 최초 설계 당시와 동일). `ProjectStructureRagService.cleanup()`을 이 블록 뒤에 단순히 이어 붙이면, `buildDetailedProjectStructure`나 `analyzeCodeWithClaude` 호출에서 예외(타임아웃, 네트워크 오류 등)가 나는 순간 `cleanup()`이 스킵되어 Chroma 컬렉션이 영구히 남는다.
 
-→ **이 try 블록을 `try-finally`로 바꿔, 성공/실패와 무관하게 `finally`에서 `ProjectStructureRagService.cleanup(sessionId)`가 항상 실행되도록 한다.** 다중 사용자 환경에서는 사실상 필수 수정.
+→ **이 try 블록을 `try-finally`로 바꿔, 성공/실패와 무관하게 `finally`에서 `ProjectStructureRagService.cleanup(sessionId)`가 항상 실행되도록 한다.** 다중 사용자 환경에서는 사실상 필수 수정 — `scenario_1.md` 구현 착수 시 반영.
 
 ### 동시성 주의사항 — 단일 로컬 LLM 인스턴스 직렬화
 
@@ -77,15 +77,30 @@ RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목
 ### 설정 (`application.properties`, 채택 시)
 
 ```properties
-# RAG(Chroma) 설정 — 대형 프로젝트 README 생성 시 컨텍스트 압축 (P1, 조건부 채택)
+# RAG(Chroma) 설정 — 대형 프로젝트 README 생성 시 컨텍스트 압축 (P1, scenario_1.md 채택 확정)
 rag.enabled=false
 rag.chroma.url=
 rag.chroma.tenant=default_tenant
 rag.chroma.database=default_database
-rag.embedding.model=
+rag.embedding.model=nomic-embed-text
 rag.trigger-threshold-chars=20000
 rag.top-k-per-layer=30
 ```
+
+`docker-compose.yml`의 `app` 서비스 environment에 `RAG_ENABLED`/`RAG_CHROMA_URL=http://chroma:8000`(같은 compose 네트워크 안이므로 서비스명으로 접근)을 배선하고, `.env.lite.example`에도 옵션으로 노출한다. `rag.enabled=false`가 기본값이므로 이 설정을 머지해도 켜기 전까지는 기존 동작과 100% 동일하다.
+
+### 임베딩 모델 확보 (`scenario_1.md` 구현 시 추가로 필요, 최초 설계엔 없던 항목)
+
+`docker/ollama-entrypoint.sh`는 지금 채팅 모델(`OLLAMA_MODEL`, 기본 `qwen2.5-coder:7b`)만 자동 pull한다. 임베딩 전용 모델(`nomic-embed-text`, 약 274MB)은 채팅 모델과 별개로 pull해야 하므로, entrypoint 스크립트에 두 번째 모델(`RAG_EMBEDDING_MODEL` 환경변수, 기본값 `nomic-embed-text`)을 pull하는 단계를 추가한다. `rag.enabled=false`인 배포(회사 서버 등 RAG 미채택 환경)에서는 이 pull이 불필요한 다운로드가 되므로, `COMPOSE_PROFILES`에 `llm-rag`가 있을 때만 켜지는 지금 구조를 그대로 활용해 `RAG_EMBEDDING_MODEL`이 비어 있으면 pull을 건너뛰도록 조건부로 만든다.
+
+### 구현 순서 (`scenario_1.md` 기준, 2026-07-23 확정)
+
+1. Chroma v2 REST API 스모크 테스트 — 실제 컨테이너 대상으로 컬렉션 생성/upsert/query curl 호출해 API 계약 확인(사용자 쪽 로컬 환경에서 수행, 이 리포지토리의 개발 샌드박스엔 Docker 자체가 없어 직접 실행 불가).
+2. `ollama-entrypoint.sh`에 임베딩 모델 pull 추가.
+3. `com.legacy.rag` 패키지 구현: `ChromaClient` → `OpenAiCompatibleEmbeddingClient` → `ProjectStructureRagService` 순서, 각 클래스는 기존 `OpenAiCompatibleLlmClientTest`와 동일한 MockWebServer 패턴으로 단위 테스트.
+4. `application.properties`/`docker-compose.yml`/`.env.lite.example`에 `rag.*` 설정 배선(`rag.enabled=false` 기본 유지).
+5. `finalizeAnalysis()` try→try-finally 전환 + `buildDetailedProjectStructure()` 결과를 `buildCompactStructureText()`로 통과시키는 통합 지점 연결.
+6. `rag.enabled=true`로 전환해 실제 대형 프로젝트로 압축 효과·품질 변화 실측, `scenario_1_test.md`에 기록.
 
 ---
 

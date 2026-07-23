@@ -188,17 +188,17 @@ ollama:
 
 개인용 로컬 환경이 기본 전제이므로 인터넷 노출 리스크는 낮지만, 굳이 열어둘 필요는 없으니 `ollama`/`chroma` 포트는 `127.0.0.1:11434:11434`처럼 로컬 전용으로 바인딩하거나, `app`만 접근 가능하도록 `ports:` 대신 `expose:`를 쓴다.
 
-## RAG(Chroma) 필요성
+## RAG(Chroma) 필요성 — 채택 확정 (2026-07-23)
 
-이 시나리오는 상대적으로 작은 모델(7b, 컨텍스트 8K~32K대)을 쓰므로, `plan.md`의 RAG 섹션에서 우려한 "컨텍스트 초과" 문제가 실제로 발생할 가능성이 세 시나리오 중 가장 높다. 다만 `scenario_0.md` 배포 후 실사용 데이터로 확인하고 결정 — 기본값은 `rag.enabled=false`로 두고, 대형 프로젝트 분석 시 README 품질 저하나 컨텍스트 초과 로그가 관측되면 그때 켠다.
+이 시나리오는 상대적으로 작은 모델(7b, 컨텍스트 8K~32K대)을 쓰므로, `plan.md`의 RAG 섹션에서 우려한 "컨텍스트 초과" 문제가 실제로 발생할 가능성이 세 시나리오 중 가장 높다. 원래는 `scenario_0.md` 배포 후 실사용 데이터(컨텍스트 초과/품질 저하 관측)로 확인하고 결정하기로 했으나, **2026-07-23 사용자 결정으로 관측 없이 채택을 확정하고 구현에 착수**했다. 구현 세부 설계·순서는 `plan.md`의 "RAG(Chroma)" 섹션 참고(임베딩 모델 확보, `com.legacy.rag` 패키지 구성, `finalizeAnalysis` try-finally 전환 등 이 시나리오 구현 시 필요한 최신 내용 반영됨).
 
 ## 실행 순서 (1단계 — build 기준)
 
 0. ~~(선행) 실제 배포 대상 환경의 `docker compose version` 확인~~ — **완료**. 로컬 노트북 `v2.30.3-desktop.1` 확인, Compose v2.20+ 요구조건 충족(2026-07-22).
-1. 기존 `docker-compose.yml`에 `ollama`/`chroma`(profiles)·`app`의 `image:`+`build:` 병행 배선 반영, `docker-compose.gpu.yml`·`docker/ollama-entrypoint.sh`·`.env.lite.example` 신규 작성.
-2. `ollama` 서비스 entrypoint 자동 모델 pull 스크립트 + healthcheck 배선.
-3. `cp .env.lite.example .env && docker compose build && docker compose up -d` 한 번으로 전체 스택 기동 확인(신규 환경 기준, 기존에 아무것도 없는 상태에서).
-4. (조건부) RAG 채택 시 `plan.md`의 RAG 섹션 그대로 적용, `rag.chroma.url=http://chroma:8000`.
+1. ~~기존 `docker-compose.yml`에 `ollama`/`chroma`(profiles)·`app`의 `image:`+`build:` 병행 배선 반영, `docker-compose.gpu.yml`·`docker/ollama-entrypoint.sh`·`.env.lite.example` 신규 작성.~~ — **완료**(2026-07-23).
+2. ~~`ollama` 서비스 entrypoint 자동 모델 pull 스크립트 + healthcheck 배선.~~ — **완료**.
+3. ~~`cp .env.lite.example .env && docker compose build && docker compose up -d` 한 번으로 전체 스택 기동 확인.~~ — **완료**(클린 환경 스모크 테스트).
+4. **RAG 채택 확정, 구현 착수(2026-07-23)** — `plan.md`의 RAG 섹션 "구현 순서"를 그대로 따른다: Chroma v2 API 스모크 테스트(사용자 로컬 환경) → `ollama-entrypoint.sh` 임베딩 모델 pull 추가 → `com.legacy.rag` 패키지 구현 → 설정 배선(`rag.chroma.url=http://chroma:8000`, 기본 `rag.enabled=false`) → `finalizeAnalysis` try-finally 전환 → `rag.enabled=true` 실측.
 
 ### 2단계(후속, 별도 착수) — pull 전환
 
