@@ -1,0 +1,62 @@
+name: Docker Publish (legacy-analyzer lite)
+
+# scenario_1(GPU 없는 노트북 경량 배포판) 2단계 — Docker Hub(it1657/legacy-analyzer, public)로
+# 이미지를 빌드·푸시해 사용자가 `docker compose pull`만으로 받을 수 있게 하는 파이프라인.
+#
+# 트리거를 매 커밋(push to master)이 아니라 버전 태그로 제한한 이유: 이 이미지는 회사 서버
+# (scenario_3, 별도로 로컬 build 유지)와 무관하게 독립적으로 관리해야 하고, 커밋마다 Docker
+# Hub에 올릴 필요는 없다 — 배포하고 싶은 시점에 태그를 찍는 방식이 더 안전하다.
+#
+# 필요한 GitHub Secrets(리포지토리 Settings → Secrets and variables → Actions에서 등록,
+# 이 저장소 소유자가 직접 등록해야 함 — 자격증명이라 워크플로우 파일만으로는 대신할 수 없음):
+#   DOCKERHUB_USERNAME = it1657
+#   DOCKERHUB_TOKEN    = Docker Hub Account Settings → Security → New Access Token 으로 발급한 값
+#                        (계정 비밀번호 아님)
+#
+# 사용법:
+#   - 버전 릴리스: `git tag v0.1.0 && git push origin v0.1.0` → :latest 와 :v0.1.0 두 태그로 푸시
+#   - 수동 갱신:   Actions 탭에서 이 워크플로우를 "Run workflow"로 수동 실행 → :latest만 갱신
+
+"on":
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 수동 실행(workflow_dispatch): latest만 갱신
+      - name: Build and push (latest)
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: it1657/legacy-analyzer:latest
+
+      # 버전 태그 push(v*.*.*): latest + 버전 태그 둘 다 갱신
+      - name: Build and push (tagged release)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            it1657/legacy-analyzer:latest
+            it1657/legacy-analyzer:${{ github.ref_name }}

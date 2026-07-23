@@ -19,6 +19,10 @@ services:
       retries: 10
 
   app:
+    # image: 회사 서버는 지금처럼 `docker compose build`로 로컬 빌드해 이 태그로 그대로
+    # 태깅한다. 경량 배포판(scenario_1) 신규 사용자는 CI가 이 태그를 Docker Hub에 푸시하면
+    # `docker compose pull`로 받을 수 있다(2단계, CI 파이프라인 완성 전까지는 build 필요).
+    image: it1657/legacy-analyzer:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -27,6 +31,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # ollama는 profiles(llm-rag)로 조건부 기동이라, required: false가 없으면
+      # COMPOSE_PROFILES에 llm-rag가 없는 환경(회사 서버 등)에서 `docker compose up app`이
+      # "ollama가 없다"며 깨진다. required: false는 ollama가 없을 때 이 의존성을 무시한다.
+      # (Compose v2.20+ 필요 — 로컬 노트북 v2.30.3-desktop.1로 확인 완료)
+      ollama:
+        condition: service_healthy
+        required: false
     environment:
       SPRING_PROFILES_ACTIVE: postgres
       # postgres 컨테이너는 같은 compose 네트워크 안에서 서비스명(postgres)으로 접근 가능
@@ -48,6 +59,44 @@ services:
     volumes:
       - session_data:/app/.analysis-sessions
 
+  # 로컬 LLM(Ollama) — llm-rag 프로필로만 기동. scenario_1(경량 배포판) .env는
+  # COMPOSE_PROFILES=llm-rag를 기본으로 켜두고, 회사 서버(scenario_3) .env는 이 값을
+  # 넣지 않아 정의만 있고 기동되지 않는다(기존 운영에 영향 없음).
+  ollama:
+    image: ollama/ollama:0.32.1
+    container_name: legacy-analyzer-ollama
+    restart: unless-stopped
+    profiles: ["llm-rag"]
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      OLLAMA_MODEL: ${LLM_LOCAL_MODEL:-qwen2.5-coder:7b}
+      TZ: Asia/Seoul
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./docker/ollama-entrypoint.sh:/entrypoint.sh:ro
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q \"${LLM_LOCAL_MODEL:-qwen2.5-coder:7b}\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+
+  # RAG용 벡터 DB — llm-rag 프로필로 함께 기동하지만 rag.enabled=false가 기본이라
+  # 지금은 컨테이너만 떠 있고 앱이 호출하지 않는다(RAG 채택 시 rag.enabled=true로 전환).
+  chroma:
+    image: chromadb/chroma:1.5.9
+    container_name: legacy-analyzer-chroma
+    restart: unless-stopped
+    profiles: ["llm-rag"]
+    volumes:
+      - chroma_data:/data
+    expose:
+      - "8000"
+
 volumes:
   postgres_data:
   session_data:
+  ollama_data:
+  chroma_data:

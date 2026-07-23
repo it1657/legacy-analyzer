@@ -1,4 +1,6 @@
-# 테스트 결과 (2026-07-22)
+# 시나리오 0 테스트 기록 — Claude API ↔ 로컬/사내 LLM 설정 전환
+
+> 이 문서는 원래 `docs/advancement/0.status/testResult.md`에 있던 내용을 새 문서 규칙(`docs/advancement/4.tested/scenario_N_test.md`) 확립에 맞춰 이관한 것이다(2026-07-22 — 폴더명은 "5.validation" → "5.test" → 최종 "4.tested"·"5.completed" 순서로 자리를 바꿔가며 확정됐다). 내용 자체는 바뀌지 않았고 위치·파일명만 새 규칙에 맞춤.
 
 `handOff.md`의 진척 상황이 갱신될 때마다, 그 시점에 실제 코드와 문서 내용을 대조해서
 테스트가 없는 변경분을 찾아 테스트 코드를 추가하고 실행한 결과를 기록한다.
@@ -44,15 +46,23 @@
 
 전체 28건 전부 통과, 실패/에러 0건. 기존 테스트(`llm.*`, `PresentationGeneratorScreenFlowTest`)도
 이번 변경으로 회귀가 없음을 재확인했다. `clean test`로 캐시 없이 처음부터 다시 빌드해도
-동일하게 통과 — `handOff.md`가 "아직 로컬에서 실행 확인 안 됨"이라 적어뒀던 3차 세션
+동일하게 통과 — "아직 로컬에서 실행 확인 안 됨"이라 남아 있던 3차 세션
 변경분(`MainApiController`/`ClaudeServiceImpl`/컴파일 전체)의 검증을 이걸로 완료했다.
 
-## 남은 갭
+## 남은 갭 (아직 검증 안 됨)
 
 - `docker-compose.yml`의 `LLM_PROVIDER` 등 환경변수 배선, `dashboard.js`의
   `initLlmProviderConfig()`, `index.html`의 `modelSelectHint`는 `git diff`로 내용이
-  `handOff.md` 설명과 일치함을 확인했지만, 자바 테스트로는 검증되지 않는 영역이다
+  설계 설명과 일치함을 확인했지만, 자바 테스트로는 검증되지 않는 영역이다
   (인프라 배선·브라우저 DOM/fetch 동작). 실제 브라우저에서 anthropic/local 두 모드로
   띄워서 모델 드롭다운이 의도대로 바뀌는지는 별도 수동 확인이 필요하다.
-- 실제 API 키로 anthropic 모드 스모크 테스트, 프로덕션 배포 회귀 확인은 아직 미착수
-  (`handOff.md` "다음 단계" 참고).
+- 실제 API 키로 anthropic 모드 스모크 테스트, 프로덕션 배포 회귀 확인은 아직 미착수.
+
+## 검증 상태 요약
+
+| 항목 | 상태 |
+|---|---|
+| 자바 유닛 테스트(28건) | ✅ 완료 |
+| 브라우저 수동 확인(모델 드롭다운 anthropic/local) | ❌ 미착수 |
+| 실 API 키 anthropic 스모크 테스트 | ❌ 미착수 |
+| 프로덕션 무중단 배포 회귀 확인 | ❌ 미착수 |

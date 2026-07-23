@@ -1,0 +1,23 @@
+# docker-compose.gpu.yml — GPU가 있는 노트북/PC용 오버레이 (opt-in)
+#
+# 기본 docker-compose.yml에는 GPU 예약 블록을 넣지 않는다 — nvidia-container-toolkit이
+# 없는 머신에서는 이 블록이 있으면 컨테이너 기동 자체가 실패하기 때문이다. GPU가 있고
+# nvidia-container-toolkit이 설치된 사용자만 이 오버레이를 함께 지정해서 쓴다:
+#
+#   docker compose -f docker-compose.yml up -d                            # CPU 전용(기본)
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d  # GPU 있는 경우
+#
+# GPU를 켰다면 .env의 LLM_LOCAL_MODEL을 qwen2.5-coder:14b로 함께 올리는 걸 권장한다
+# (이 오버레이 자체는 모델을 바꾸지 않는다 — 모델 선택은 여전히 .env 책임).
+#
+# 설계 근거: docs/advancement/2.scenario/scenario_1.md "GPU 유무에 따른 분기" 절
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1 # 여러 장 다 쓰려면 "all"로 변경
+              capabilities: [gpu]
