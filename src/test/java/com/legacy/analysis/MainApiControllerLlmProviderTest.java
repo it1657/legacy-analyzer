@@ -65,7 +65,7 @@ class MainApiControllerLlmProviderTest {
 
   private MainApiController newController(ClaudeService claudeService, String llmProvider) throws Exception {
     MainApiController controller = new MainApiController(
-        claudeService, null, null, null, null, null, null, null, null, null, null);
+        claudeService, null, null, null, null, null, null, null, null, null, null, null);
     Field field = MainApiController.class.getDeclaredField("llmProvider");
     field.setAccessible(true);
     field.set(controller, llmProvider);

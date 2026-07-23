@@ -54,6 +54,12 @@ services:
       LLM_LOCAL_MODEL: ${LLM_LOCAL_MODEL:-}
       LLM_LOCAL_API_KEY: ${LLM_LOCAL_API_KEY:-}
       LLM_LOCAL_TEMPERATURE: ${LLM_LOCAL_TEMPERATURE:-0.2}
+      # RAG(Chroma) 스위치 — 기본 false(꺼짐)라 이 블록이 배포돼도 기존 동작과 100% 동일.
+      # scenario_1처럼 llm-rag 프로필로 ollama+chroma를 같이 띄우는 환경에서만 true로 켠다.
+      # chroma는 같은 compose 네트워크 안이므로 서비스명(chroma:8000)으로 접근.
+      RAG_ENABLED: ${RAG_ENABLED:-false}
+      RAG_CHROMA_URL: ${RAG_CHROMA_URL:-http://chroma:8000}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-nomic-embed-text}
       TZ: Asia/Seoul
     ports:
       - "8803:8803"
@@ -71,6 +77,10 @@ services:
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     environment:
       OLLAMA_MODEL: ${LLM_LOCAL_MODEL:-qwen2.5-coder:7b}
+      # RAG 채택 환경만 값이 채워짐(app 서비스의 RAG_ENABLED와 별개로, 여기선 entrypoint.sh가
+      # 이 값이 있을 때만 임베딩 모델을 추가로 pull함 — RAG_ENABLED=false여도 이 값이 비어있지
+      # 않으면 pull은 하되 안 쓰일 뿐이므로, RAG 미채택 시엔 .env에서 이 값 자체를 비워둔다).
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-}
       TZ: Asia/Seoul
     volumes:
       - ollama_data:/root/.ollama

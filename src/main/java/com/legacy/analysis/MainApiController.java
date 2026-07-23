@@ -53,6 +53,10 @@ public class MainApiController {
   private final NotificationService notificationService;
   private final ProjectTypeDetector projectTypeDetector;
   private final PresentationGeneratorService presentationGeneratorService;
+  // rag.enabled=false(기본값)면 이 빈이 아예 등록되지 않으므로 ObjectProvider로 선택 주입한다
+  // (일반 생성자 주입이면 빈이 없을 때 컨텍스트 기동 자체가 실패함) — appendJavaStructure()에서
+  // getIfAvailable()로 안전하게 사용.
+  private final org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider;
 
   @Value("${app.analysis.max-file-size-bytes:524288}")
   private long maxFileSizeBytes;
@@ -88,7 +92,8 @@ public class MainApiController {
       JwtTokenProvider jwtTokenProvider,
       NotificationService notificationService,
       ProjectTypeDetector projectTypeDetector,
-      PresentationGeneratorService presentationGeneratorService) {
+      PresentationGeneratorService presentationGeneratorService,
+      org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -100,6 +105,7 @@ public class MainApiController {
     this.notificationService = notificationService;
     this.projectTypeDetector = projectTypeDetector;
     this.presentationGeneratorService = presentationGeneratorService;
+    this.ragServiceProvider = ragServiceProvider;
   }
 
   @GetMapping("/")
@@ -1985,11 +1991,28 @@ public class MainApiController {
     });
     sb.append("\n");
 
-    // 패키지 구조 출력
-    if (!packageGroups.isEmpty()) {
+    // 패키지 구조 출력 — 이 섹션이 프로젝트 크기에 비례해 무한정 커지는 유일한 부분이라
+    // (계층별 통계는 이미 레이어당 8개로 미리보기 제한됨) RAG 압축 대상이다(plan.md "RAG(Chroma)"
+    // 절, scenario_1.md 채택 확정 2026-07-23). rag.enabled=false(기본값)면 이 빈 자체가
+    // 없으므로 getIfAvailable()이 null을 반환하고, 아래는 원본 packageGroups를 그대로 써서
+    // 기존 동작과 100% 동일하게 유지된다.
+    Map<String, List<String>> renderedPackageGroups = packageGroups;
+    com.legacy.rag.ProjectStructureRagService ragService = ragServiceProvider.getIfAvailable();
+    if (ragService != null && session != null) {
+      renderedPackageGroups = ragService.compactPackageGroups(session.getSessionId(), packageGroups);
+    }
+
+    if (!renderedPackageGroups.isEmpty()) {
       sb.append("### 프로젝트 패키지 구조\n\n");
-      for (Map.Entry<String, List<String>> entry : packageGroups.entrySet()) {
-        sb.append("#### ").append(entry.getKey()).append(" (").append(entry.getValue().size()).append("개)\n");
+      for (Map.Entry<String, List<String>> entry : renderedPackageGroups.entrySet()) {
+        List<String> originalFiles = packageGroups.getOrDefault(entry.getKey(), entry.getValue());
+        int originalCount = originalFiles.size();
+        int shownCount = entry.getValue().size();
+        sb.append("#### ").append(entry.getKey()).append(" (").append(originalCount).append("개");
+        if (shownCount < originalCount) {
+          sb.append(", RAG로 대표 ").append(shownCount).append("개만 표시");
+        }
+        sb.append(")\n");
         for (String fileName : entry.getValue()) {
           String role = inferFileRole(fileName);
           sb.append("- ").append(fileName);
