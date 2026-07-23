@@ -1204,6 +1204,7 @@ async function runUploadAnalysis() {
 
   runUploadBtn.disabled = true;
   setLocalPathControlsDisabled(true); // 원격 업로드 분석 중에는 로컬 경로 분석 시작 불가
+  setUploadControlsDisabled(true); // 버그 수정: 업로드 분석 중에도 같은 섹션의 "폴더 선택"/"다른 폴더 지정" 버튼이 계속 눌려 있던 문제 — 자기 자신도 잠가야 함
   setExtraControlsLocked(true);
   logConsole.textContent = "[업로드 분석] 폴더를 읽는 중...\n";
   if (progressPanel) progressPanel.style.display = 'block';
