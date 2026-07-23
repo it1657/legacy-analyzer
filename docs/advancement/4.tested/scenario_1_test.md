@@ -34,6 +34,17 @@
 - **네트워크 비노출 확인**: 호스트에서 `curl http://localhost:11434`(ollama) → `Connection refused` — `ports:` 대신 `expose:`만 썼기 때문에 예상대로 호스트에 안 열려 있음(확정 스펙 그대로).
 - **앱 부팅 로그**: 에러 없이 8.8초 만에 Tomcat 기동, Postgres 연결 정상, `DataInitializer` 완료. 호스트에서 `GET /` → `HTTP 200`.
 
+## 7b 모델 실제 README/주석 품질 실측 (2026-07-23, 이어서)
+
+실제 코드(`com.legacy.analysis.llm` 패키지, `LlmClient.java`/`LlmResult.java`/`AnthropicLlmClient.java`/`OpenAiCompatibleLlmClient.java`, 총 268줄)를 `/api/upload-analysis`로 업로드해 `qwen2.5-coder:7b`(CPU)로 실제 분석·README 생성을 돌렸다. 이 패키지를 고른 이유: 전체 리포지토리(수백 파일)를 CPU 7b로 다 돌리면 시간이 지나치게 오래 걸려서, 실제 서비스 로직이 있는 작지만 진짜인 패키지로 범위를 좁힘.
+
+- **소요 시간**: 총 483.21초(파일당 평균 120.8초) — 4개 파일, 268줄에 8분가량. 파일 수가 많은 실프로젝트에 그대로 적용하면 체감상 부담스러운 속도.
+- **README(`README_AI_SUMMARY.md`) 품질**: 낮음. "Controller/Service/Repository 계층을 정의하기 어렵다"고 회피했는데, 실제로는 인터페이스+구현체 2개(`LlmClient`+`AnthropicLlmClient`/`OpenAiCompatibleLlmClient`)라는 교과서적인 전략 패턴이라 유추 가능한 구조였음. 기술 스택에 존재하지도 않는 **`.txt 파일`을 나열**하고, 체크리스트에 프로젝트에 없는 **`.ai-analysis-done.txt` 파일을 언급**하는 등 사실관계 오류(할루시네이션)가 섞여 있음.
+- **개별 파일 주석 삽입 품질**: 더 심각한 문제 발견 — **4개 파일 중 3개에서 주석이 원래 있어야 할 로직 바로 위가 아니라 fluent 메서드 체인/조건문 중간에 잘못 끼워 넣어짐**(예: `AnthropicLlmClient.java`는 `.defaultHeader(...)` 체인 중간, `Mono.error(new WebClientResponseException(...))` 생성자 인자 중간에 삽입). `LlmResult.java`는 더 심각하게 **record 파라미터 목록 한가운데**(`outputTokens,` 다음, `cacheReadTokens` 앞)에 `// text 필드는 AI로부터 반환된 총 텍스트입니다.`라는, 엉뚱한 필드(`text`)를 설명하는 주석이 엉뚱한 위치에 꽂힘. `//` 라인 주석이라 컴파일 자체는 깨지지 않았지만(전부 순수 삽입, 기존 줄 삭제 없음), 사람이 다시 읽으면 위치·대상이 안 맞아 오히려 헷갈리는 상태.
+- **내용 자체도 프로젝트의 `src/main/resources/CLAUDE.md`(주석 생성 프롬프트) 규칙 위반**: "코드가 무엇을 하는지"를 그대로 번역한 주석 금지 원칙이 있는데도, 실제 삽입된 주석은 전부 "~~를 처리합니다/추출합니다/전달받습니다" 식 기계적 요약뿐이고 비즈니스 이유(WHY)는 하나도 없었음. 오타/이상한 단어도 발견(`OpenAiCompatibleLlmClient.java`의 "값이 Number형이라면 **봉환**합니다" — "반환"의 오타 내지 할루시네이션).
+- **결론**: `qwen2.5-coder:7b`(CPU)는 "돌아가긴 한다"는 수준은 확인됐지만(파이프라인 전체가 에러 없이 끝까지 완주, 4/4 성공), **실사용 허용 수준은 아님** — 특히 주석 삽입 위치 정확도가 낮아 코드 가독성을 오히려 해칠 수 있는 결과물을 냈다. 14b/anthropic 대비 비교는 아직 안 했으나(14b는 이 환경에 없음), 최소한 "CPU 7b 기본값 그대로는 프로덕션 수준 품질이 아니다"는 확인이 됐다.
+- **근본 원인 하나 특정(2026-07-23, 별도 테스트)**: 위 "WHY 없는 기계적 요약" 증상의 구체적 메커니즘을 하나 찾음 — 별도 파일로 실행한 테스트에서 나온 주석(`"결제 완료 후 24시간 이내이며 배송 시작 전인 경우에만 취소를 허용합니다"` 등)이 실제 분석 대상 코드 내용과 무관하게, **시스템 프롬프트(`src/main/resources/prompt.md`)의 "형식 예시"로 박아둔 문구를 거의 그대로 베낀 것**으로 확인됨(`prompt.md` 33~41줄 Java Javadoc 예시: "주문 취소 정책을 검증한다. 결제 완료 후 24시간 이내이고 배송 시작 전인 경우에만 취소를 허용한다."와 거의 동일 문장). 즉 7b 모델이 "이건 포맷 예시일 뿐, 내용은 실제 코드에서 가져와라"는 지시를 못 지키고 few-shot 예시를 진짜 답으로 착각해 재생산하는 실패 패턴 — Claude 같은 대형 모델에서는 잘 안 나타나는, 소형 모델 특유의 한계로 보임.
+
 ## 검증 상태
 
 | 항목 | 상태 | 비고 |
@@ -45,14 +56,15 @@
 | `cp .env.lite.example .env && docker compose build && docker compose up -d` 기동 확인 | ✅ 완료(현재 떠있는 스택 기준) | 4개 서비스 전부 Up/healthy. 단 볼륨·이미지 캐시를 완전히 지운 "진짜 새 머신"에서의 재현은 아직 — 이미 정상 동작 중인 스택이라 사용자 확인 후 그대로 검증만 진행, 파괴적 재구축은 보류 |
 | 최초 기동 시 모델 자동 pull 완료 전 `app`→Ollama 호출이 에러 없이 게이팅되는지(healthcheck) | ✅ 완료 | ollama healthy 판정 후 11분 21초 뒤에야 app 컨테이너 시작 — 게이팅 실증됨 |
 | GPU 없는 머신에서 `docker-compose.gpu.yml` 없이 CPU 추론 정상 동작 확인 | ✅ 완료 | 이 환경 자체가 GPU 오버레이 미적용 상태. `ollama` 직접 호출로 CPU 추론 응답(494ms) 확인 |
-| `qwen2.5-coder:7b`로 README 생성 품질이 실사용 허용 수준인지(14b 대비) | ❌ 미착수 | 이번엔 trivial 프롬프트(`1+1=`)로 연결성·추론 자체만 확인. 실제 코드베이스 대상 README 생성 품질 비교는 별도 진행 필요 |
+| `qwen2.5-coder:7b`로 README 생성 품질이 실사용 허용 수준인지(14b 대비) | ⚠️ 완료(품질 미달 확인) | 실제 패키지(4파일·268줄)로 실측 — 파이프라인은 완주하지만 README 할루시네이션(존재 않는 `.txt`/`.ai-analysis-done.txt` 언급)·주석 위치 오류(fluent 체인/record 파라미터 중간 삽입)·CLAUDE.md 규칙 위반(WHY 없는 기계적 요약)·오타 확인. 14b/anthropic 대비 비교는 미착수(14b 미보유) |
 | (2단계) GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 | ✅ 완료 | 사용자가 직접 등록(2026-07-23) |
-| (2단계) 태그 push → Actions 실행 → Docker Hub 반영 | ✅ 완료 | Docker Hub에 `it1657/legacy-analyzer` 저장소를 먼저 수동 생성(Docker Hub는 push 시 저장소 자동 생성을 안 함 — 최초 시도는 이 때문에 실패) 후 재시도해 성공. Actions 워크플로우 정상 실행, 이미지가 Docker Hub에 반영된 것까지 사용자가 직접 확인(2026-07-23) |
+| (2단계) 태그 push → Actions 실행 → Docker Hub 반영 | ✅ 완료(정정 후 재확인) | **1차 시도는 오판이었음**: `.github/workflows/docker-publish.yml`을 포함한 작업물이 git에 커밋된 적이 없어(untracked) 실제로는 아무 워크플로우도 존재하지 않았고, "Docker Hub에 올라갔다"고 봤던 건 `docker compose build`로 로컬에 태깅된 `it1657/legacy-analyzer:latest` 이미지를 착각한 것(Docker Hub API로 태그 0개 확인해 발견). 이후 파일 전체를 커밋 → 사용자가 직접 `git push origin master`(Claude sandbox는 GitHub 접근 프록시 차단으로 push 불가) → 태그 재push → Actions에서 "Docker Publish (legacy-analyzer lite)" 워크플로우 실제 GREEN, Docker Hub 반영까지 사용자가 확인(2026-07-23) |
 | (2단계) 클린 환경에서 `docker pull`만으로(build 없이) 수신 확인 | ❌ 미착수 | 지금까지는 이 노트북(이미 이미지가 로컬에 있음)에서만 확인 — "진짜 다른 머신"에서 pull-only로 받아지는지는 별도 검증 필요 |
 
 ## 다음에 이 문서를 갱신할 시점
 
-- 실제 프로젝트 분석 → README 생성으로 7b 모델 품질을 판단하는 시점(14b/anthropic 대비 비교).
+- 7b 품질 미달이 확인됐으니, GPU 오버레이 + `qwen2.5-coder:14b`로 같은 패키지를 재분석해 품질이 실제로 나아지는지 비교하는 시점(이 노트북은 GPU가 없어 별도 환경 필요).
+- 주석 삽입 위치 오류(fluent 체인/record 파라미터 중간)가 모델 자체의 한계인지, JSON `lineNumber` 파싱/삽입 로직 쪽 버그인지 원인 분리가 필요 — anthropic 모드로 같은 파일을 돌려서 동일 증상이 재현되는지 대조해볼 것.
 - "진짜 새 머신"(볼륨·이미지 캐시 없는 상태) 기준 클린 재현을 별도로 진행하게 되면 그 결과 반영.
 - GitHub Secrets 등록 + 테스트 태그 push 결과가 나오면 2단계 항목들 갱신.
 - 시나리오0의 `scenario_0_test.md`처럼, 이후에도 `handOff.md` 갱신마다 이 문서를 함께 갱신하는 걸 원칙으로 한다.
