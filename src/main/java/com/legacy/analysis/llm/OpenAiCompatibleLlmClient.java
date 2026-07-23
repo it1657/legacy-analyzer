@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 
 /**
  * OpenAI 호환 `/v1/chat/completions` 규격을 구현한 임의의 로컬/사내 LLM 서버(Ollama, vLLM,
@@ -27,6 +28,14 @@ import java.util.Map;
  *
  * 캐시 토큰({@code cacheReadTokens}/{@code cacheCreationTokens})은 OpenAI 호환 API가
  * 프롬프트 캐싱 개념을 제공하지 않으므로 항상 0이다.
+ *
+ * <b>동시 호출 수 제한(2026-07-23 실측 기반 추가)</b>: 분석 스레드 풀(`app.analysis.thread-pool-size`,
+ * 기본 16)이 파일마다 동시에 이 클라이언트를 호출하는데, CPU 전용 로컬 Ollama는 보통 요청을
+ * 한 번에 하나씩만 처리한다. 16개가 한꺼번에 HTTP 요청을 보내면 뒤에 밀린 요청은 실제로
+ * 처리되기도 전에 클라이언트 타임아웃(`llm.local.read-timeout-sec`, 기본 300초)을 넘겨버린다
+ * (실측: 100파일 중 성공 7·기존 스킵 2·실패 91, 성공률 7%). 이 클래스 안에 세마포어를 둬서
+ * 실제 HTTP 요청 전송 자체를 `llm.local.max-concurrent-calls`(기본 1)개로 제한한다 — 대기
+ * 중인 호출은 요청을 아직 보내지 않은 상태라 타임아웃 시계가 돌지 않고 안전하게 큐잉된다.
  */
 @Component
 @ConditionalOnProperty(name = "llm.provider", havingValue = "local")
@@ -36,6 +45,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
     private final WebClient webClient;
     private final double temperature;
+    private final Semaphore concurrencyGate;
 
     public OpenAiCompatibleLlmClient(
             @Value("${llm.local.url}") String baseUrl,
@@ -47,8 +57,12 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             // 근거 없는 내용을 지어내는 경향이 커진다(2026-07-23 실측: qwen2.5-coder:7b가
             // prompt.md의 예시 문장을 거의 그대로 재사용한 사례 확인). 기본값을 낮게 잡아
             // 입력에 더 충실하게(deterministic) 만든다 — 필요하면 시나리오/모델별로 조정.
-            @Value("${llm.local.temperature:0.2}") double temperature) {
+            @Value("${llm.local.temperature:0.2}") double temperature,
+            // 기본 1 — CPU 전용 로컬 Ollama는 보통 요청을 직렬로 처리하므로 안전한 기본값.
+            // GPU 서버 등 실제 병렬 서빙이 되는 백엔드라면 시나리오별로 올려서 튜닝 가능.
+            @Value("${llm.local.max-concurrent-calls:1}") int maxConcurrentCalls) {
         this.temperature = temperature;
+        this.concurrencyGate = new Semaphore(Math.max(1, maxConcurrentCalls));
         HttpClient httpClient = HttpClient.create()
                 .responseTimeout(Duration.ofSeconds(readTimeoutSec));
 
@@ -81,25 +95,36 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         requestBody.put("temperature", temperature);
         requestBody.put("messages", List.of(systemMessage, userMessage));
 
-        Map<?, ?> response = webClient.post()
-                .uri("/v1/chat/completions")
-                .bodyValue(requestBody)
-                .retrieve()
-                .onStatus(
-                        status -> !status.is2xxSuccessful(),
-                        clientResponse -> clientResponse.bodyToMono(String.class)
-                                .defaultIfEmpty("")
-                                .flatMap(body -> {
-                                    int statusCode = clientResponse.statusCode().value();
-                                    String msg = String.format("로컬 LLM API %d 오류: %s", statusCode,
-                                            body.isEmpty() ? "응답 없음" : body.substring(0, Math.min(300, body.length())));
-                                    log.error("[로컬 LLM API 응답 오류] {}", msg);
-                                    return Mono.error(new WebClientResponseException(
-                                            statusCode, msg,
-                                            clientResponse.headers().asHttpHeaders(), null, null));
-                                }))
-                .bodyToMono(Map.class)
-                .block();
+        Map<?, ?> response;
+        try {
+            concurrencyGate.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("로컬 LLM 호출 대기 중 인터럽트됨", e);
+        }
+        try {
+            response = webClient.post()
+                    .uri("/v1/chat/completions")
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .onStatus(
+                            status -> !status.is2xxSuccessful(),
+                            clientResponse -> clientResponse.bodyToMono(String.class)
+                                    .defaultIfEmpty("")
+                                    .flatMap(body -> {
+                                        int statusCode = clientResponse.statusCode().value();
+                                        String msg = String.format("로컬 LLM API %d 오류: %s", statusCode,
+                                                body.isEmpty() ? "응답 없음" : body.substring(0, Math.min(300, body.length())));
+                                        log.error("[로컬 LLM API 응답 오류] {}", msg);
+                                        return Mono.error(new WebClientResponseException(
+                                                statusCode, msg,
+                                                clientResponse.headers().asHttpHeaders(), null, null));
+                                    }))
+                    .bodyToMono(Map.class)
+                    .block();
+        } finally {
+            concurrencyGate.release();
+        }
 
         if (response == null || !response.containsKey("choices")) {
             throw new RuntimeException("로컬 LLM 응답 바디 구조 파싱 예외 공정 발생");

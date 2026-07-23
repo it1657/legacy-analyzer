@@ -54,6 +54,9 @@ services:
       LLM_LOCAL_MODEL: ${LLM_LOCAL_MODEL:-}
       LLM_LOCAL_API_KEY: ${LLM_LOCAL_API_KEY:-}
       LLM_LOCAL_TEMPERATURE: ${LLM_LOCAL_TEMPERATURE:-0.2}
+      # CPU 전용 로컬 Ollama는 보통 요청을 하나씩만 처리하므로 기본 1로 강제 직렬화
+      # (2026-07-23 실측: 이 값 없이 스레드 풀 16개가 동시에 쏴서 100개 중 91개 타임아웃 실패).
+      LLM_LOCAL_MAX_CONCURRENT_CALLS: ${LLM_LOCAL_MAX_CONCURRENT_CALLS:-1}
       # RAG(Chroma) 스위치 — 기본 false(꺼짐)라 이 블록이 배포돼도 기존 동작과 100% 동일.
       # scenario_1처럼 llm-rag 프로필로 ollama+chroma를 같이 띄우는 환경에서만 true로 켠다.
       # chroma는 같은 compose 네트워크 안이므로 서비스명(chroma:8000)으로 접근.
