@@ -43,6 +43,8 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // 6-1. LlmClient 구현체를 실제 서버 없이 검증하기 위한 가짜 HTTP 서버
     testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    // 6-2. SecurityConfig 통합 테스트용 (spring-security-test, 이번 사이클 한정 예외 허용)
+    testImplementation 'org.springframework.security:spring-security-test'
 
     // 7. PowerPoint PPTX 생성 (Apache POI)
     implementation 'org.apache.poi:poi:5.2.5'
