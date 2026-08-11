@@ -6,19 +6,21 @@
 > 프로젝트 루트의 [`ARCHITECTURE.md`](../ARCHITECTURE.md)를 먼저 읽는 것을 권장한다.
 > 아래 `docs/`는 개별 기능의 상세 구현·버그 수정 이력을 다룬다.
 >
-> 진행 중인 작업(Claude API ↔ 로컬/사내 LLM 전환)은 [`advancement/`](./advancement/) 참고 —
-> 특히 [`advancement/ing/handOff.md`](./advancement/ing/handOff.md)가 현재 진척 상황 핸드오프 문서.
+> 진행 중인 작업(Claude API ↔ 로컬/사내 LLM 전환, RAG)은 [`advancement/`](./advancement/) 참고 —
+> 특히 [`advancement/0.status/handOff.md`](./advancement/0.status/handOff.md)가 현재 진척 상황 핸드오프 문서.
 
 ## 📁 구조
 
 ```
 docs/
-├── advancement/      ← 진행 중인 작업: Claude API ↔ 로컬/사내 LLM 전환
-│   ├── plan/plan.md          ← 인덱스 + 공통 설계
-│   ├── scenario/scenario_0~3.md  ← 배포 시나리오별 설계 문서
-│   └── ing/
-│       ├── handOff.md        ← 진행 현황 핸드오프 (세션 간 인계용)
-│       └── testResult.md     ← handOff.md 갱신분에 대한 테스트 실행 결과
+├── advancement/      ← 진행 중인 작업: Claude API ↔ 로컬/사내 LLM 전환, RAG(Chroma)
+│   ├── 0.status/handOff.md         ← 진행 현황 핸드오프 (세션 간 인계용, 가장 먼저 읽을 문서)
+│   ├── 1.plan/plan.md              ← 인덱스 + 공통 설계
+│   ├── 2.scenario/scenario_0~3.md  ← 배포 시나리오별 설계 워킹 드래프트
+│   ├── 3.confirmed/scenario_N_confirmed.md  ← 스펙 확정 스냅샷
+│   ├── 4.tested/scenario_N_test.md ← 구현 중 실제 검증 현황 추적
+│   └── 5.completed/scenario_N_completed.md  ← 구현+테스트 완료 보고
+│       (단계별 번호 폴더 구성 — 옛 `advancement/{plan,scenario,ing}/` 경로는 폐기됨)
 ├── guides/           ← 사용 가이드 및 튜토리얼
 │   └── PowerPoint_변환가이드.md
 ├── technical/        ← 기술 문서 및 명세
@@ -39,25 +41,29 @@ docs/
 legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 ├── src/main/java/com/legacy/
 │   ├── admin/          ← 관리자 대시보드·사용자 관리 컨트롤러
-│   ├── analysis/       ← 핵심 분석 도메인 (Claude API 연동, 세션/배치 관리)
+│   ├── analysis/       ← 핵심 분석 도메인 (LLM 연동, 세션/배치 관리)
+│   │   └── llm/        ← LLM Provider 추상화 (Anthropic ↔ 로컬/사내 LLM 전환)
 │   ├── api/
 │   │   ├── monitoring/ ← 성능 메트릭 수집 API
-│   │   └── usage/      ← Claude API 사용량 로깅
+│   │   └── usage/      ← API 사용량 로깅
 │   ├── audit/          ← 감사 로그(Audit Log)
 │   ├── auth/           ← JWT 기반 인증/인가, Spring Security 설정
 │   ├── core/           ← 애플리케이션 엔트리포인트, 공통 에러 핸들러, DB 자동 선택기
 │   ├── notification/   ← 알림 기능
+│   ├── rag/            ← RAG(Chroma) — 대형 Java 프로젝트 패키지 구조 압축 (선택적, `rag.enabled`)
 │   └── statistics/     ← 시스템/사용자 통계
 ├── src/main/resources/
-│   ├── application*.properties  ← 공통/H2/PostgreSQL 프로파일 설정
-│   ├── prompt.md, custom_spec.txt, CLAUDE.md  ← Claude 분석 프롬프트 & 스펙
-│   ├── static/{css,js}          ← 대시보드 정적 리소스
-│   └── templates/               ← Thymeleaf 뷰 (admin, auth, fragments 등)
+│   ├── application*.properties        ← 공통/H2/PostgreSQL 프로파일 설정
+│   ├── prompt-base.md, role-*.md(8개) ← LLM 분석 프롬프트: base(공통 규칙) + 확장자별 role 동적 병합
+│   ├── custom_spec.txt, CLAUDE.md     ← 프로젝트별 세부 지침 스펙
+│   ├── static/{css,js}                ← 대시보드 정적 리소스
+│   └── templates/                     ← Thymeleaf 뷰 (admin, auth, fragments 등)
 ├── src/test/            ← 테스트 코드
 ├── docs/                ← 프로젝트 문서 (현재 디렉터리)
 ├── scripts/pptx/        ← PPTX 변환 자동화 스크립트 (PowerShell/Python)
 ├── data/                ← H2 로컬 DB 파일
-├── Dockerfile, docker-compose.yml  ← 컨테이너 빌드/배포 구성 (app + postgres, 8803 포트)
+├── Dockerfile, docker-compose.yml  ← 컨테이너 빌드/배포 구성 (기본: app + postgres, 8803 포트.
+│                                       `COMPOSE_PROFILES=llm-rag`로 ollama + chroma 추가 기동)
 ├── build.gradle, settings.gradle, gradlew  ← Gradle 빌드 설정
 └── logs/, app.log 등    ← 런타임 로그
 ```
@@ -67,32 +73,36 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 | 패키지 | 역할 | 주요 클래스 |
 |---|---|---|
 | `admin` | 관리자 페이지 및 사용자 관리 | `AdminController`, `AdminPageController`, `UserController` |
-| `analysis` | 코드 분석 핵심 로직, Claude API 연동, 분석 세션/배치/재시도 처리 | `ClaudeService(Impl)`, `AnalysisSessionManager`, `SessionState`, `RetryHandler`, `CodeCleaner`, `TokenUsage`, `MainApiController` |
+| `analysis` | 코드 분석 핵심 로직, LLM 연동, 분석 세션/배치/재시도 처리 | `ClaudeService(Impl)`, `AnalysisSessionManager`, `SessionState`, `RetryHandler`, `CodeCleaner`, `TokenUsage`, `MainApiController` |
+| `analysis.llm` | LLM Provider 추상화 — `llm.provider` 설정 하나로 Anthropic ↔ 로컬/사내 LLM 전환 | `LlmClient`, `LlmResult`, `AnthropicLlmClient`, `OpenAiCompatibleLlmClient` |
 | `api.monitoring` | 애플리케이션 성능 모니터링 | `MonitoringController`, `PerformanceMetricsCollector` |
-| `api.usage` | Claude API 호출 사용량 기록/필터링 | `ApiUsage`, `ApiUsageController`, `ApiUsageFilter`, `ApiUsageRepository` |
+| `api.usage` | API 호출 사용량 기록/필터링 | `ApiUsage`, `ApiUsageController`, `ApiUsageFilter`, `ApiUsageRepository` |
 | `audit` | 사용자 행위 감사 로그 | `AuditLog`, `AuditLogController`, `AuditLogService` |
 | `auth` | JWT 인증/인가, 사용자·권한 관리 | `SecurityConfig`, `JwtTokenProvider`, `JwtAuthenticationFilter`, `User`, `Role`, `AuthController` |
 | `core` | 앱 엔트리포인트, 공통 에러 핸들러, DB 소스 자동 선택(H2/PostgreSQL), PPT 리포트 생성 | `LegacyAnalyzerApplication`, `ApiErrorHandler`, `DatasourceAutoSelector`, `PresentationGeneratorService` |
 | `notification` | 사용자 알림 | `Notification`, `NotificationController`, `NotificationService` |
+| `rag` | RAG(Chroma) — `rag.enabled=true`일 때만 빈 등록(기본 비활성), 대형 Java 프로젝트의 "패키지 구조" 텍스트가 임계값을 넘으면 임베딩 유사도 상위 파일만 남겨 압축 | `ProjectStructureRagService`, `ChromaClient`, `EmbeddingClient`, `OpenAiCompatibleEmbeddingClient` |
 | `statistics` | 시스템/사용자 통계 대시보드 데이터 | `StatisticsController`, `SystemStatisticsDto`, `UserStatisticsDto` |
 
 ### 배포 구성 참고
 - **Dockerfile**: Debian 기반 이미지 사용 (ARM64/PGX 서버 호환을 위해 Alpine에서 전환)
-- **docker-compose.yml**: `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스로 구성 (nginx 리버스 프록시 설정은 미사용으로 제거됨)
+- **docker-compose.yml**: 기본 `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스. `COMPOSE_PROFILES=llm-rag`로 `ollama`(로컬 LLM+임베딩) + `chroma`(RAG 벡터 DB) 2개 서비스 추가 기동(선택적, `docker-compose.gpu.yml` 오버레이로 GPU 추론 가능)
 - **DB**: 로컬 개발은 H2(`data/`), 운영 배포는 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) 프로파일 사용
+- **LLM Provider**: `llm.provider`(`anthropic`\|`local`) 설정 하나로 Anthropic Claude API ↔ OpenAI 호환 로컬/사내 LLM 서버(Ollama 등) 전환. 재빌드 불필요
 
 ---
 
-## 🔄 advancement/ - 진행 중인 작업 (Claude API ↔ 로컬/사내 LLM 전환)
+## 🔄 advancement/ - 진행 중인 작업 (Claude API ↔ 로컬/사내 LLM 전환, RAG)
 
 - **목표**: 설정 프로퍼티(`llm.provider`) 하나만 바꾸면 재빌드 없이 Anthropic API ↔ 로컬/사내 LLM으로 전환되도록 리팩터링. 이후 경량(`scenario_1`)/폐쇄망(`scenario_2`)/선택형(`scenario_3`) 배포판 순으로 진행.
-- **현재 상태(2026-07-22 기준)**: `LlmClient` 추상화(`AnthropicLlmClient`/`OpenAiCompatibleLlmClient`) 도입, `ClaudeServiceImpl` 리팩터링, `application.properties`/`docker-compose.yml`의 `llm.provider`·`llm.local.*` 설정 배선, `calculateEstimatedCost()` local 분기, `GET /api/config/llm-provider` 조회 API, 프런트엔드(`index.html`/`dashboard.js`) 모델 드롭다운 동적화까지 구현 완료. 관련 테스트 6개 클래스 28건 전부 통과.
-- 상세 진척/설계/테스트 결과는 아래 문서 참고:
-  - [`advancement/ing/handOff.md`](./advancement/ing/handOff.md) — 세션 간 인계용 진행 현황 핸드오프(가장 최신 상태)
-  - [`advancement/ing/testResult.md`](./advancement/ing/testResult.md) — handOff.md 갱신분에 대한 테스트 실행 결과
-  - [`advancement/plan/plan.md`](./advancement/plan/plan.md) — 공통 설계 결정(Provider 선택 구조, RAG 조건부 설계 등)
-  - [`advancement/scenario/scenario_0.md`](./advancement/scenario/scenario_0.md) — `LlmClient` 추상화 설계(선행 작업)
-  - [`advancement/scenario/scenario_1~3.md`](./advancement/scenario/) — 배포 시나리오별(경량/폐쇄망/선택형) 설계
+- **현재 상태(2026-08-11 기준)**: `LlmClient` 추상화 + provider 전환 API/UI는 완료. `scenario_1`(경량 배포판)은 Docker Compose 구성·RAG(Chroma) 구현·prompt.md base/role 분리까지 끝났고, 로컬 소형 모델(`qwen2.5-coder:7b`)의 품질이 Anthropic Haiku 대비 아직 미달로 확인되어(GPU 미보유로 14b 비교 대기) 실사용 채택 여부는 보류 중. `scenario_2`/`scenario_3`은 여전히 조건부(착수 전 인프라 확인 대기). 상세 진행 상황은 항상 `0.status/handOff.md`가 최신.
+- 상세 진척/설계/테스트 결과는 아래 문서 참고(경로는 `docs/advancement/` 기준):
+  - [`0.status/handOff.md`](./advancement/0.status/handOff.md) — 세션 간 인계용 진행 현황 핸드오프(가장 먼저 읽을 문서, 항상 최신)
+  - [`1.plan/plan.md`](./advancement/1.plan/plan.md) — 공통 설계 결정(Provider 선택 구조, RAG 조건부 설계 등)
+  - [`2.scenario/scenario_0.md`](./advancement/2.scenario/scenario_0.md) — `LlmClient` 추상화 설계(선행 작업, 완료)
+  - [`2.scenario/scenario_1~3.md`](./advancement/2.scenario/) — 배포 시나리오별(경량/폐쇄망/선택형) 설계 워킹 드래프트
+  - [`3.confirmed/`](./advancement/3.confirmed/) — 시나리오별 확정 스펙 스냅샷, [`4.tested/`](./advancement/4.tested/) — 실제 검증 현황 추적
+  - `docs/advancement/1.plan/2026-07-29-legacy-analyzer-prompt-md-role-split.md` — prompt.md base/role 분리 논의·구현 기록(위 시나리오 사이클과 무관한 별도 이니셔티브)
 
 ---
 
@@ -263,7 +273,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-07-22 (Claude API ↔ 로컬/사내 LLM 전환 작업 진척 반영)
+- **마지막 업데이트**: 2026-08-11 (RAG(Chroma) 구현, prompt.md base/role 분리, `advancement/` 경로 재구성 반영해 현행화)
 - **작성자**: 정재훈
 - **관리자**: 개발팀
 

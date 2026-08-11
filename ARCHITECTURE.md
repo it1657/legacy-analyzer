@@ -8,13 +8,14 @@
 
 ## 1. 시스템 개요
 
-레거시 코드베이스(Java/프론트엔드/Python 등)를 업로드하거나 서버 경로로 지정하면, Claude API로 파일별 한국어 주석을 생성해 삽입하고, 프로젝트 구조를 분석한 README와 PPT 보고서를 만들어주는 Spring Boot 웹 애플리케이션이다.
+레거시 코드베이스(Java/프론트엔드/Python 등)를 업로드하거나 서버 경로로 지정하면, LLM(Claude API 또는 로컬/사내 LLM)으로 파일별 한국어 주석을 생성해 삽입하고, 프로젝트 구조를 분석한 README와 PPT 보고서를 만들어주는 Spring Boot 웹 애플리케이션이다.
 
 - **백엔드**: Spring Boot 3.2.5, Java 17, Spring Security(JWT, stateless), Spring Data JPA
 - **프론트엔드**: Thymeleaf 서버 렌더링 + 정적 JS(빌드 도구 없음, `static/js/dashboard.js` 등 순수 JS)
 - **DB**: 로컬 개발 H2(`data/`), 운영 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) — 프로파일로 전환
-- **외부 연동**: Claude API(Anthropic) — 코드 주석 생성, CLAUDE.md 생성, README 생성
-- **배포**: Docker Compose (`app` + `postgres` 2개 서비스, 8803 포트)
+- **외부 연동**: `llm.provider`(`anthropic`\|`local`) 설정 하나로 Claude API(Anthropic) ↔ OpenAI 호환 로컬/사내 LLM 서버(Ollama 등) 전환 — 코드 주석 생성, CLAUDE.md 생성, README 생성에 공통 사용
+- **RAG(선택적)**: `rag.enabled=true`일 때만 활성화(Chroma 벡터 DB) — 대형 Java 프로젝트의 "패키지 구조" 텍스트가 임계값을 넘으면 임베딩 유사도 상위 파일만 남겨 압축
+- **배포**: Docker Compose — 기본 `app` + `postgres` 2개 서비스(8803 포트), `COMPOSE_PROFILES=llm-rag`로 `ollama`+`chroma` 추가 기동 가능(`docker-compose.gpu.yml` 오버레이로 GPU 추론)
 
 ---
 
@@ -35,15 +36,35 @@
                                         │
                               ┌─────────┴───────────┐
                               │  JDBC (H2/PG)       │  HTTPS
-                      ┌───────▼───────┐      ┌──────▼─────┐
-                      │ PostgreSQL 16 │      │ Claude API │
-                      │ (postgres)    │      │ (external) │
-                      └───────────────┘      └────────────┘
+                      ┌───────▼───────┐      ┌──────▼────────────┐
+                      │ PostgreSQL 16 │      │ LlmClient         │
+                      │ (postgres)    │      │ (anthropic|local) │
+                      └───────────────┘      └───────────────────┘
 ```
+
+`LlmClient` 박스는 `llm.provider` 설정값에 따라 `AnthropicLlmClient`(기본값, Claude API 호출) 또는 `OpenAiCompatibleLlmClient`(로컬/사내 LLM 서버 호출)로 교체된다 — 자세한 내용은 2-1절.
 
 로컬 파일시스템에는 두 종류의 소스 경로가 존재한다:
 - **서버 경로 직접 지정**(관리자 전용): 서버가 실행 중인 머신의 실제 경로를 그대로 스캔
 - **브라우저 업로드**: File System Access API로 읽은 파일을 서버 임시 스테이징 폴더(`.uploads/{sessionId}/{projectName}`)에 저장 후 분석, 완료되면 브라우저가 write-back으로 원본/지정 폴더에 결과를 다시 씀
+
+### 2-1. LLM Provider 전환 + RAG 로컬 스택 (선택적)
+
+`app`이 Claude API 대신 로컬/사내 LLM으로 분석하거나, 대형 프로젝트 구조를 RAG로 압축하고 싶을 때 `docker-compose.yml`에 `COMPOSE_PROFILES=llm-rag`로 함께 띄우는 선택적 서비스 2개:
+
+```
+┌──────────┐   /api/chat, /api/embed    ┌──────────┐
+│   app    │ ──────────────────────────▶│  ollama  │  코드 주석/CLAUDE.md/README 생성 + 임베딩(nomic-embed-text)
+└────┬─────┘                            └──────────┘
+     │  upsert / query (v2 API)
+     ▼
+┌──────────┐
+│  chroma  │  세션별 컬렉션(get_or_create) — 압축 완료 시 정리(cleanup)
+└──────────┘
+```
+
+- **LLM Provider 전환**은 `llm.provider`(`anthropic`\|`local`) 설정 하나로 이뤄진다. `com.legacy.analysis.llm.LlmClient` 인터페이스를 `AnthropicLlmClient`/`OpenAiCompatibleLlmClient` 두 구현체가 `@ConditionalOnProperty`로 배타 선택 — 코드 재빌드 없이 전환 가능.
+- **RAG는 `rag.enabled`로 완전히 독립적으로 켜고 끈다**(기본 `false`, `ProjectStructureRagService`/`ChromaClient`/`OpenAiCompatibleEmbeddingClient` 전부 `@ConditionalOnProperty`라 꺼져 있으면 빈 자체가 없음). Java 프로젝트의 "패키지 구조" 텍스트 생성 중, 특정 패키지의 파일 개수가 `rag.top-k-per-package`를 넘고 전체 글자수가 `rag.trigger-threshold-chars`를 넘으면 그 패키지들만 임베딩해 Chroma에 색인 → 쿼리 유사도 상위 `topK`개만 남기고 나머지는 원본 목록에서 제외(요약). 임베딩은 `embedBatch()`로 문서를 한 번에 보내 왕복 횟수를 줄인다. 실패 시(임베딩 서버 다운 등) 로그만 남기고 원본을 그대로 반환 — RAG 실패가 분석 파이프라인 전체를 막지 않는다.
 
 ---
 
@@ -181,8 +202,9 @@ User (users) ──M:N── Role (roles)                    [조인테이블 us
 ```
 src/main/java/com/legacy/
 ├── admin/          관리자 대시보드·사용자 관리 (AdminController, AdminPageController, UserController)
-├── analysis/        핵심 분석 도메인 - Claude 연동, 세션/이력/배치 관리 (MainApiController, ClaudeServiceImpl,
+├── analysis/        핵심 분석 도메인 - LLM 연동, 세션/이력/배치 관리 (MainApiController, ClaudeServiceImpl,
 │                    AnalysisSessionManager, SessionState, AnalysisHistory, UserActivityController)
+│   └── llm/         LLM Provider 추상화 (LlmClient, AnthropicLlmClient, OpenAiCompatibleLlmClient)
 ├── api/
 │   ├── monitoring/  세션별 성능 메트릭 수집 (PerformanceMetricsCollector, MonitoringController)
 │   └── usage/       이 앱 자체의 HTTP API 사용량 로깅 (ApiUsageFilter, ApiUsageController)
@@ -191,6 +213,8 @@ src/main/java/com/legacy/
 ├── core/            앱 엔트리포인트, 공통 에러 핸들러, DB 자동 선택, PPT 생성 (PresentationGeneratorService,
 │                    ProjectStructureSnapshot, ProjectTypeDetector)
 ├── notification/    사용자 알림 (NotificationService, NotificationController)
+├── rag/             RAG(Chroma), rag.enabled=true일 때만 활성화 (ProjectStructureRagService, ChromaClient,
+│                    EmbeddingClient, OpenAiCompatibleEmbeddingClient) — 2-1절 참고
 └── statistics/      시스템/사용자 통계 집계 조회 (StatisticsController)
 ```
 
@@ -295,8 +319,9 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
         │
         ├─ collectFileList(): isSupportedFile()로 확장자 필터링 + selectedRelativePaths와 교집합
         ├─ AnalysisHistory 생성·저장 (status=IN_PROGRESS)
-        ├─ generateSessionClaudeMd(): prompt.md 표준 템플릿 + 사용자 추가 요구사항을 AI로 결합해
-        │     이 세션 전용 CLAUDE.md 생성 (파일별 분석 시스템 프롬프트로 등록)
+        ├─ generateSessionClaudeMd(): base(prompt-base.md, 공통 규칙) + 이번 세션 실제 스캔된
+        │     확장자에 매칭되는 role 파일(role-*.md, 언어별 예시)을 동적 병합 + 사용자 추가
+        │     요구사항을 AI로 결합해 이 세션 전용 CLAUDE.md 생성 (파일별 분석 시스템 프롬프트로 등록)
         ├─ loadTrackerIntoSession(): 이전에 완료 처리된 파일 목록을 추적 파일에서 로드(재분석 스킵용)
         ├─ 스레드풀(기본 max(8, CPU코어*2))로 파일별 병렬 처리 → 6-2 참고
         │     각 파일 처리 전: shouldStop() 체크 → 취소/일시정지면 그 파일은 건드리지 않고 즉시 반환
@@ -328,8 +353,8 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
 4. 파일 크기가 chunking-threshold-bytes(기본 150KB)를 넘으면 청크 분할 분석:
      - chunk-size-lines(기본 1000줄) 단위로 나누고, 청크 경계마다 chunk-overlap-lines(기본 100줄)의
        "이전 코드 맥락"을 앞에 덧붙여 청크 간 문맥이 끊기지 않게 함
-     - 청크별로 각각 Claude API 호출 후 결과를 이어붙임
-   그렇지 않으면 파일 전체를 한 번에 Claude API 호출(claudeService.analyzeCodeWithClaude)
+     - 청크별로 각각 LLM 호출(Claude API 또는 로컬/사내 LLM) 후 결과를 이어붙임
+   그렇지 않으면 파일 전체를 한 번에 LLM 호출(claudeService.analyzeCodeWithClaude → LlmClient로 위임)
 5. 위 2~4단계(읽기/분석/쓰기)는 각각 RetryHandler.executeWithRetry()로 감싸져 있어,
      재시도 가능한 에러(NETWORK_TIMEOUT, API_RATE_LIMIT, SERVER_ERROR 등)는 지수 백오프로 자동 재시도한다.
      재시도 불가 에러(INSUFFICIENT_CREDITS, API_AUTHENTICATION 등)나 최대 재시도 초과 시 AnalysisException을 던져 FAILED 처리.
@@ -401,7 +426,7 @@ IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 | 컨트롤러 | 베이스 경로 | 대표 엔드포인트 |
 |---|---|---|
 | `AuthController` | `/auth` | `GET/POST /auth/login` |
-| `MainApiController` | `/api` | `POST /api/start-analysis`, `POST /api/upload-analysis`, `GET /api/analysis/status/{sessionId}`, `POST /api/session/pause\|resume\|cancel` |
+| `MainApiController` | `/api` | `POST /api/start-analysis`, `POST /api/upload-analysis`, `GET /api/analysis/status/{sessionId}`, `POST /api/session/pause\|resume\|cancel`, `GET /api/session/{sessionId}/preview`(완료 파일 미리보기/Diff), `GET /api/config/llm-provider` |
 | `UserActivityController` | `/my-activity`, `/api/my` | `GET /api/my/analysis-history`, `GET /api/my/claude-md/{id}`, `GET /api/my/download/project-report/{id}` |
 | `AdminController` | `/api/admin` | `POST /api/admin/users/register`, `GET /api/admin/analysis-history`, `DELETE /api/admin/analysis-history/{id}` |
 | `UserController` | `/api/users` | `GET/PUT /api/users/me`, `GET /api/users`(ADMIN), `PUT /api/users/{seq}/activate`(ADMIN) |
@@ -420,6 +445,7 @@ IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 - **감사 로그(audit)**: 로그인/로그아웃/사용자 CRUD/분석 완료를 `AuditLogService` 명시적 호출로 기록.
 - **API 사용량(api.usage)**: `ApiUsageFilter`가 `/api/**` 요청의 크기·상태코드·소요시간을 자동으로 기록(서블릿 필터 레벨, 인증된 사용자 기준). Claude API 토큰 사용량(`AnalysisHistory.inputTokens` 등)과는 별개로, 이 앱 자체의 HTTP 트래픽을 추적하는 것이다.
 - **성능 모니터링(api.monitoring)**: `PerformanceMetricsCollector`가 세션별 파일 처리 시간·힙 메모리 사용률을 메모리에 기록, `MonitoringController`로 조회(세션 소유자/ADMIN만).
+- **완료 파일 미리보기/Diff(Phase 1, 세션 한정)**: write-back 직후 원본/결과 전체 텍스트를 `SessionState.previewCache`(메모리, 세션 종료 시 자연 소멸)에 보관 — `GET /api/session/{sessionId}/preview`가 `java-diff-utils`로 unified diff를 즉석 생성해 반환한다. 영구 보관(Phase 2)은 설계만 되어 있고 미착수.
 
 ---
 
@@ -433,12 +459,16 @@ IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 | 업로드 분석을 서버 임시 스테이징 폴더 + write-back 구조로 | 브라우저가 로컬 경로 문자열을 서버에 보낼 수 없으므로(보안 모델상), File System Access API로 읽은 바이트만 전송하고 결과는 다시 브라우저가 씀 |
 | 서버 경로 직접 지정을 ROLE_ADMIN으로 제한 | 서버 자신의 파일시스템을 임의로 읽고 쓰는 기능이라 신뢰된 사용자만 |
 | H2/PostgreSQL 프로파일 자동 전환 | 로컬 개발은 별도 인프라 없이 즉시 기동, 운영은 PostgreSQL로 동일 코드베이스 사용 |
+| `LlmClient` 인터페이스로 Provider 추상화(`@ConditionalOnProperty`) | Anthropic ↔ 로컬/사내 LLM을 설정값 하나로 전환하고, 재빌드 없이 배포 환경마다 다른 백엔드를 붙일 수 있게 |
+| RAG(Chroma)를 `rag.enabled`로 완전 opt-in(빈 자체가 안 뜸) | 대부분의 배포(경량/기본)에서는 불필요한 인프라 의존성(Chroma)을 아예 안 지도록, 실패해도 원본 그대로 폴백하는 "있으면 좋고 없어도 되는" 부가 기능으로 설계 |
+| prompt.md를 base(공통 규칙)+role(언어별 예시, 확장자 감지 병합)로 분리 | 분석 대상과 무관한 언어 예시가 매 요청에 실려 토큰이 낭비되는 것을 막음(상세: `docs/advancement/1.plan/2026-07-29-legacy-analyzer-prompt-md-role-split.md`) |
 
 ---
 
 ## 10. 더 알아보기
 
 - [`docs/README.md`](docs/README.md) — 문서 전체 인덱스
+- [`docs/advancement/0.status/handOff.md`](docs/advancement/0.status/handOff.md) — LLM Provider 전환/RAG 진행 현황(항상 최신)
 - [`docs/technical/PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md`](docs/technical/PARTIAL_ANALYSIS_AND_PPT_SNAPSHOT.md) — 부분 분석·PPT 구조 스냅샷
 - [`docs/technical/SESSION_STATUS_CONSISTENCY_FIXES.md`](docs/technical/SESSION_STATUS_CONSISTENCY_FIXES.md) — 세션 상태 정합성 수정
 - [`docs/technical/ANALYSIS_METRICS_DB_SCHEMA.md`](docs/technical/ANALYSIS_METRICS_DB_SCHEMA.md) — 토큰 메트릭 DB 설계
