@@ -50,6 +50,9 @@ dependencies {
     implementation 'org.apache.poi:poi:5.2.5'
     implementation 'org.apache.poi:poi-ooxml:5.2.5'
     implementation 'org.apache.xmlbeans:xmlbeans:5.1.1'
+
+    // 8. 완료 파일 미리보기/Diff 기능 — 서버 사이드 unified diff 생성
+    implementation 'io.github.java-diff-utils:java-diff-utils:4.12'
 }
 
 test {

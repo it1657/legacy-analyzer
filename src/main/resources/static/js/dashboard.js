@@ -278,23 +278,46 @@ function renderDividedGrid(filesArray) {
     badgeSpan.className = `status-badge ${file.isCompleted ? 'badge-green' : 'badge-red'}`;
     badgeSpan.textContent = file.isCompleted ? "패치완료" : "대기중";
 
-    fileDiv.appendChild(nameSpan);
-    fileDiv.appendChild(badgeSpan);
+    // 배지 + (완료 파일만) 경로 복사 아이콘을 한 그룹으로 묶어 file-box의 flex space-between 레이아웃을 유지
+    const rightGroup = document.createElement('div');
+    rightGroup.style.cssText = "display:flex; align-items:center; gap:6px;";
+    rightGroup.appendChild(badgeSpan);
 
-    fileDiv.onclick = function() {
-      // 업로드 미리보기는 서버 절대경로가 없는 로컬 파일이므로 상대경로만 복사
-      const textToCopy = isUploadPreviewMode
-          ? file.fileName
-          : (() => {
-              const sep = outPath.endsWith('\\') || outPath.endsWith('/') ? "" : "\\";
-              return outPath + sep + file.fileName.replaceAll('/', '\\').replaceAll('#', '\\');
-            })();
+    fileDiv.appendChild(nameSpan);
+    fileDiv.appendChild(rightGroup);
+
+    // 업로드 미리보기는 서버 절대경로가 없는 로컬 파일이므로 상대경로만 복사 대상으로 삼는다
+    const computeCopyText = () => isUploadPreviewMode
+        ? file.fileName
+        : (() => {
+            const sep = outPath.endsWith('\\') || outPath.endsWith('/') ? "" : "\\";
+            return outPath + sep + file.fileName.replaceAll('/', '\\').replaceAll('#', '\\');
+          })();
+
+    const copyPathToClipboard = () => {
+      const textToCopy = computeCopyText();
       navigator.clipboard.writeText(textToCopy).then(() => {
         const logConsole = document.getElementById('terminalLog');
         logConsole.textContent = `[경로 복사 완료] ${isUploadPreviewMode ? '' : '주소창에 붙여넣기(Ctrl+V) 하세요:\n'}${textToCopy}`;
         logConsole.scrollTop = logConsole.scrollHeight;
       }).catch(err => console.error("복사 실패: ", err));
     };
+
+    // 완료 파일: 클릭 시 미리보기/Diff 모달이 기본 동작, 기존 "경로 복사"는 📋 아이콘 버튼으로 이동
+    // (업로드 미리보기 단계 파일은 서버에서 아직 분석되지 않아 미리보기 캐시가 없으므로 기존 클릭=복사 동작 유지)
+    if (file.isCompleted && !isUploadPreviewMode) {
+      fileDiv.onclick = () => openFilePreviewDiffModal(computeCopyText(), file.fileName);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.textContent = '📋';
+      copyBtn.title = '경로 복사';
+      copyBtn.style.cssText = "background:none; border:none; cursor:pointer; font-size:13px; padding:0 2px; line-height:1;";
+      copyBtn.onclick = (evt) => { evt.stopPropagation(); copyPathToClipboard(); };
+      rightGroup.appendChild(copyBtn);
+    } else {
+      fileDiv.onclick = copyPathToClipboard;
+    }
 
     if (!file.isCompleted) { waitGrid.appendChild(fileDiv); currentWaitCnt++; }
     else { completeGrid.appendChild(fileDiv); currentCompleteCnt++; }
@@ -1028,6 +1051,64 @@ function openCompletionClaudeMdModal() {
 
 function closeCompletionClaudeMdModal() {
   document.getElementById('completionClaudeMdModal').style.display = 'none';
+}
+
+/**
+ * 완료 파일 미리보기/Diff 모달 (1단계: 세션 한정)
+ * write-back 직후 서버 세션 메모리에 캐시된 원본/결과 텍스트로 unified diff를 즉석 생성해 보여준다.
+ * currentSessionId가 이번 분석을 처리한 세션과 다르거나(세션 종료 후) 캐시에 없는 파일이면 서버가 404를 반환한다.
+ *
+ * @param {string} absolutePath - 서버 측 previewCache 키(타겟 파일 절대경로), 완료 파일 클릭 시 계산된 값 그대로 전달
+ * @param {string} displayName - 모달 제목에 표시할 상대경로
+ */
+function openFilePreviewDiffModal(absolutePath, displayName) {
+  const modal = document.getElementById('filePreviewDiffModal');
+  const titleEl = document.getElementById('filePreviewDiffTitle');
+  const previewEl = document.getElementById('filePreviewContent');
+  const diffEl = document.getElementById('filePreviewDiffContent');
+
+  titleEl.textContent = `🔍 ${displayName}`;
+  previewEl.textContent = '불러오는 중...';
+  diffEl.textContent = '';
+  switchFilePreviewTab('preview');
+  modal.style.display = 'flex';
+
+  if (!currentSessionId) {
+    previewEl.textContent = '세션 정보가 없어 미리보기를 확인할 수 없습니다. (분석을 진행했거나 재개한 세션에서만 확인 가능합니다)';
+    return;
+  }
+
+  fetch(`/api/session/${currentSessionId}/preview?path=${encodeURIComponent(absolutePath)}`)
+    .then(async res => {
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '조회 실패');
+      previewEl.textContent = data.commented;
+      diffEl.textContent = data.diff;
+    })
+    .catch(err => {
+      const msg = err.message || '미리보기를 불러올 수 없습니다.';
+      previewEl.textContent = msg;
+      diffEl.textContent = msg;
+    });
+}
+
+function switchFilePreviewTab(tab) {
+  const previewBtn = document.getElementById('filePreviewTabBtn');
+  const diffBtn = document.getElementById('filePreviewDiffTabBtn');
+  const previewEl = document.getElementById('filePreviewContent');
+  const diffEl = document.getElementById('filePreviewDiffContent');
+  const activeStyle = { background: '#21262d', color: '#e6edf3', fontWeight: 'bold' };
+  const inactiveStyle = { background: '#161b22', color: '#8b949e', fontWeight: 'normal' };
+
+  const isDiff = tab === 'diff';
+  Object.assign(diffBtn.style, isDiff ? activeStyle : inactiveStyle);
+  Object.assign(previewBtn.style, isDiff ? inactiveStyle : activeStyle);
+  diffEl.style.display = isDiff ? 'block' : 'none';
+  previewEl.style.display = isDiff ? 'none' : 'block';
+}
+
+function closeFilePreviewDiffModal() {
+  document.getElementById('filePreviewDiffModal').style.display = 'none';
 }
 
 function escapeHtml(str) {
