@@ -59,7 +59,7 @@ analyzer-plan `docs/chat/etc/2026-07-29-prompt-md-design-ollama-risk-addendum.md
 3. `PromptResolver.java`: 죽은 코드로 확인, 제거 예정(Phase 4에서 진행)
 4. Phase 순서: 1 → 1.5(신규 반영) → 3 → 2 → 4
 5. Phase 3.5: (a) `looksLikeClaudeMd()` 검증 강화만 적용, (b) 규칙 기반 병합 옵션은 보류(리스크만 아래에 문서화)
-6. 3.4절 신규 role 범위: `role-properties.md`/`role-yaml.md`만 포함, `role-gradle.md`/`role-css.md`는 후속 이슈로 보류, `.json`은 완전 제외
+6. 3.4절 신규 role 범위: `role-properties.md`/`role-yaml.md`만 포함, `role-gradle.md`/`role-css.md`는 후속 이슈로 보류, `.json`은 완전 제외 — **(2026-08-11 같은 날 정정: 아래 "후속 반영" 절 참고, role-gradle.md/role-css.md도 이번 범위에 포함됨)**
 
 ### Phase 1 — 파일 분할 (완료)
 - `src/main/resources/prompt-base.md` + `role-{java,python,js,vue,xml,nexacro}.md` 7개 파일로 분리
@@ -93,3 +93,13 @@ analyzer-plan `docs/chat/etc/2026-07-29-prompt-md-design-ollama-risk-addendum.md
 **후속 대응 옵션(미구현, 필요 시 검토)**: 로컬 모델(`llmProvider == "local"`) 사용 시 이 병합 단계 자체를 LLM 호출 없이 `"## 표준 기본 지침\n\n" + baseTemplate + "\n\n## 추가 요구사항 (사용자 지정)\n\n" + customRequirements` 텍스트를 그대로 CLAUDE.md로 사용하는 규칙 기반 병합으로 대체하는 옵션 제공. LLM 개입 자체를 없애 가장 안전하지만, "추가 요구사항을 관련 섹션에 유기적으로 반영"하는 현재의 LLM 병합 품질(요구사항이 있으면 관련 섹션을 보강/신설)을 포기하고 단순 이어붙이기가 된다는 트레이드오프가 있다 — 실제 운영 중 Phase 3.5(a) 검증 강화만으로 오염 사례가 재현되는지 확인 후 필요 시 착수 권장.
 
 **최소 검증 권장**: 로컬 모델로 `customRequirements` 있는 케이스 회귀 테스트 1회는 실행 권장(설계안 Phase 3.5 3항) — 이 세션의 샌드박스에는 Ollama가 없어(11434 포트 무응답) 실행하지 못했으므로, 사용자 환경에서 수행 필요.
+
+## 후속 반영 (2026-08-11, 같은 날 이어짐) — role-gradle.md/role-css.md 추가
+
+**결정**: 위 6번에서 후속 이슈로 보류했던 `role-gradle.md`/`role-css.md`를 사용자 요청으로 이번 범위에 추가 반영.
+
+- `role-gradle.md` 신규 작성 — 실제 저장소 `build.gradle` 스타일 참고. **설계안 3.4절 표의 "Groovy DSL, `#` 주석" 메모는 오기로 판단해 정정**: Groovy DSL은 Java와 마찬가지로 `//`/`/* */`를 쓰고 `#`은 유효한 주석 마커가 아니다(실제 `build.gradle`에도 `//` 주석만 존재함을 확인). `//`가 이미 유효하므로 `normalizeComment()`에 별도 분기 추가 없이 기존 Java와 동일한 경로로 정상 동작함을 회귀 테스트로 확인.
+- `role-css.md` 신규 작성 — 실제 저장소 `dashboard.css` 스타일 참고. `/* ... */` 블록 주석만 쓰도록 명시, `//` 금지를 role 지침에 명문화.
+- **작업 중 발견한 버그를 함께 수정**: CSS는 Properties/YAML과 반대 방향의 문제였음 — `normalizeComment()`가 마커 없는 텍스트나 `//` 스타일 응답을 만나면 항상 `//`를 강제하는데, `//`는 표준 CSS에서 유효한 주석이 아니다. `isCssFamily(extension)`를 신설해 이 두 fallback 경로에서 CSS만 `/* ... */` 블록으로 변환하도록 수정(`toCssBlockComment()`). 이 과정에서 기존 "HTML/XML 본문 // 주석 처리" 분기가 CSS보다 먼저 매칭되어 첫 구현이 무력화되는 순서 버그를 발견해 정정(회귀 테스트로 잡음) — 최종적으로 그 분기 안에 CSS 케이스를 끼워 넣는 방식으로 수정.
+- `ROLE_FILE_BY_EXTENSION`에 `.gradle`→`role-gradle.md`, `.css`→`role-css.md` 매핑 추가. 기존 "미매칭 확장자" 검증 테스트들은 `.gradle`/`.css`가 더 이상 미매칭이 아니므로 `.json`/`.txt`/`.sql`(여전히 미매칭)로 갱신.
+- 남은 미신설 항목: `.json`(설계 방식이 달라 이번 범위에서 완전 제외, 3.4절 참고), 설계안 3.4절 "미신설" 행의 `.sql`/`.sh`·`.bat`/`dockerfile`류/`.txt`(저장소 내 실제 파일 0개, 필요 시 후속 추가)는 그대로 미신설 상태로 남김.

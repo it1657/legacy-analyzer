@@ -82,11 +82,14 @@ public class ClaudeServiceImpl implements ClaudeService {
         Map.entry(".html", "role-xml.md"),
         Map.entry(".xfdl", "role-nexacro.md"),
         // Phase 1.5(2026-08-11, 설계안 3.4절) — isSupportedFile() 화이트리스트 확장자 중
-        // 실제 파일 개수 상위 2개만 우선 추가. role-gradle.md/role-css.md는 후속 이슈로 보류,
-        // .json은 표준 문법상 주석을 지원하지 않아 이번 범위에서 완전히 제외(설계안 3.4절 참고).
+        // 실제 파일 개수 상위 2개만 우선 추가. .json은 표준 문법상 주석을 지원하지 않아
+        // 이번 범위에서 완전히 제외(설계안 3.4절 참고).
         Map.entry(".properties", "role-properties.md"),
         Map.entry(".yml", "role-yaml.md"),
-        Map.entry(".yaml", "role-yaml.md")
+        Map.entry(".yaml", "role-yaml.md"),
+        // 2026-08-11 후속 반영 — 최초엔 후속 이슈로 보류했다가, 사용자 요청으로 이번 범위에 포함
+        Map.entry(".gradle", "role-gradle.md"),
+        Map.entry(".css", "role-css.md")
     );
 
     // Claude API ↔ 로컬/사내 LLM 전환 스위치 (기본값 anthropic — LlmClient 빈 선택과 동일한 기본값)
@@ -409,6 +412,36 @@ public class ClaudeServiceImpl implements ClaudeService {
     private boolean isHashCommentFamily(String extension) {
         return ".py".equals(extension) || ".properties".equals(extension)
             || ".yml".equals(extension) || ".yaml".equals(extension);
+    }
+
+    /**
+     * `/* ... *&#47;` 블록 주석만 허용하는 파일군(role-css.md 신설, 2026-08-11). 표준 CSS는
+     * `//` 한 줄 주석을 지원하지 않는다 — 지원하지 않는 문법을 만나면 파서에 따라 그 줄(또는
+     * 그 뒤 규칙까지)이 통째로 무시되거나 깨질 수 있어, properties/yaml과 같은 이유로 별도
+     * 처리가 필요하다.
+     */
+    private boolean isCssFamily(String extension) {
+        return ".css".equals(extension);
+    }
+
+    /**
+     * `//` 스타일 또는 마커 없는 텍스트를 CSS 표준 `/* ... *&#47;` 블록 주석으로 변환한다.
+     * 한 줄만 있으면 한 줄 블록으로, 여러 줄이면 XML 계열과 동일한 스타일로 여러 줄 블록으로 감싼다.
+     */
+    private String toCssBlockComment(String rawText) {
+        String[] lines = rawText.split("\n");
+        List<String> content = new ArrayList<>();
+        for (String line : lines) {
+            String l = line.trim();
+            if (l.startsWith("//")) l = l.substring(2).trim();
+            if (!l.isEmpty()) content.add(l);
+        }
+        if (content.isEmpty()) return "/* */";
+        if (content.size() == 1) return "/* " + content.get(0) + " */";
+        StringBuilder fixed = new StringBuilder("/*\n");
+        for (String l : content) fixed.append(l).append("\n");
+        fixed.append("*/");
+        return fixed.toString();
     }
 
     /**
@@ -973,6 +1006,7 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         // JavaScript/CSS 블록 내 // 주석으로 시작하는 HTML 블록 처리 (HTML/XML 파일에서만 해당)
         if (trimmed.startsWith("//") && trimmed.contains("<!--")) {
+            if (isCssFamily(extension)) return toCssBlockComment(trimmed);
             if (!isXmlFamily(extension)) {
                 // Java 등 비-XML 파일: 이미 // 형식이므로 변환 없이 그대로 사용
                 return comment;
@@ -985,7 +1019,9 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         // HTML/XML 본문에서 발견된 // 주석 → HTML 주석으로 변환 (HTML/XML 파일에서만 해당)
         // (HTML 파일의 경우 <script>, <style> 태그 외부에서는 // 주석이 유효하지 않음)
+        // CSS는 // 한 줄 주석을 지원하지 않으므로 /* */ 로 변환(role-css.md 신설, 2026-08-11)
         if (trimmed.startsWith("//") && !trimmed.startsWith("// <!--")) {
+            if (isCssFamily(extension)) return toCssBlockComment(trimmed);
             if (!isXmlFamily(extension)) {
                 // Java 등 비-XML 파일: 이미 올바른 // 형식이므로 변환 없이 그대로 사용
                 return comment;
@@ -1052,10 +1088,11 @@ public class ClaudeServiceImpl implements ClaudeService {
             return result;
         }
 
-        // // 스타일은 그대로 통과
+        // // 스타일은 그대로 통과 (CSS는 위쪽 // 분기에서 이미 /* */ 로 변환되어 여기 도달하지 않음)
         if (trimmed.startsWith("//")) return comment;
 
-        // 주석 마커가 전혀 없는 순수 텍스트: // 접두어를 붙여 컴파일 에러 방지
+        // 주석 마커가 전혀 없는 순수 텍스트: CSS는 /* */, 그 외에는 // 접두어를 붙여 컴파일 에러 방지
+        if (isCssFamily(extension)) return toCssBlockComment(trimmed);
         String[] lines = trimmed.split("\n");
         StringBuilder fixed = new StringBuilder();
         for (String line : lines) {

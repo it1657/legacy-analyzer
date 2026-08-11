@@ -58,12 +58,14 @@ class ClaudeServiceImplAnalyzeCodeSystemPromptTest {
   private static final String NEXACRO_MARKER = "마이플랫폼 / 넥사크로";
   private static final String PROPERTIES_MARKER = "### Properties (.properties) → `#` 주석";
   private static final String YAML_MARKER = "### YAML (.yml, .yaml) → `#` 주석";
+  private static final String GRADLE_MARKER = "### Gradle (.gradle) → `//` 주석 (Groovy DSL)";
+  private static final String CSS_MARKER = "### CSS (.css) → `/* ... */` 블록 주석";
   private static final String COPY_WARNING_HEADING = "## 절대 금지: 아래 예시 문장을 그대로 베끼는 것";
   private static final String RESPONSE_FORMAT_HEADING = "## 응답 포맷 (절대 준수)";
 
   private static final String[] ALL_MARKERS = {
       JAVA_MARKER, PYTHON_MARKER, JS_MARKER, VUE_MARKER, XML_MARKER, NEXACRO_MARKER,
-      PROPERTIES_MARKER, YAML_MARKER
+      PROPERTIES_MARKER, YAML_MARKER, GRADLE_MARKER, CSS_MARKER
   };
 
   private void assertOnlyMarkerPresent(String systemPrompt, String expectedMarker) {
@@ -157,11 +159,34 @@ class ClaudeServiceImplAnalyzeCodeSystemPromptTest {
   }
 
   @Test
-  void 미매칭_확장자_파일은_role_없이_base만_반영되지만_베끼기_금지와_응답_포맷은_유지된다() throws Exception {
+  void gradle_파일_분석시_gradle_role만_반영된다() throws Exception {
+    // 2026-08-11 후속 반영 — 최초엔 후속 이슈로 보류했다가 사용자 요청으로 이번 범위에 포함
     CapturingLlmClient llmClient = new CapturingLlmClient();
     ClaudeServiceImpl service = newService(llmClient);
 
-    service.analyzeCodeWithClaude("build { }", "build.gradle", "/no/session/prompt/cached");
+    service.analyzeCodeWithClaude("dependencies { implementation 'org.example:lib:1.0' }",
+        "build.gradle", "/no/session/prompt/cached");
+
+    assertOnlyMarkerPresent(llmClient.lastSystemPrompt, GRADLE_MARKER);
+  }
+
+  @Test
+  void css_파일_분석시_css_role만_반영된다() throws Exception {
+    CapturingLlmClient llmClient = new CapturingLlmClient();
+    ClaudeServiceImpl service = newService(llmClient);
+
+    service.analyzeCodeWithClaude(".card { padding: 20px; }", "dashboard.css", "/no/session/prompt/cached");
+
+    assertOnlyMarkerPresent(llmClient.lastSystemPrompt, CSS_MARKER);
+  }
+
+  @Test
+  void 미매칭_확장자_파일은_role_없이_base만_반영되지만_베끼기_금지와_응답_포맷은_유지된다() throws Exception {
+    // .json은 표준 문법상 주석 불가로 이번 범위에서 완전 제외된 확장자
+    CapturingLlmClient llmClient = new CapturingLlmClient();
+    ClaudeServiceImpl service = newService(llmClient);
+
+    service.analyzeCodeWithClaude("{\"key\": \"value\"}", "config.json", "/no/session/prompt/cached");
 
     String systemPrompt = llmClient.lastSystemPrompt;
     for (String marker : ALL_MARKERS) {

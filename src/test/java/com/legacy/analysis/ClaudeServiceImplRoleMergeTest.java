@@ -63,6 +63,8 @@ class ClaudeServiceImplRoleMergeTest {
   private static final String NEXACRO_MARKER = "마이플랫폼 / 넥사크로";
   private static final String PROPERTIES_MARKER = "### Properties (.properties) → `#` 주석";
   private static final String YAML_MARKER = "### YAML (.yml, .yaml) → `#` 주석";
+  private static final String GRADLE_MARKER = "### Gradle (.gradle) → `//` 주석 (Groovy DSL)";
+  private static final String CSS_MARKER = "### CSS (.css) → `/* ... */` 블록 주석";
   private static final String RESPONSE_FORMAT_HEADING = "## 응답 포맷 (절대 준수)";
 
   @Test
@@ -136,13 +138,13 @@ class ClaudeServiceImplRoleMergeTest {
 
   @Test
   void 미매칭_확장자만_있으면_role_없이_base만_적용된다() throws Exception {
-    // 2026-08-11 설계안 3.4절 결정: role-properties.md/role-yaml.md는 이번 범위에 신설되어
-    // 더 이상 미매칭이 아니므로, 여전히 미매칭인 .gradle/.json/.css로 검증한다
-    // (.gradle/.css는 후속 이슈로 보류, .json은 표준 문법상 주석 불가로 이번 범위에서 완전 제외).
+    // 2026-08-11 gradle/css role까지 신설되어, 8개 role 어디에도 안 걸리는 진짜 미매칭 확장자로
+    // 검증한다(.json은 표준 문법상 주석 불가로 이번 범위에서 완전 제외, .txt/.sql은 설계안 3.3절의
+    // 화이트리스트 11개 패턴 중 신규 role 미신설 상태로 남은 것들).
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".gradle", ".json", ".css"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".json", ".txt", ".sql"));
 
     assertTrue(result.contains("레거시 엔터프라이즈 시스템"), "base 내용은 그대로 있어야 함");
     assertFalse(result.contains(JAVA_MARKER));
@@ -153,7 +155,45 @@ class ClaudeServiceImplRoleMergeTest {
     assertFalse(result.contains(NEXACRO_MARKER));
     assertFalse(result.contains(PROPERTIES_MARKER));
     assertFalse(result.contains(YAML_MARKER));
+    assertFalse(result.contains(GRADLE_MARKER));
+    assertFalse(result.contains(CSS_MARKER));
     assertTrue(result.contains(RESPONSE_FORMAT_HEADING), "role이 없어도 응답 포맷 섹션은 그대로 있어야 함");
+  }
+
+  @Test
+  void gradle와_css_확장자는_각자의_role만_반영되고_서로_섞이지_않는다() throws Exception {
+    // 2026-08-11 후속 반영 — 최초엔 후속 이슈로 보류했다가 사용자 요청으로 이번 범위에 포함
+    CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
+    ClaudeServiceImpl service = newService(llmClient);
+
+    String gradleOnly = service.generateSessionClaudeMd(null, Set.of(".gradle"));
+    assertTrue(gradleOnly.contains(GRADLE_MARKER));
+    assertFalse(gradleOnly.contains(CSS_MARKER));
+
+    String cssOnly = service.generateSessionClaudeMd(null, Set.of(".css"));
+    assertTrue(cssOnly.contains(CSS_MARKER));
+    assertFalse(cssOnly.contains(GRADLE_MARKER));
+  }
+
+  @Test
+  void 이_저장소와_동일한_java_gradle_properties_yaml_css_풀스택도_role이_섞이지_않는다() throws Exception {
+    // legacy-analyzer 저장소 자체와 같은 실제 케이스: build.gradle + application.properties +
+    // docker-compose.yml + dashboard.css + Java 소스가 한 세션에서 함께 분석되는 경우
+    CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
+    ClaudeServiceImpl service = newService(llmClient);
+
+    String result = service.generateSessionClaudeMd(null,
+        Set.of(".java", ".gradle", ".properties", ".yml", ".css"));
+
+    assertTrue(result.contains(JAVA_MARKER));
+    assertTrue(result.contains(GRADLE_MARKER));
+    assertTrue(result.contains(PROPERTIES_MARKER));
+    assertTrue(result.contains(YAML_MARKER));
+    assertTrue(result.contains(CSS_MARKER));
+    assertFalse(result.contains(PYTHON_MARKER));
+    assertFalse(result.contains(VUE_MARKER));
+    assertFalse(result.contains(XML_MARKER));
+    assertFalse(result.contains(NEXACRO_MARKER));
   }
 
   @Test
@@ -213,7 +253,7 @@ class ClaudeServiceImplRoleMergeTest {
     ClaudeServiceImpl service = newService(llmClient);
 
     String result = service.generateSessionClaudeMd(null,
-        Set.of(".java", ".py", ".js", ".vue", ".xml", ".xfdl", ".properties", ".yml"));
+        Set.of(".java", ".py", ".js", ".vue", ".xml", ".xfdl", ".properties", ".yml", ".gradle", ".css"));
 
     int responseFormatIdx = result.indexOf(RESPONSE_FORMAT_HEADING);
     assertTrue(responseFormatIdx > 0, "응답 포맷 섹션이 존재해야 함");
@@ -223,6 +263,8 @@ class ClaudeServiceImplRoleMergeTest {
     assertTrue(result.indexOf(NEXACRO_MARKER) < responseFormatIdx);
     assertTrue(result.indexOf(PROPERTIES_MARKER) < responseFormatIdx);
     assertTrue(result.indexOf(YAML_MARKER) < responseFormatIdx);
+    assertTrue(result.indexOf(GRADLE_MARKER) < responseFormatIdx);
+    assertTrue(result.indexOf(CSS_MARKER) < responseFormatIdx);
     // 응답 포맷 섹션 뒤에는 더 이상 아무 내용도 없어야("맨 끝") 함
     String afterResponseFormat = result.substring(responseFormatIdx);
     assertFalse(afterResponseFormat.contains("###"), "응답 포맷 섹션 뒤에 role 예시(### 헤딩)가 남아있으면 안 됨");
