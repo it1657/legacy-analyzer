@@ -57,9 +57,6 @@ public class ClaudeServiceImpl implements ClaudeService {
     @Value("${anthropic.api.max-tokens:4000}")
     private int apiMaxTokens;
 
-    @Value("${app.analysis.custom-spec-filename:custom_spec.txt}")
-    private String customSpecFilename;
-
     @Value("${app.analysis.system-prompt-filename:CLAUDE.md}")
     private String systemPromptFilename;
 
@@ -70,26 +67,28 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     // 확장자 → role 파일명 매핑 (2026-07-29 설계안 3.2절). role-js/role-vue는 원본에서 한 블록으로
     // 묶여 있던 JS/TS/Vue를 분리한 것 — Vue 전용 예시가 순수 JS/TS 분석 시 섞여 들어가는 것을 막는다.
+    // 2026-08-11(후속): resources 최상위가 role 파일 10개로 지저분해진다는 지적에 따라
+    // prompts/roles/ 하위로 이동 — 클래스패스 리소스 경로라 OS와 무관하게 항상 "/" 구분자 사용.
     private static final Map<String, String> ROLE_FILE_BY_EXTENSION = Map.ofEntries(
-        Map.entry(".java", "role-java.md"),
-        Map.entry(".py", "role-python.md"),
-        Map.entry(".js", "role-js.md"),
-        Map.entry(".ts", "role-js.md"),
-        Map.entry(".jsx", "role-js.md"),
-        Map.entry(".tsx", "role-js.md"),
-        Map.entry(".vue", "role-vue.md"),
-        Map.entry(".xml", "role-xml.md"),
-        Map.entry(".html", "role-xml.md"),
-        Map.entry(".xfdl", "role-nexacro.md"),
+        Map.entry(".java", "prompts/roles/role-java.md"),
+        Map.entry(".py", "prompts/roles/role-python.md"),
+        Map.entry(".js", "prompts/roles/role-js.md"),
+        Map.entry(".ts", "prompts/roles/role-js.md"),
+        Map.entry(".jsx", "prompts/roles/role-js.md"),
+        Map.entry(".tsx", "prompts/roles/role-js.md"),
+        Map.entry(".vue", "prompts/roles/role-vue.md"),
+        Map.entry(".xml", "prompts/roles/role-xml.md"),
+        Map.entry(".html", "prompts/roles/role-xml.md"),
+        Map.entry(".xfdl", "prompts/roles/role-nexacro.md"),
         // Phase 1.5(2026-08-11, 설계안 3.4절) — isSupportedFile() 화이트리스트 확장자 중
         // 실제 파일 개수 상위 2개만 우선 추가. .json은 표준 문법상 주석을 지원하지 않아
         // 이번 범위에서 완전히 제외(설계안 3.4절 참고).
-        Map.entry(".properties", "role-properties.md"),
-        Map.entry(".yml", "role-yaml.md"),
-        Map.entry(".yaml", "role-yaml.md"),
+        Map.entry(".properties", "prompts/roles/role-properties.md"),
+        Map.entry(".yml", "prompts/roles/role-yaml.md"),
+        Map.entry(".yaml", "prompts/roles/role-yaml.md"),
         // 2026-08-11 후속 반영 — 최초엔 후속 이슈로 보류했다가, 사용자 요청으로 이번 범위에 포함
-        Map.entry(".gradle", "role-gradle.md"),
-        Map.entry(".css", "role-css.md")
+        Map.entry(".gradle", "prompts/roles/role-gradle.md"),
+        Map.entry(".css", "prompts/roles/role-css.md")
     );
 
     // Claude API ↔ 로컬/사내 LLM 전환 스위치 (기본값 anthropic — LlmClient 빈 선택과 동일한 기본값)
@@ -550,30 +549,6 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     /**
-     * [세부 지침 파일 로드]: 프로젝트별 특수 상세 지침 텍스트를 안전하게 가져옵니다.
-     */
-    private String loadCustomSpec(String extension) {
-        try (InputStream is = getClass().getClassLoader().getResourceAsStream(customSpecFilename)) {
-            if (is == null) {
-                if (".py".equals(extension)) return "# [안내] 별도의 프로젝트 세부 상세 지침 규칙이 지정되지 않았습니다. 기본 규칙으로 분석합니다.";
-                if (isXmlFamily(extension)) {
-                    return "<!-- [안내] 별도의 프로젝트 세부 상세 지침 규칙이 지정되지 않았습니다. 기본 규칙으로 분석합니다. -->";
-                }
-                return "// [안내] 별도의 프로젝트 세부 상세 지침 규칙이 지정되지 않았습니다. 기본 규칙으로 분석합니다.";
-            }
-            byte[] bytes = is.readAllBytes();
-            return new String(bytes, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            log.error("특수 지침 파일(custom_spec.txt) 로드 중 실패", e);
-            if (".py".equals(extension)) return "# [경고] 규칙 파일 읽기 실패: " + e.getMessage();
-            if (isXmlFamily(extension)) {
-                return "<!-- [경고] 규칙 파일 읽기 실패: " + e.getMessage() + " -->";
-            }
-            return "// [경고] 규칙 파일 읽기 실패: " + e.getMessage();
-        }
-    }
-
-    /**
      * 메인 비즈니스 분석 로직이 비대해지지 않도록 가상 시뮬레이션용 응답 지도를 가공해 주는
      * 독립된 전용 MOCK 가동 메서드로 정밀하게 격리 추출(Extract Method)했습니다.
      */
@@ -618,8 +593,6 @@ public class ClaudeServiceImpl implements ClaudeService {
             return generateProjectReadmeWithClaude(sourceCode, sourceFolderPath);
         }
 
-        String customSpecData = loadCustomSpec(extension);
-
         if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
             // API KEY 미설정 시 파일을 수정하지 않고 예외 발생 (원본 보호)
             log.warn("[API KEY 미설정] 파일 처리 건너뜀: {}", fileName);
@@ -629,10 +602,11 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         String baseSystemPrompt = resolveSystemPrompt(sourceFolderPath, extension);
 
+        // customSpecData 치환은 2026-08-11 제거 — ${customSpecData} 플레이스홀더가 실제
+        // prompt-base.md/role 파일 어디에도 없어 항상 no-op이었다(custom_spec.txt 자체도 삭제).
         String finalSystemPrompt = baseSystemPrompt
                 .replace("${fileName}", fileName)
-                .replace("${extension}", extension)
-                .replace("${customSpecData}", customSpecData);
+                .replace("${extension}", extension);
 
         String userContent = "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
                 "\n\n⚠️ 절대 중요: 다음 JSON 배열 형식으로만 응답하세요. 마크다운(```), 설명, 쉼표 오류 금지:\n" +

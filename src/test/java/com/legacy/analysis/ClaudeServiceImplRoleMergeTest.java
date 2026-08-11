@@ -44,7 +44,7 @@ class ClaudeServiceImplRoleMergeTest {
     setField(service, "llmLocalModel", "qwen2.5-coder:7b");
     setField(service, "apiModel", "claude-sonnet-5");
     setField(service, "apiKey", "sk-real-key-not-mock");
-    setField(service, "systemPromptFilename", "prompt-base.md");
+    setField(service, "systemPromptFilename", "prompts/prompt-base.md");
     return service;
   }
 

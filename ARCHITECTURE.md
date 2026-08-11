@@ -319,9 +319,10 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
         │
         ├─ collectFileList(): isSupportedFile()로 확장자 필터링 + selectedRelativePaths와 교집합
         ├─ AnalysisHistory 생성·저장 (status=IN_PROGRESS)
-        ├─ generateSessionClaudeMd(): base(prompt-base.md, 공통 규칙) + 이번 세션 실제 스캔된
-        │     확장자에 매칭되는 role 파일(role-*.md, 언어별 예시)을 동적 병합 + 사용자 추가
-        │     요구사항을 AI로 결합해 이 세션 전용 CLAUDE.md 생성 (파일별 분석 시스템 프롬프트로 등록)
+        ├─ generateSessionClaudeMd(): base(resources/prompts/prompt-base.md, 공통 규칙) + 이번
+        │     세션 실제 스캔된 확장자에 매칭되는 role 파일(resources/prompts/roles/role-*.md,
+        │     언어별 예시)을 동적 병합 + 사용자 추가 요구사항을 AI로 결합해 이 세션 전용
+        │     CLAUDE.md 생성 (파일별 분석 시스템 프롬프트로 등록)
         ├─ loadTrackerIntoSession(): 이전에 완료 처리된 파일 목록을 추적 파일에서 로드(재분석 스킵용)
         ├─ 스레드풀(기본 max(8, CPU코어*2))로 파일별 병렬 처리 → 6-2 참고
         │     각 파일 처리 전: shouldStop() 체크 → 취소/일시정지면 그 파일은 건드리지 않고 즉시 반환

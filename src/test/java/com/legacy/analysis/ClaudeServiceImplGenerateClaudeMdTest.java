@@ -45,8 +45,8 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     setField(service, "apiModel", "claude-sonnet-5");
     setField(service, "apiKey", "sk-real-key-not-mock");
     // @Value 필드는 Spring 컨테이너 밖에서 new로 생성하면 채워지지 않으므로
-    // application.properties의 실제 기본값(base/role 분리 이후 prompt-base.md)을 리플렉션으로 직접 설정한다.
-    setField(service, "systemPromptFilename", "prompt-base.md");
+    // application.properties의 실제 기본값(base/role 분리 이후 prompts/prompt-base.md)을 리플렉션으로 직접 설정한다.
+    setField(service, "systemPromptFilename", "prompts/prompt-base.md");
     return service;
   }
 

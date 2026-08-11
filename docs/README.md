@@ -54,8 +54,11 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 │   └── statistics/     ← 시스템/사용자 통계
 ├── src/main/resources/
 │   ├── application*.properties        ← 공통/H2/PostgreSQL 프로파일 설정
-│   ├── prompt-base.md, role-*.md(8개) ← LLM 분석 프롬프트: base(공통 규칙) + 확장자별 role 동적 병합
-│   ├── custom_spec.txt, CLAUDE.md     ← 프로젝트별 세부 지침 스펙
+│   ├── prompts/                       ← LLM 분석 프롬프트(2026-08-11, resources 최상위 정리)
+│   │   ├── prompt-base.md             ← base(공통 규칙) — {{ROLE_CONTENT}} 위치에 role 병합
+│   │   ├── prompt.md                  ← 레거시 원본(미사용, base/role 분리 전 참고용 보존)
+│   │   └── roles/role-*.md(10개)      ← 확장자별 예시(java/python/js/vue/xml/nexacro/properties/yaml/gradle/css)
+│   ├── CLAUDE.md                      ← 세션 CLAUDE.md 폴백용 예시 문서
 │   ├── static/{css,js}                ← 대시보드 정적 리소스
 │   └── templates/                     ← Thymeleaf 뷰 (admin, auth, fragments 등)
 ├── src/test/            ← 테스트 코드

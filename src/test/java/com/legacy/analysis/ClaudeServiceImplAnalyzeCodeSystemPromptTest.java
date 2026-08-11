@@ -38,8 +38,7 @@ class ClaudeServiceImplAnalyzeCodeSystemPromptTest {
     setField(service, "llmLocalModel", "qwen2.5-coder:7b");
     setField(service, "apiModel", "claude-sonnet-5");
     setField(service, "apiKey", "sk-real-key-not-mock");
-    setField(service, "systemPromptFilename", "prompt-base.md");
-    setField(service, "customSpecFilename", "custom_spec.txt");
+    setField(service, "systemPromptFilename", "prompts/prompt-base.md");
     return service;
   }
 

@@ -103,3 +103,13 @@ analyzer-plan `docs/chat/etc/2026-07-29-prompt-md-design-ollama-risk-addendum.md
 - **작업 중 발견한 버그를 함께 수정**: CSS는 Properties/YAML과 반대 방향의 문제였음 — `normalizeComment()`가 마커 없는 텍스트나 `//` 스타일 응답을 만나면 항상 `//`를 강제하는데, `//`는 표준 CSS에서 유효한 주석이 아니다. `isCssFamily(extension)`를 신설해 이 두 fallback 경로에서 CSS만 `/* ... */` 블록으로 변환하도록 수정(`toCssBlockComment()`). 이 과정에서 기존 "HTML/XML 본문 // 주석 처리" 분기가 CSS보다 먼저 매칭되어 첫 구현이 무력화되는 순서 버그를 발견해 정정(회귀 테스트로 잡음) — 최종적으로 그 분기 안에 CSS 케이스를 끼워 넣는 방식으로 수정.
 - `ROLE_FILE_BY_EXTENSION`에 `.gradle`→`role-gradle.md`, `.css`→`role-css.md` 매핑 추가. 기존 "미매칭 확장자" 검증 테스트들은 `.gradle`/`.css`가 더 이상 미매칭이 아니므로 `.json`/`.txt`/`.sql`(여전히 미매칭)로 갱신.
 - 남은 미신설 항목: `.json`(설계 방식이 달라 이번 범위에서 완전 제외, 3.4절 참고), 설계안 3.4절 "미신설" 행의 `.sql`/`.sh`·`.bat`/`dockerfile`류/`.txt`(저장소 내 실제 파일 0개, 필요 시 후속 추가)는 그대로 미신설 상태로 남김.
+
+## 후속 반영 (2026-08-11, 같은 날 이어짐) — resources 디렉토리 정리 + custom_spec.txt 제거
+
+**배경**: role 파일이 10개까지 늘어나면서 `src/main/resources/` 최상위가 `application*.properties`/`custom_spec.txt`/`CLAUDE.md`/`prompt.md`/`prompt-base.md`/`role-*.md`(10개) 등으로 지저분해졌다는 지적(사용자).
+
+- **디렉토리 재구성**: `prompt-base.md`/`prompt.md`(레거시 원본, 미사용)를 `src/main/resources/prompts/`로, `role-*.md` 10개를 `src/main/resources/prompts/roles/`로 이동(`git mv`로 히스토리 보존). `ClaudeServiceImpl.ROLE_FILE_BY_EXTENSION` 맵 값과 `app.analysis.system-prompt-filename` 설정값을 새 경로(`prompts/roles/role-*.md`, `prompts/prompt-base.md`)로 갱신 — 클래스패스 리소스 로드라 OS 경로 구분자와 무관, `getResourceAsStream()`은 항상 `/` 사용.
+- `{{ROLE_CONTENT}}` 마커는 파일 내용 안의 문자열이라 경로 이동과 무관하게 그대로 동작함을 확인(사용자 질의에 대한 답).
+- **`custom_spec.txt` 완전 제거**: 사용자가 파일 자체가 불필요하다고 지적 → 조사 결과 이 파일 내용이 들어갈 `${customSpecData}` 플레이스홀더가 실제 `prompt-base.md`/role 파일 어디에도 없어 **애초에 죽은 기능**이었음을 확인(파일 존재 여부와 무관하게 프롬프트에 전혀 반영된 적 없음). 파일뿐 아니라 관련 코드(`loadCustomSpec()` 메서드, `customSpecFilename` 필드/`@Value`, `analyzeCodeWithClaude`의 `.replace("${customSpecData}", ...)` 호출, `application.properties`의 `app.analysis.custom-spec-filename` 설정)까지 전부 제거 — `PromptResolver.java` 제거(Phase 4)와 같은 기준(죽은 코드는 남겨둘 이유가 없음).
+- 테스트 갱신: `systemPromptFilename`/`customSpecFilename` 리플렉션 설정값을 쓰던 4개 테스트 파일을 새 경로/제거에 맞게 수정. `./gradlew clean test` 전체 재실행, 회귀 없이 BUILD SUCCESSFUL 확인.
+- `docs/README.md`/`ARCHITECTURE.md`의 리소스 구조 설명도 새 경로(`prompts/`, `prompts/roles/`)로 갱신, `docs/README.md`의 role 파일 개수 오기(8개 → 실제 10개)도 함께 정정.
