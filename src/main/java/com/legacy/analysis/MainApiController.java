@@ -924,7 +924,7 @@ public class MainApiController {
       // CLAUDE.md 생성: prompt.md 표준 템플릿 + 사용자 추가 요구사항(있는 경우)을 AI로 결합하여
       // 이번 분석 세션 전용 시스템 프롬프트를 만들고, 파일별 분석에 사용하도록 등록한다.
       session.addRecentLog("[시스템] 🧭 분석 지침(CLAUDE.md) 생성 중...");
-      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements());
+      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList));
       claudeService.setSessionSystemPrompt(sourceRootPath.toString(), generatedClaudeMd);
       if (history != null) {
         history.setClaudeMdContent(generatedClaudeMd);
@@ -1202,7 +1202,7 @@ public class MainApiController {
       // 저장된 내용이 없으면(구버전 세션 등) 새로 생성한다.
       String claudeMdContent = (history != null) ? history.getClaudeMdContent() : null;
       if (claudeMdContent == null || claudeMdContent.isBlank()) {
-        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements());
+        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList));
         if (history != null) {
           history.setClaudeMdContent(claudeMdContent);
           analysisHistoryRepository.save(history);
@@ -1689,6 +1689,26 @@ public class MainApiController {
     try (Stream<Path> stream = Files.walk(sourceRootPath)) {
       return stream.filter(Files::isRegularFile).filter(this::isSupportedFile).toList();
     }
+  }
+
+  /**
+   * 이번 세션에서 실제로 분석할 파일들의 확장자 집합을 추출한다(소문자, "." 포함, 예: ".java").
+   * generateSessionClaudeMd에 넘겨 base+role 병합 시 실제 스캔된 확장자에 매칭되는 role만 붙이도록
+   * 하기 위한 용도 — 이미 갖고 있는 fileList에서 추출하므로 디스크 재스캔이 없다(2026-07-29 설계안
+   * 4.2절). appendGeneralStructure의 확장자 통계 로직은 디스크 재스캔 기반 UI 리포트 텍스트 생성용이라
+   * 용도가 달라 재사용하지 않는다.
+   */
+  private Set<String> detectExtensions(List<Path> fileList) {
+    if (fileList == null || fileList.isEmpty()) return Set.of();
+    Set<String> extensions = new LinkedHashSet<>();
+    for (Path path : fileList) {
+      String name = path.getFileName().toString();
+      int dotIdx = name.lastIndexOf('.');
+      if (dotIdx > 0) {
+        extensions.add(name.substring(dotIdx).toLowerCase());
+      }
+    }
+    return extensions;
   }
 
   // 추적 파일 경로 (출력 루트에 위치)

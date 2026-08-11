@@ -5,6 +5,7 @@ import com.legacy.analysis.llm.LlmResult;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -44,8 +45,8 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     setField(service, "apiModel", "claude-sonnet-5");
     setField(service, "apiKey", "sk-real-key-not-mock");
     // @Value 필드는 Spring 컨테이너 밖에서 new로 생성하면 채워지지 않으므로
-    // application.properties의 실제 기본값(prompt.md)을 리플렉션으로 직접 설정한다.
-    setField(service, "systemPromptFilename", "prompt.md");
+    // application.properties의 실제 기본값(base/role 분리 이후 prompt-base.md)을 리플렉션으로 직접 설정한다.
+    setField(service, "systemPromptFilename", "prompt-base.md");
     return service;
   }
 
@@ -60,10 +61,10 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd(null);
+    String result = service.generateSessionClaudeMd(null, Set.of());
 
     assertFalse(llmClient.called, "추가 요구사항이 없으면 LLM 호출 자체가 생략돼야 함");
-    assertTrue(result.contains("레거시 엔터프라이즈 시스템"), "표준 템플릿(prompt.md) 내용이 그대로 반환돼야 함");
+    assertTrue(result.contains("레거시 엔터프라이즈 시스템"), "표준 템플릿(prompt-base.md) 내용이 그대로 반환돼야 함");
   }
 
   @Test
@@ -71,7 +72,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    service.generateSessionClaudeMd("   ");
+    service.generateSessionClaudeMd("   ", Set.of());
 
     assertFalse(llmClient.called);
   }
@@ -83,7 +84,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient(fakeJson);
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘");
+    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of());
 
     assertTrue(llmClient.called, "추가 요구사항이 있으면 LLM을 호출해야 함");
     assertFalse(result.startsWith("["), "JSON 배열 응답은 폐기되고 표준 템플릿으로 대체돼야 함");
@@ -95,19 +96,42 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient("{\"error\": \"이해하지 못함\"}");
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("추가 요구사항");
+    String result = service.generateSessionClaudeMd("추가 요구사항", Set.of());
 
     assertTrue(result.contains("레거시 엔터프라이즈 시스템"));
   }
 
   @Test
   void 추가_요구사항이_있고_LLM이_정상적인_마크다운_문서를_반환하면_그대로_사용한다() throws Exception {
-    String validMd = "# 커스텀 CLAUDE.md\n\n## 분석 철학\n- 보안 취약점을 최우선으로 본다\n";
+    // 2026-08-11 looksLikeClaudeMd 검증 강화(과반수 이상 핵심 섹션 키워드 필요)에 맞춰,
+    // 실제 LLM이 "구조를 최대한 유지"하라는 지시를 따랐을 때처럼 여러 핵심 섹션을 포함한 픽스처로 보강.
+    String validMd = "# 커스텀 CLAUDE.md\n\n" +
+        "## 분석 철학\n- 보안 취약점을 최우선으로 본다\n\n" +
+        "## 주석 우선순위\n1. 보안 취약점\n2. 비즈니스 규칙\n\n" +
+        "## 절대 금지: 아래 예시 문장을 그대로 베끼는 것\n- 예시를 그대로 베끼지 않는다\n\n" +
+        "## 레거시 코드 특이사항 처리\n- 하드코딩된 보안 관련 상수는 반드시 설명한다\n\n" +
+        "## 주석 삽입 규칙\n- 최소 5개, 최대 20개\n\n" +
+        "## 응답 포맷 (절대 준수)\n- JSON 배열만 반환\n";
     RecordingLlmClient llmClient = new RecordingLlmClient(validMd);
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("보안 취약점 우선 설명");
+    String result = service.generateSessionClaudeMd("보안 취약점 우선 설명", Set.of());
 
     assertEquals(validMd, result);
+  }
+
+  @Test
+  void 마크다운_형식이어도_핵심_섹션_제목이_대부분_사라지면_표준_템플릿으로_대체한다() throws Exception {
+    // Phase 3.5(a) 신규 회귀 테스트: 기존 검증(JSON으로 시작하는지)만으로는 못 걸렀던 실패
+    // 패턴 — 마크다운 형식은 갖췄지만 지침 내용이 통째로 다른 주제로 대체된 저품질 응답.
+    String hollowMd = "# 오늘의 날씨\n\n스타벅스 아메리카노가 맛있다는 이야기를 해보겠습니다.\n";
+    RecordingLlmClient llmClient = new RecordingLlmClient(hollowMd);
+    ClaudeServiceImpl service = newService(llmClient, "local");
+
+    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of());
+
+    assertTrue(llmClient.called);
+    assertNotEquals(hollowMd, result, "핵심 섹션 제목이 없는 저품질 응답은 폐기되어야 함");
+    assertTrue(result.contains("레거시 엔터프라이즈 시스템"), "표준 템플릿으로 안전하게 대체돼야 함");
   }
 }
