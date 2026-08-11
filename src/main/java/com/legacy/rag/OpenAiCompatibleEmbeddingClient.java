@@ -92,4 +92,53 @@ public class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
                 .map(v -> v instanceof Number number ? number.doubleValue() : 0.0)
                 .toList();
     }
+
+    /**
+     * Ollama의 배치 임베딩 엔드포인트(`POST /api/embed`, 복수형 — {@link #embed}가 쓰는
+     * `/api/embeddings`와는 별개 엔드포인트)를 사용한다. `input`에 텍스트 배열을 한 번에
+     * 보내고 `embeddings`(배열의 배열)로 응답받아, 텍스트 수만큼 왕복하던 것을 호출 1번으로
+     * 줄인다 — {@code ProjectStructureRagService.index()}가 파일이 많은 프로젝트에서 이
+     * 메서드를 쓰는 이유.
+     */
+    @Override
+    public List<List<Double>> embedBatch(List<String> texts) {
+        if (texts.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> requestBody = Map.of("model", model, "input", texts);
+
+        Map<?, ?> response = webClient.post()
+                .uri("/api/embed")
+                .bodyValue(requestBody)
+                .retrieve()
+                .onStatus(
+                        status -> !status.is2xxSuccessful(),
+                        clientResponse -> clientResponse.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .flatMap(body -> {
+                                    int statusCode = clientResponse.statusCode().value();
+                                    String msg = String.format("배치 임베딩 API %d 오류: %s", statusCode,
+                                            body.isEmpty() ? "응답 없음" : body.substring(0, Math.min(300, body.length())));
+                                    log.error("[배치 임베딩 API 응답 오류] {}", msg);
+                                    return Mono.error(new WebClientResponseException(
+                                            statusCode, msg,
+                                            clientResponse.headers().asHttpHeaders(), null, null));
+                                }))
+                .bodyToMono(Map.class)
+                .block();
+
+        if (response == null || !response.containsKey("embeddings")) {
+            throw new RuntimeException("배치 임베딩 응답 바디에 embeddings 필드가 없음");
+        }
+        List<?> raw = (List<?>) response.get("embeddings");
+        if (raw == null || raw.size() != texts.size()) {
+            throw new RuntimeException("배치 임베딩 응답 개수(" + (raw == null ? 0 : raw.size())
+                    + ")가 요청 개수(" + texts.size() + ")와 다름");
+        }
+        return raw.stream()
+                .map(row -> ((List<?>) row).stream()
+                        .map(v -> v instanceof Number number ? number.doubleValue() : 0.0)
+                        .toList())
+                .toList();
+    }
 }

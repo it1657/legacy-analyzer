@@ -1,4 +1,4 @@
-# 진행 현황 핸드오프 (2026-07-23 기준, 19차 갱신)
+# 진행 현황 핸드오프 (2026-08-11 기준, 25차 갱신)
 
 이 문서는 `legacy-analyzer`를 "Claude API ↔ 로컬/사내 LLM 설정만으로 전환" 가능하게 만드는 작업의 현재까지 진행 상황을 정리한다. 새 세션/다른 담당자가 이어받을 때 이 문서만 읽고 바로 이어갈 수 있도록 작성한다.
 
@@ -266,6 +266,55 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 - **주의**: 이건 속도 개선이 아니라 실패율 감소가 목적 — 완전 직렬화라 100파일 × 120초 ≈ 3.3시간이 걸릴 수 있다는 점은 그대로 남는 별도 이슈(GPU 오버레이/14b 비교 등 다른 트랙에서 다룰 문제).
 
 **남은 것**: 사용자가 재빌드 후 같은 100파일로 재테스트해 성공률이 실제로 개선됐는지 확인.
+
+## RAG(Chroma) 실제 서버 대상 결함 조사 + cleanup 버그 수정 (22차, 2026-07-23)
+
+사용자가 scenario_1 RAG 실동작 검증을 요청 → `./gradlew clean test`(68건, RAG 관련 6개 클래스 포함)는 전부 GREEN이었으나 전부 MockWebServer 목킹이라, 실행 중인 실제 `legacy-analyzer-chroma`/`legacy-analyzer-ollama` 컨테이너에 코드와 동일한 HTTP 요청을 직접 재현해 검증했다. 사용자가 "테스트 전문가처럼 결함을 세밀히 적어달라, 테스트 코드는 수정하지 말라"고 별도 지시해 1차로는 조사만 진행하고 결함만 상세 보고했다.
+
+- **결함 1(심각) — `ChromaClient.deleteCollection()`이 실제 서버에서 항상 조용히 실패**: `chromadb/chroma:1.5.9`의 v2 API는 생성/조회/add/query는 id로 되지만 **DELETE는 이름(name)만 인식**한다(실제 컨테이너에 직접 재현: id로 DELETE → 404 `NotFoundError`, 이름으로 DELETE → 200). 그런데 `ChromaClient.deleteCollection(collectionId)`와 호출부 `ProjectStructureRagService.cleanup()`은 항상 id를 넘겨서, RAG가 성공적으로 압축을 마칠 때마다(정확히 "성공 경로"에서) 컬렉션 정리가 매번 실패 — `cleanup()`의 `catch(Exception e){log.warn(...)}`가 예외를 삼켜 앱은 안 죽지만 Chroma에 컬렉션이 세션마다 하나씩 영구적으로 쌓이는 리소스 누수. `ChromaClientTest`의 관련 테스트가 "id로 DELETE하면 200"이라는 구현체의 가정을 그대로 목킹해둬서 이 결함을 못 잡았음(목킹 테스트의 구조적 한계).
+- **결함 2(중간) — `compactPackageGroups()`의 지역변수 섀도잉**: `index()` 내부에서 컬렉션을 만들고 `sessionCollections`에 등록한 직후 파일마다 임베딩 호출 루프를 도는데, 이 루프 도중 하나라도 실패하면 `index()`가 예외를 던지며 리턴을 못 해 바깥 `compactPackageGroups()`의 `collectionId`(별개 지역변수)가 끝까지 null로 남고 `finally`의 leak 방지 로직(`if (collectionId != null) cleanup(...)`)이 스킵됨 — 컬렉션은 이미 생성됐는데 정리가 안 되는 별도 누수 경로. 클래스 상단 주석이 "지역 try-finally만으로 leak을 방지한다"고 주장하는 부분이 이 케이스에서 깨짐. 테스트 스위트도 "index() 성공 후 쿼리 단계 실패"만 다루고 "index() 도중 실패"는 커버 안 함. 처음엔 사용자 지시로 결함 식별까지만 진행했다가, **바로 다음 요청으로 수정까지 완료**(아래 참고).
+- **부가 확인 — 기본 임계값으로는 RAG가 실사용 규모에서 미발동**: `rag.trigger-threshold-chars` 기본값 20000자 기준, 파일당 근사 ~45자로 계산하면 440개 이상 Java 파일이 필요 — 21차의 100파일 실측 프로젝트로는 예상 크기가 약 4,500자라 RAG가 애초에 개입하지 않는다. 실제로 조사 시점 앱 로그 전수 확인 결과 `[RAG 압축 완료]`/`[RAG 압축 실패]` 로그 0건, Chroma 컬렉션도 0개 — 이 환경에서 RAG는 실제 분석 파이프라인을 통해 지금까지 한 번도 발동된 적이 없었다는 것도 확인. 즉 위 두 결함 모두 아직 실운영에서 트리거된 적 없는 잠재적 버그.
+- **결함 1 수정 완료**(사용자가 명시적으로 수정 요청): `ChromaClient.deleteCollection(String name)`으로 파라미터 의미를 id→이름으로 변경, DELETE 경로에 이름을 그대로 사용, 캐시 무효화도 `collectionIdCache.remove(name)`으로 단순화(기존엔 `values().removeIf(id::equals)`로 값 스캔). 호출부 `ProjectStructureRagService.cleanup()`도 `chromaClient.deleteCollection(sessionId)`로 변경(`index()`가 `createOrGetCollection(sessionId)`로 만들었으므로 이름=sessionId). 실제 컨테이너로 재검증(이름으로 DELETE → 200, 목록에서 사라짐 확인).
+- 이 수정으로 `ProjectStructureRagServiceTest`의 기존 테스트 하나(`임계값을_초과하면_패키지당_topK개로_압축하고_컬렉션을_정리한다`, 108줄)가 깨짐 — 정확히 "id(`col-1`)로 삭제 요청이 감"이라는 옛(버그) 동작을 검증하던 어서션이었기 때문(수정이 제대로 됐다는 방증). 사용자 승인 받아 어서션을 `session-1` 기준으로 갱신, `./gradlew clean test` 전체 68건 재실행해 BUILD SUCCESSFUL 재확인.
+- **결함 2 수정 완료**(사용자가 이어서 수정 요청): `compactPackageGroups()`의 `finally` 블록에서 `if (collectionId != null) cleanup(sessionId);` 조건을 제거하고 무조건 `cleanup(sessionId)`를 호출하도록 변경(`ProjectStructureRagService.java:97-104`). `index()`가 컬렉션 생성 직후 `sessionCollections`에 이미 등록해두므로, 로컬 `collectionId`가 null인지와 무관하게 `cleanup(sessionId)`를 호출하면 실제 등록 여부 기준으로 정리된다 — `cleanup()`은 `sessionCollections`에 항목이 없으면 즉시 반환하는 no-op이라 컬렉션이 아예 안 만들어진 경우에 불필요하게 호출해도 안전. `./gradlew clean test` 전체 68건 재실행, 기존 테스트 변경 없이 BUILD SUCCESSFUL 재확인(회귀 없음) — 이번엔 테스트 수정 자체가 불필요했음. "index() 도중 실패" 경로를 직접 겨냥한 신규 테스트는 추가하지 않음(요청 범위 밖).
+- `docs/advancement/4.tested/scenario_1_test.md`에 결함 조사 전체 내용 + 수정 2건 완료 내역 + 검증 상태 표 갱신.
+
+**남은 것**: 결함 2건(id/name 불일치, 지역변수 섀도잉) 모두 수정 완료. 다음 단계는 임계값을 임시로 낮추거나 훨씬 큰 프로젝트로 RAG 실제 발동 경로 자체를 관찰하는 실측 — 아직 실제 분석 파이프라인을 통해 RAG가 발동된 사례가 한 번도 없어, 수정된 두 cleanup 경로가 실제 운영에서도 의도대로 동작하는지는 별도로 확인 필요.
+
+## RAG 임베딩 속도 개선 — 배치화 + 불필요 패키지 인덱싱 스킵 (23차, 2026-07-23)
+
+22차의 cleanup 버그 수정 이후 사용자와 함께 RAG 경로의 속도 관점 개선점을 점검 → 실운영에서 아직 발동된 적은 없지만(임계값 미달로 미발동, 22차 확인) 발동되면 확실히 느릴 코드 구조상 병목 두 곳을 찾아 바로 수정했다.
+
+- **병목 1**: `ProjectStructureRagService.index()`가 파일마다 `embeddingClient.embed(doc)`를 for 루프에서 순차 호출 — Ollama `/api/embeddings`(단수, 텍스트 1개짜리 구버전 엔드포인트)라 파일 수만큼 네트워크 왕복이 그대로 쌓임. RAG가 트리거되는 건 정의상 대형 프로젝트(440개 이상 Java 파일)라 이 경로가 실제로 발동되면 병목이 될 게 거의 확실했음.
+- **병목 2**: `index()`가 `packageGroups` 전체를 무조건 색인했는데, 실제 쿼리 대상은 `files.size() > topKPerPackage`인 패키지뿐 — topK 이하라 원본 그대로 반환될 패키지 파일까지 임베딩하는 건 순수 낭비.
+- **수정**: `EmbeddingClient`에 `embedBatch(List<String>)` 신설, `OpenAiCompatibleEmbeddingClient`는 Ollama 배치 엔드포인트(`POST /api/embed`, `input` 배열 → `embeddings` 배열의 배열)로 구현 — 파일 수만큼이던 왕복을 인덱싱 대상 패키지당 1회로 축소. `ProjectStructureRagService.compactPackageGroups()`는 `index()` 호출 전에 `files.size() > topKPerPackage`인 패키지만 걸러 넘기도록 변경, 걸러낸 결과가 비면(모든 패키지가 이미 topK 이하) Chroma 색인 자체를 생략하고 원본 반환.
+- **테스트**: `OpenAiCompatibleEmbeddingClientTest`에 `embedBatch` 검증 6건 추가, `ProjectStructureRagServiceTest`의 기존 압축/실패 테스트 2건을 새 호출 패턴(배치 1회+쿼리용 단건 1회)에 맞게 mock·기대 호출 횟수 갱신, "모든 패키지가 topK 이하면 색인 생략" 신규 테스트 1건 추가.
+- **미검증**: 이 세션 sandbox는 JDK 11뿐이고(프로젝트는 17 요구) `services.gradle.org`/`github.com` 접근도 막혀 gradle wrapper 배포판조차 받지 못해(20~22차와 동일한 제약) `./gradlew test`를 실행하지 못했다 — diff 리뷰로 컴파일 정합성만 수동 확인. **사용자가 로컬에서 `./gradlew clean test` 재실행 확인 필요.**
+- `docs/advancement/4.tested/scenario_1_test.md`에 이번 절 상세 기록 + 검증 상태 표에 신규 행 추가.
+
+**남은 것**: `./gradlew clean test` 재확인, 임계값을 낮춰 RAG를 실제로 발동시킨 뒤 배치화 전/후 소요 시간 실측 비교(현재까지 RAG 미발동 상태라 개선 효과 실측치 자체가 없음).
+
+## analyzer-plan 2회차 지침 반영 — 정량 목표·RAG 정책 확정, scenario_3_confirmed.md 신설 (24차, 2026-07-24)
+
+별도 리드 트랙(`C:\project\analyzer-plan`)이 1회차 결과서(`result/20260724-1/result.md`)를 검토하고 2회차 지침(`order/20260724-2/order.md`)에서 아래 세 가지를 확정했다. 이번 세션은 이 확정 사항을 `legacy-analyzer` 쪽 `docs/advancement/3.confirmed/`에 반영하는 작업을 진행했다(`analyzer-plan` 프로젝트는 직접 구현하지 않고 지침만 내리는 역할이라, 실제 문서 반영은 `legacy-analyzer`에 접근 가능한 이 세션에서 처리).
+
+- **정량 목표(성공 기준) 확정**: 속도는 "Haiku 대비 5배 이내 AND 파일당 평균 30초 이내"를 **둘 다 충족**해야 통과(더 엄격한 쪽 채택). 품질은 1회차 result.md의 제안(주석 위치 오류율 10% 이하 / 할루시네이션 0건 / 패턴 오인식 시 회피 대신 사실 기반 서술)을 그대로 채택. 비용 목표(X·Y 값)는 scenario_3 인프라 확인 결과가 나올 때까지 보류(단 GPU+14b 비교 착수를 막지는 않음). `3.confirmed/scenario_1_confirmed.md`에 "정량 목표(성공 기준) 확정" 절로 반영 — 이 기준이 scenario_1의 남은 작업인 GPU+14b 비교의 판정 기준표가 된다.
+- **RAG "관측 기반 채택" 원칙 재확인**: `plan.md`의 기존 원칙("컨텍스트 초과가 실제로 관측될 때만 RAG 채택")을 그대로 유지하기로 명확히 재확정하고, scenario_1의 2026-07-23 선채택(관측 없이 채택)은 **원칙에 대한 예외로 못박아** scenario_2/3이 이 사례를 근거로 같은 예외를 요구하지 못하게 했다. `3.confirmed/scenario_1_confirmed.md`에 "RAG 채택 원칙 재확인" 절 추가, `1.plan/plan.md`의 RAG 절에도 이 재확인 내용을 인용하는 짧은 인용구 삽입(문서 간 드리프트 방지).
+- **scenario_3 인프라팀 확인 요청 프로세스 확정**: 회신 기한 영업일 기준 5일, 기한 초과 시 인프라팀 리드에게 직접 컨택하는 에스컬레이션 경로 확정. scenario_3 전체 설계는 여전히 미확정 상태(`2.scenario/scenario_3.md`)이므로, **`3.confirmed/scenario_3_confirmed.md`를 신규 생성**하되 범위를 "인프라 확인 프로세스만 부분 확정"으로 명시해 scenario_3 전체가 확정된 것처럼 오인되지 않게 했다. 실제 확인 요청 발송 자체는 `analyzer-plan` 프로젝트 쪽 트랙(`result/20260724-2/result.md`)에서 추적.
+- 이번 세션이 건드린 것은 문서뿐이다(3.confirmed 2개 파일 갱신/신설, plan.md 1줄 추가) — 코드 변경 없음, 회귀 위험 없음.
+
+**남은 것**: `analyzer-plan` 쪽에서 인프라팀 확인 요청을 실제로 발송하고 결과가 오면 `scenario_3_confirmed.md`/`scenario_1_confirmed.md`(비용 목표 보류 항목)를 다시 갱신해야 함. scenario_1의 100파일 재테스트 결과 확정(21~23차부터 미착수 상태 유지)이 여전히 GPU+14b 비교의 선행조건으로 남아 있음.
+
+## 23차 RAG 배치화 변경의 테스트 실행 검증 완료 (25차, 2026-08-11)
+
+**이 세션의 본 작업은 별도 초기화(prompt.md base/role 분리, `docs/advancement/1.plan/2026-07-29-legacy-analyzer-prompt-md-role-split.md` 참고 — `docs/pipeline/` 무관 별도 이니셔티브)였으나**, 작업 도중 이 저장소 working tree에 23차 세션이 남겨둔 uncommitted RAG 변경(배치 임베딩 `embedBatch()`, `compactPackageGroups()` 사전 필터링, cleanup 버그 수정 2건)이 커밋되지 않은 채 남아있는 것을 발견해, 이번 세션 환경(JDK 17 설치, gradle wrapper 정상 동작)에서 함께 검증했다.
+
+- 23차 세션은 sandbox가 JDK 11뿐이고 `services.gradle.org`/`github.com` 접근도 막혀 있어 `./gradlew test` 자체를 실행하지 못하고 diff 리뷰(컴파일 정합성 수동 확인)로만 검증을 마쳤었다(20~22차와 동일 제약, `4.tested/scenario_1_test.md` "미검증" 항목 참고).
+- 이번 세션은 `./gradlew clean test`로 전체 스위트(26개 테스트 클래스, **200건**)를 실제 실행 — **실패 0건, BUILD SUCCESSFUL**. `OpenAiCompatibleEmbeddingClientTest`(`embedBatch` 신규 6건 포함 11건)/`ProjectStructureRagServiceTest`(5건, "모든 패키지가 topK 이하면 색인 생략" 신규 케이스 포함)/`ChromaClientTest`(`deleteCollection` name 기반 수정 포함 9건) 전부 GREEN 확인.
+- 코드 변경은 없음(순수 실행 검증). `4.tested/scenario_1_test.md`의 "미검증"/"실행 검증 미착수" 표기를 25차 확인 완료로 갱신(검증 상태 표 2개 행, "RAG 임베딩 속도 개선" 절의 미검증 문구, "다음에 이 문서를 갱신할 시점" 항목).
+- 이 uncommitted RAG 변경 자체(코드+테스트 10개 파일)는 커밋하지 않고 working tree에 그대로 남겨뒀다 — 원 작업자(23차 세션 담당)가 이어서 커밋할 수 있도록, 이 세션이 임의로 커밋하지 않음.
+
+**남은 것**: 실행 검증(유닛 테스트 GREEN)은 끝났지만, RAG가 실운영에서 아직 한 번도 발동된 적이 없어 배치화 전/후 소요 시간 실측 비교치는 여전히 없음(임계값을 낮춘 실측이 여전히 미착수, 22~23차부터 이어지는 과제).
 
 ### 보류 중인 잡다한 항목 (급하지 않음)
 

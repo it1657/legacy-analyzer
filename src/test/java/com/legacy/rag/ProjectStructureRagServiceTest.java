@@ -47,13 +47,26 @@ class ProjectStructureRagServiceTest {
         return new ProjectStructureRagService(chromaClient, embeddingClient, triggerThresholdChars, topKPerPackage);
     }
 
-    private void enqueueEmbedding(int times) {
-        for (int i = 0; i < times; i++) {
-            embeddingServer.enqueue(new MockResponse()
-                    .setResponseCode(200)
-                    .addHeader("Content-Type", "application/json")
-                    .setBody("{\"embedding\": [0.1, 0.2]}"));
+    /** index() 단계에서 쓰는 배치 응답(1회 HTTP 호출로 count개 임베딩을 한 번에 반환). */
+    private void enqueueBatchEmbedding(int count) {
+        StringBuilder body = new StringBuilder("{\"embeddings\": [");
+        for (int i = 0; i < count; i++) {
+            if (i > 0) body.append(", ");
+            body.append("[0.1, 0.2]");
         }
+        body.append("]}");
+        embeddingServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody(body.toString()));
+    }
+
+    /** queryRepresentativeFiles()의 쿼리 텍스트 임베딩용(항상 embed() 단건 호출). */
+    private void enqueueSingleEmbedding() {
+        embeddingServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .addHeader("Content-Type", "application/json")
+                .setBody("{\"embedding\": [0.1, 0.2]}"));
     }
 
     @Test
@@ -76,10 +89,12 @@ class ProjectStructureRagServiceTest {
 
         Map<String, List<String>> packageGroups = new LinkedHashMap<>();
         packageGroups.put("pkg.a", List.of("A1.java", "A2.java", "A3.java", "A4.java")); // 4개 > topK(2) → 쿼리 발생
-        packageGroups.put("pkg.b", List.of("B1.java")); // 1개 <= topK(2) → 원본 그대로, 쿼리 없음
+        packageGroups.put("pkg.b", List.of("B1.java")); // 1개 <= topK(2) → 원본 그대로, 인덱싱 대상에서도 제외
 
-        // index() 단계: pkg.a 4개 + pkg.b 1개 = 5개 문서 임베딩, 이후 pkg.a 압축 쿼리용 임베딩 1개 = 총 6개
-        enqueueEmbedding(6);
+        // index() 단계: pkg.b는 topK 이하라 인덱싱 대상에서 미리 제외되므로 pkg.a 4개 문서만
+        // 배치 1회 호출로 임베딩, 이후 pkg.a 압축 쿼리용 임베딩 1개(단건 호출) = 총 임베딩 서버 호출 2회
+        enqueueBatchEmbedding(4);
+        enqueueSingleEmbedding();
 
         chromaServer.enqueue(new MockResponse() // createOrGetCollection
                 .setResponseCode(200).addHeader("Content-Type", "application/json")
@@ -98,6 +113,8 @@ class ProjectStructureRagServiceTest {
         assertEquals(List.of("A2.java", "A4.java"), result.get("pkg.a"), "쿼리 결과에서 파일명만 추출해야 함");
         assertEquals(List.of("B1.java"), result.get("pkg.b"), "topK 이하 패키지는 원본 그대로여야 함");
         assertEquals(4, chromaServer.getRequestCount(), "create+add+query+delete = 4회 호출");
+        assertEquals(2, embeddingServer.getRequestCount(),
+                "배치 인덱싱 1회 + 쿼리용 1회 = 2회(배치화 전엔 파일당 1회씩 총 5회였음)");
 
         // 호출 순서 검증: create → add → query → delete
         assertTrue(chromaServer.takeRequest().getPath().endsWith("/collections"));
@@ -105,7 +122,9 @@ class ProjectStructureRagServiceTest {
         assertTrue(chromaServer.takeRequest().getPath().endsWith("/collections/col-1/query"));
         var deleteRequest = chromaServer.takeRequest();
         assertEquals("DELETE", deleteRequest.getMethod());
-        assertTrue(deleteRequest.getPath().endsWith("/collections/col-1"));
+        // ChromaClient.deleteCollection()은 id가 아니라 이름(=sessionId)을 받는다(실제 서버 확인,
+        // 4.tested/scenario_1_test.md 참고) — collectionId(col-1)가 아니라 sessionId(session-1)로 삭제 요청이 감
+        assertTrue(deleteRequest.getPath().endsWith("/collections/session-1"));
     }
 
     @Test
@@ -115,7 +134,9 @@ class ProjectStructureRagServiceTest {
         Map<String, List<String>> packageGroups = new LinkedHashMap<>();
         packageGroups.put("pkg.a", List.of("A1.java", "A2.java", "A3.java"));
 
-        enqueueEmbedding(4); // index() 3개 + 쿼리용 1개(쿼리 자체는 실패하지만 임베딩 호출은 그 전에 일어남)
+        // index() 단계: pkg.a 3개 문서 배치 1회, 이후 쿼리용 단건 1회(쿼리 자체는 실패하지만 임베딩 호출은 그 전에 일어남)
+        enqueueBatchEmbedding(3);
+        enqueueSingleEmbedding();
 
         chromaServer.enqueue(new MockResponse() // createOrGetCollection
                 .setResponseCode(200).addHeader("Content-Type", "application/json")
@@ -132,6 +153,21 @@ class ProjectStructureRagServiceTest {
 
         assertEquals(packageGroups, result, "실패 시 원본 그대로 반환해야 함(안전 fallback)");
         assertEquals(4, chromaServer.getRequestCount(), "실패해도 finally에서 delete까지 호출돼야 함");
+    }
+
+    @Test
+    void 모든_패키지가_topK_이하면_전체_글자수가_임계값을_넘어도_색인을_생략한다() {
+        ProjectStructureRagService service = newService(1, 10); // 임계값 1자 → 글자수 조건은 항상 충족
+
+        Map<String, List<String>> packageGroups = new LinkedHashMap<>();
+        packageGroups.put("pkg.a", List.of("A1.java", "A2.java")); // 2개 <= topK(10)
+        packageGroups.put("pkg.b", List.of("B1.java")); // 1개 <= topK(10)
+
+        Map<String, List<String>> result = service.compactPackageGroups("session-1", packageGroups);
+
+        assertSame(packageGroups, result, "압축할 패키지가 하나도 없으면 Chroma 색인 자체를 생략하고 원본을 그대로 반환해야 함");
+        assertEquals(0, embeddingServer.getRequestCount());
+        assertEquals(0, chromaServer.getRequestCount());
     }
 
     @Test

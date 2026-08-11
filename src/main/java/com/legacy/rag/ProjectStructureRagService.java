@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * 대형 Java 프로젝트의 "프로젝트 패키지 구조" 섹션(README 생성용 프롬프트에 들어가는 텍스트 중
@@ -63,6 +64,11 @@ public class ProjectStructureRagService {
      * 임베딩 유사도 상위 {@code topKPerPackage}개 파일만 남긴다. 어떤 단계에서든 실패하면
      * (임베딩 서버 다운, Chroma 응답 이상 등) 로그만 남기고 원본을 그대로 반환한다 — RAG
      * 실패가 README 생성 전체를 막으면 안 된다.
+     *
+     * 인덱싱 대상은 {@code files.size() > topKPerPackage}인 패키지로 미리 걸러낸다 — 어차피
+     * 원본 그대로 반환될 패키지(파일 수가 topK 이하)의 파일까지 임베딩하는 건 낭비이기
+     * 때문(속도 개선, 2026-07-23). 전체 글자수는 임계값을 넘었지만 걸러낸 결과가 비어있으면
+     * (모든 패키지가 이미 topK 이하) 압축할 게 없으므로 Chroma 색인 자체를 생략한다.
      */
     public Map<String, List<String>> compactPackageGroups(String sessionId, Map<String, List<String>> packageGroups) {
         if (packageGroups == null || packageGroups.isEmpty()) {
@@ -74,9 +80,16 @@ public class ProjectStructureRagService {
             return packageGroups;
         }
 
+        Map<String, List<String>> toIndex = packageGroups.entrySet().stream()
+                .filter(entry -> entry.getValue().size() > topKPerPackage)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> a, TreeMap::new));
+        if (toIndex.isEmpty()) {
+            return packageGroups;
+        }
+
         String collectionId = null;
         try {
-            collectionId = index(sessionId, packageGroups);
+            collectionId = index(sessionId, toIndex);
 
             Map<String, List<String>> compacted = new TreeMap<>();
             for (Map.Entry<String, List<String>> entry : packageGroups.entrySet()) {
@@ -95,9 +108,14 @@ public class ProjectStructureRagService {
             log.warn("[RAG 압축 실패, 원본 그대로 사용] sessionId={} {}", sessionId, e.getMessage());
             return packageGroups;
         } finally {
-            if (collectionId != null) {
-                cleanup(sessionId);
-            }
+            // index() 도중(임베딩 호출 등) 예외가 나면 이 메서드의 collectionId 대입이 끝까지
+            // 실행되지 않아 위 로컬 변수가 null로 남는다 — 그런데 index()는 컬렉션을 만들자마자
+            // (파일 순회를 시작하기 전에) sessionCollections에 이미 등록해두므로, 이 collectionId
+            // null 여부와 무관하게 cleanup(sessionId)을 항상 호출해야 실제로 생성된 컬렉션을
+            // 놓치지 않는다. cleanup()은 sessionCollections에 아무 것도 없으면 즉시 반환하는
+            // no-op이라 컬렉션이 아예 안 만들어진 경우(임계값 미달, createOrGetCollection 자체 실패
+            // 등)에 불필요한 호출을 해도 안전하다.
+            cleanup(sessionId);
         }
     }
 
@@ -117,7 +135,6 @@ public class ProjectStructureRagService {
         sessionCollections.put(sessionId, collectionId);
 
         List<String> ids = new ArrayList<>();
-        List<List<Double>> embeddings = new ArrayList<>();
         List<String> documents = new ArrayList<>();
         List<Map<String, Object>> metadatas = new ArrayList<>();
 
@@ -127,13 +144,15 @@ public class ProjectStructureRagService {
             for (String fileName : entry.getValue()) {
                 String doc = pkg + " :: " + fileName;
                 ids.add("doc-" + (idx++));
-                embeddings.add(embeddingClient.embed(doc));
                 documents.add(doc);
                 Map<String, Object> meta = new HashMap<>();
                 meta.put("package", pkg);
                 metadatas.add(meta);
             }
         }
+        // 파일마다 embed()를 순차 호출하면 파일 수만큼 네트워크 왕복이 쌓인다 — embedBatch()로
+        // 한 번에 보내 왕복을 1번으로 줄인다(속도 개선, 2026-07-23).
+        List<List<Double>> embeddings = embeddingClient.embedBatch(documents);
         chromaClient.upsert(collectionId, ids, embeddings, documents, metadatas);
         return collectionId;
     }
@@ -163,7 +182,10 @@ public class ProjectStructureRagService {
         String collectionId = sessionCollections.remove(sessionId);
         if (collectionId == null) return;
         try {
-            chromaClient.deleteCollection(collectionId);
+            // ChromaClient.deleteCollection()은 id가 아니라 이름을 받는다(실제 서버 확인 결과 —
+            // 자세한 경위는 4.tested/scenario_1_test.md 참고). index()가 createOrGetCollection(sessionId)로
+            // 만든 컬렉션이라 이름은 곧 sessionId다.
+            chromaClient.deleteCollection(sessionId);
         } catch (Exception e) {
             log.warn("[RAG 컬렉션 정리 실패] sessionId={} collectionId={} {}", sessionId, collectionId, e.getMessage());
         }

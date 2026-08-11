@@ -73,6 +73,79 @@ CLAUDE.md 버그 수정(`927d1f6`) 반영 후 사용자가 실제 100개 파일�
 - **수정**(커밋 예정): `OpenAiCompatibleLlmClient`에 `Semaphore`를 추가해 **실제 HTTP 요청 전송 자체**를 `llm.local.max-concurrent-calls`(신규 설정, 기본값 1)개로 제한. 대기 중인 호출은 아직 요청을 보내지 않은 상태라 타임아웃 시계가 돌지 않고 안전하게 큐잉된다 — 앱의 분석 스레드 풀(16개)은 그대로 두되, 로컬 LLM으로 나가는 실제 네트워크 요청만 직렬화(기본 1개)했다. `application.properties`/`docker-compose.yml`/`.env.lite.example`에 `LLM_LOCAL_MAX_CONCURRENT_CALLS` 배선. `OpenAiCompatibleLlmClientTest`에 MockWebServer 커스텀 `Dispatcher`로 동시 in-flight 요청 수를 직접 관측하는 회귀 테스트 추가(`max_concurrent_calls가_1이면_동시에_보내지는_실제_HTTP_요청이_한_개로_제한된다`).
 - **미검증**: 이 수정 이후 실제 100파일 재테스트는 아직 안 됨 — 사용자가 이미지 재빌드 후 진행 예정. 참고로 이 수정은 처리 속도 자체를 높이는 게 아니라(오히려 완전 직렬화라 총 소요 시간은 비슷하거나 약간 늘 수 있음) **실패율을 낮추는** 수정이다 — 100파일 × 120초 ≈ 3.3시간이 걸릴 수 있다는 점은 여전히 남는 별도 이슈(속도 개선은 GPU 오버레이/14b 비교 등 다른 트랙에서 다룸).
 
+## RAG(Chroma) 실제 서버 대상 결함 조사 — cleanup 경로 버그 2건 확인, 기본 임계값으로는 미발동 확인 (2026-07-23)
+
+`./gradlew clean test`(전체 6개 RAG 관련 클래스 포함 68건)는 전부 GREEN이지만, 전부 MockWebServer 목킹 테스트라 "실제 Chroma 서버가 그 요청을 실제로 받아들이는지"는 검증하지 못한다는 한계가 있어, 실행 중인 실제 스택(`legacy-analyzer-chroma`/`legacy-analyzer-ollama`)에 코드와 동일한 HTTP 요청을 직접 재현해 검증했다. **테스트 코드·프로덕션 코드 둘 다 수정하지 않고 조사만 진행**(사용자 지시).
+
+- **사전 확인**: 조사 시작 시점 기준 `legacy-analyzer-app` 로그 전체에 `RAG`/`압축` 관련 로그가 **단 한 줄도 없었고**, Chroma에도 컬렉션이 0개 — 이 환경에서 RAG는 실제 분석 파이프라인을 통해 **지금까지 한 번도 발동된 적이 없다**(아래 "미발동 확인" 항목 참고, 원인 규명함).
+
+### 🔴 [심각, 수정 완료] `ChromaClient.deleteCollection()`이 실제 서버에서 항상 조용히 실패 — RAG 성공 시마다 컬렉션 영구 누수
+
+**수정 완료(2026-07-23, 같은 날 이어서)**: `ChromaClient.deleteCollection(String name)`으로 파라미터 의미를 id→이름으로 바꾸고 DELETE 경로에 이름을 그대로 사용하도록 수정(`ChromaClient.java:113-131`), 캐시 무효화도 `collectionIdCache.values().removeIf(...)`(id로 값 스캔) 대신 `collectionIdCache.remove(name)`(이름으로 키 직접 제거)으로 단순화. 호출부 `ProjectStructureRagService.cleanup()`(`ProjectStructureRagService.java:162-172`)도 `chromaClient.deleteCollection(collectionId)` → `chromaClient.deleteCollection(sessionId)`로 변경 — `index()`가 `createOrGetCollection(sessionId)`로 컬렉션을 만들었으므로 이름은 곧 sessionId라는 점을 이용. 실제 `legacy-analyzer-chroma` 컨테이너에 재현해 이름으로 DELETE 시 `200` 응답과 함께 컬렉션이 실제로 목록에서 사라짐을 재확인.
+
+이 수정으로 기존 `ProjectStructureRagServiceTest`의 `임계값을_초과하면_패키지당_topK개로_압축하고_컬렉션을_정리한다()`(108줄)가 깨졌다 — 이 테스트가 정확히 "id(`col-1`)로 삭제 요청이 간다"는 옛(버그) 동작을 검증하고 있었기 때문(수정이 올바르게 반영됐다는 방증). 사용자 승인 후 어서션을 `session-1`(사용자가 넘긴 sessionId) 기준으로 갱신 — `./gradlew clean test` 전체 68건 재실행, BUILD SUCCESSFUL 재확인.
+
+**남은 것**: 아래 "지역변수 섀도잉" 결함은 이번 수정 범위 밖(별도 이슈) — 여전히 미수정 상태.
+
+실제 컨테이너에 직접 재현한 결과:
+```
+POST .../collections {"name":"defect-test-2","get_or_create":true} → id: 373d1e58-... (성공)
+DELETE .../collections/373d1e58-271d-460b-b624-0c371f473838
+  → {"error":"NotFoundError","message":"Collection [...] does not exist"}  ← id로 삭제 시 404
+DELETE .../collections/defect-test-2  (같은 컬렉션을 이름으로 삭제)
+  → {} 200 OK, 실제로 삭제됨
+```
+`chromadb/chroma:1.5.9`의 v2 API는 컬렉션 생성/조회/추가/쿼리는 id로 되지만 **DELETE는 이름(name)만 인식**한다. 그런데 `ChromaClient.java:113-131`의 `deleteCollection(collectionId)`와 `ProjectStructureRagService.cleanup()`(`ProjectStructureRagService.java:162-170`)은 항상 id를 넘긴다. `cleanup()`의 `catch (Exception e) { log.warn(...) }`가 예외를 삼켜 앱이 죽지 않기 때문에 지금까지 발견되지 않았을 가능성이 크다.
+- **영향**: RAG가 정상적으로 압축을 완료할 때마다(정확히 "성공 경로"에서) 컬렉션 정리가 매번 실패하고, Chroma에 세션마다 컬렉션이 하나씩 영구적으로 쌓인다(자동 만료/GC 없음) — 장기 운영 시 Chroma 디스크/메모리 무한 증가.
+- **테스트가 못 잡는 이유**: `ChromaClientTest.java:158-175`의 `deleteCollection_요청_경로가_컬렉션_id를_포함한다()`는 Mock 서버가 "id로 DELETE 요청이 오면 200을 주겠다"고 구현체의 가정을 그대로 목킹해뒀다 — "코드가 원하는 대로 요청을 만들었는지"만 검증하지, "실제 서버가 그 요청을 받아들이는지"는 검증 구조상 불가능. 목킹 테스트의 한계가 결함을 은폐한 사례.
+
+### 🟡 [중간, 수정 완료] `compactPackageGroups()` 지역변수 섀도잉 — `index()` 도중 실패 시 leak 방지용 finally가 무력화
+
+**수정 완료(2026-07-23, 같은 날 이어서)**: `finally` 블록의 `if (collectionId != null) cleanup(sessionId);` 조건문을 제거하고 무조건 `cleanup(sessionId)`를 호출하도록 변경(`ProjectStructureRagService.java:97-104`). `index()`가 컬렉션 생성 직후(파일 순회를 시작하기 전에) `sessionCollections`에 이미 등록해두므로, `compactPackageGroups()`의 로컬 `collectionId`가 null인지 여부와 무관하게 `cleanup(sessionId)`를 호출하면 실제 등록 여부(`sessionCollections`)를 기준으로 정리된다. `cleanup()`은 `sessionCollections.remove(sessionId)`가 null이면 즉시 반환하는 no-op이라, 컬렉션이 아예 안 만들어진 경우(임계값 미달로 이 메서드 진입 자체를 안 한 경우, `createOrGetCollection()` 자체가 실패한 경우)에 불필요하게 호출해도 안전 — 별도 분기 없이 하나의 `cleanup(sessionId)` 호출로 모든 경로를 커버. `./gradlew clean test` 전체 68건 재실행, 기존 테스트 변경 없이 BUILD SUCCESSFUL 확인(회귀 없음).
+
+이전(버그가 있던) 구조는 `ProjectStructureRagService.java:77-101`:
+```java
+String collectionId = null;
+try {
+    collectionId = index(sessionId, packageGroups);   // index() 내부에서 예외 던지면 이 대입 자체가 미실행
+    ...
+} finally {
+    if (collectionId != null) {      // ← 그래서 여기 collectionId는 여전히 null
+        cleanup(sessionId);          // ← cleanup() 자체가 호출 안 됨
+    }
+}
+```
+`index()`(115-139줄)는 `createOrGetCollection()`으로 컬렉션을 만들고 `sessionCollections.put(sessionId, collectionId)`까지 실행한 직후, 파일마다 `embeddingClient.embed(doc)`를 순차 호출하는 루프를 돈다. 이 루프 중간에 임베딩 서버 호출이 하나라도 실패하면(타임아웃 등 — `1cb130b`에서 고친 로컬 LLM 동시요청 이슈와 같은 계열) `index()`가 예외를 던지며 리턴을 못 하고, 바깥 `compactPackageGroups()`의 `collectionId`(별개의 지역변수)는 끝까지 null로 남아 `finally`가 `cleanup()`을 건너뛴다 — 컬렉션은 이미 Chroma에 생성됐는데도 정리가 스킵되는 또 다른 누수 경로.
+- 클래스 상단 주석(17-28줄)이 "이 메서드 안의 지역 try-finally만으로 컬렉션 leak을 방지할 수 있다"고 명시하는데, 수정 전에는 이 케이스에서 그 주장이 깨졌다(수정 후엔 실제로 보장됨).
+- **테스트 커버리지 갭(수정 후에도 남아있음)**: `ProjectStructureRagServiceTest.java`의 실패 테스트(112-135줄, `쿼리_단계에서_실패해도_원본을_그대로_반환하고_컬렉션은_정리한다`)는 `index()`가 **성공적으로 끝난 뒤** 쿼리 단계에서 실패하는 케이스만 다룬다. `index()` **도중**(임베딩 호출 도중) 실패하는 케이스를 직접 검증하는 테스트는 여전히 없음 — 이번 수정은 코드 리딩과 전체 회귀 스위트(68건 GREEN)로만 확인했고, "index() 도중 실패 시에도 실제로 정리되는지"를 직접 겨냥한 신규 테스트는 추가하지 않았다(사용자가 테스트 코드 추가/수정을 요청하지 않아 범위 밖으로 둠).
+
+### 🟡 [운영/설정] 기본 임계값(`rag.trigger-threshold-chars=20000`)으로는 실사용 규모에서 RAG가 아예 미발동할 가능성
+
+- `estimateChars()`는 파일당 "파일명 길이+20자"로 근사(실제 렌더링 라인 `- {fileName} [{role}]\n`, `MainApiController.java:2016-2020`과 비슷한 근사치).
+- 평균 파일명 25자 가정 시 파일당 ~45자 → 20,000자 임계값을 넘기려면 약 **440개 이상 Java 파일** 필요.
+- 21차 handOff 기록의 100파일 실측 프로젝트 기준이면 패키지 구조 섹션 예상 크기는 약 4,500자 — **기본값 그대로는 RAG가 절대 개입하지 않는다.**
+- 실제로 조사 시점 앱 로그 전수 확인 결과 `[RAG 압축 완료]`/`[RAG 압축 실패]` 로그 0건, Chroma 컬렉션도 0개(조사용으로 만든 것 제외) — 이 환경에서 RAG는 실제 분석 파이프라인을 통해 지금까지 한 번도 발동되지 않았음을 재확인.
+- 결함이라기보다 설정 문제에 가깝지만, RAG 실동작을 실측하려면 `RAG_TRIGGER_THRESHOLD_CHARS`를 임시로 낮추거나 수백 개 Java 파일 규모의 프로젝트로 테스트해야 발동 경로 자체를 관찰할 수 있다. 즉 위 두 cleanup 버그(둘 다 수정 완료)도 **실제 운영에서는 아직 한 번도 트리거된 적 없던 잠재적 버그**였다는 의미이기도 하다.
+
+### 참고: cleanup 이외 프로토콜 흐름은 정상 확인
+
+create → embed → add → query 흐름(위 결함과 무관한 나머지 부분)은 실제 서버로 직접 재현했을 때 코드가 기대하는 응답 형식과 정확히 일치(`{"embedding":[...]}`, `{"id":"..."}`, `{"documents":[[...]]}` 전부 일치). 문제는 삭제(cleanup) 단계에 국한된다.
+
+**남은 것**: 결함 2건(`ChromaClient.deleteCollection` id→name, `compactPackageGroups` 지역변수 섀도잉) 전부 수정 완료. "index() 도중 실패" 경로를 직접 겨냥한 신규 테스트는 추가하지 않았음(요청 범위 밖). 임계값을 낮춘 상태로 실제 대형 프로젝트 대상 RAG 발동 경로 자체의 실측은 아직 미착수.
+
+## RAG 임베딩 속도 개선 — 배치화 + 불필요 패키지 인덱싱 스킵 (2026-07-23, 23차)
+
+22차 결함 조사·수정 이후 사용자와 함께 RAG 경로의 속도 병목을 점검하다가, 아직 실운영에서 발동된 적은 없지만(임계값 미달로 미발동 확인됨, 22차 참고) **발동되면 확실히 느릴 지점**을 코드 레벨에서 발견해 수정까지 진행했다. 실제 트래픽으로 발동된 적이 없어 "얼마나 느렸는지" 실측치는 없고, 코드 구조상 명백한 비효율을 고친 것 — 실행 검증은 여전히 미착수(아래 참고).
+
+- **문제 1 — `index()`가 파일마다 `embed()`를 순차 blocking 호출**: `ProjectStructureRagService.index()`가 `packageGroups`의 파일 하나당 `embeddingClient.embed(doc)`를 for 루프 안에서 한 번씩 호출했다. `OpenAiCompatibleEmbeddingClient.embed()`는 Ollama `/api/embeddings`(단수, 텍스트 1개만 받는 구버전 엔드포인트)를 쓰므로 파일이 많을수록 네트워크 왕복이 그대로 쌓인다 — RAG가 실제로 트리거되는 건 정의상 대형 프로젝트(임계값 20,000자 초과, 약 440개 이상 Java 파일)이므로 이 경로가 발동되면 파일 수만큼 왕복이 직렬로 쌓이는 게 사실상 확정적인 병목이었다.
+- **문제 2 — topK 이하라 원본 그대로 반환될 패키지까지 인덱싱**: `index()`가 `packageGroups` 전체(모든 패키지의 모든 파일)를 무조건 임베딩·색인했는데, 실제로 쿼리 대상이 되는 건 `files.size() > topKPerPackage`인 패키지뿐이었다. topK 이하 패키지는 어차피 원본을 그대로 반환하므로(`compactPackageGroups()` 82-86줄) 그 파일들을 임베딩하는 건 순수 낭비였다.
+- **수정 1 — 배치 임베딩 도입**: `EmbeddingClient` 인터페이스에 `embedBatch(List<String> texts)` 추가, `OpenAiCompatibleEmbeddingClient`에 Ollama의 배치 엔드포인트(`POST /api/embed`, 복수형 — `input` 배열로 여러 텍스트를 한 번에 보내고 `embeddings`(배열의 배열)로 응답받음)로 구현. `index()`는 이제 문서 리스트를 다 모은 뒤 `embedBatch()` 한 번만 호출 — 파일 수만큼이던 HTTP 왕복이 인덱싱 대상 패키지당 1회로 줄어든다.
+- **수정 2 — 인덱싱 대상 사전 필터링**: `compactPackageGroups()`가 `index()`를 호출하기 전에 `files.size() > topKPerPackage`인 패키지만 걸러(`toIndex`) 넘기도록 변경. 걸러낸 결과가 비어있으면(전체 글자수는 임계값을 넘었지만 패키지별로는 다 topK 이하인 경우) Chroma 컬렉션 생성 자체를 생략하고 원본을 바로 반환 — 압축할 게 없는데 색인 인프라를 건드리는 낭비도 제거.
+- **변경 파일**: `EmbeddingClient.java`(인터페이스에 `embedBatch` 추가), `OpenAiCompatibleEmbeddingClient.java`(`embedBatch` 구현), `ProjectStructureRagService.java`(`compactPackageGroups()` 사전 필터링, `index()` 배치 호출로 전환).
+- **테스트 갱신**: `OpenAiCompatibleEmbeddingClientTest`에 `embedBatch` 관련 6건 추가(요청 규격, 파싱, 빈 목록, 오류 응답, `embeddings` 필드 누락, 응답/요청 개수 불일치). `ProjectStructureRagServiceTest`의 기존 두 테스트(임계값 초과 압축, 쿼리 실패 fallback)를 새 호출 패턴(배치 1회+쿼리용 단건 1회)에 맞게 mock 응답·기대 호출 횟수를 갱신, "모든 패키지가 topK 이하면 색인 자체를 생략한다" 신규 테스트 1건 추가.
+- **검증 완료(25차, 2026-08-11)**: 23차 세션은 sandbox가 JDK 11뿐이고 `services.gradle.org`/`github.com` 접근도 막혀 있어(20~22차와 동일한 제약) `./gradlew test`를 실행하지 못하고 diff 리뷰로만 컴파일 정합성을 확인했었다. 25차 세션(별도 작업 — prompt.md base/role 분리 — 진행 중 이 uncommitted 변경을 함께 발견해 검증)은 JDK 17이 설치돼 있고 gradle wrapper도 정상 동작해, `./gradlew clean test`로 전체 스위트(26개 클래스, 200건)를 실제로 실행 — **`OpenAiCompatibleEmbeddingClientTest`(`embedBatch` 6건 포함 11건)/`ProjectStructureRagServiceTest`(5건, "모든 패키지가 topK 이하면 색인 생략" 신규 케이스 포함) 전부 GREEN, BUILD SUCCESSFUL, 실패 0건** 확인. 컴파일 정합성뿐 아니라 실제 실행 결과까지 검증 완료.
+- **남은 것**: 임계값을 낮춰 RAG를 실제로 발동시킨 뒤 배치화 전/후 소요 시간 비교(현재까지 RAG가 실운영에서 발동된 적이 없어 "몇 배 빨라졌는지"는 아직 실측치 없음, 22차 "미발동 확인" 참고) — 유닛 테스트 GREEN 확인과는 별개로 여전히 미착수.
+
 ## 검증 상태
 
 | 항목 | 상태 | 비고 |
@@ -88,11 +161,14 @@ CLAUDE.md 버그 수정(`927d1f6`) 반영 후 사용자가 실제 100개 파일�
 | (2단계) GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 | ✅ 완료 | 사용자가 직접 등록(2026-07-23) |
 | (2단계) 태그 push → Actions 실행 → Docker Hub 반영 | ✅ 완료(정정 후 재확인) | **1차 시도는 오판이었음**: `.github/workflows/docker-publish.yml`을 포함한 작업물이 git에 커밋된 적이 없어(untracked) 실제로는 아무 워크플로우도 존재하지 않았고, "Docker Hub에 올라갔다"고 봤던 건 `docker compose build`로 로컬에 태깅된 `it1657/legacy-analyzer:latest` 이미지를 착각한 것(Docker Hub API로 태그 0개 확인해 발견). 이후 파일 전체를 커밋 → 사용자가 직접 `git push origin master`(Claude sandbox는 GitHub 접근 프록시 차단으로 push 불가) → 태그 재push → Actions에서 "Docker Publish (legacy-analyzer lite)" 워크플로우 실제 GREEN, Docker Hub 반영까지 사용자가 확인(2026-07-23) |
 | (2단계) 클린 환경에서 `docker pull`만으로(build 없이) 수신 확인 | ❌ 미착수 | 지금까지는 이 노트북(이미 이미지가 로컬에 있음)에서만 확인 — "진짜 다른 머신"에서 pull-only로 받아지는지는 별도 검증 필요 |
-| RAG(Chroma) 코드 구현 | ✅ 완료(정적 검증만) | `com.legacy.rag` 패키지 + 통합 지점(Java 전용) + MockWebServer 단위 테스트, `7a541df` 커밋. gradle test 실행은 샌드박스 제약으로 미실행 |
-| RAG(Chroma) 실행 검증(실서버 스모크 테스트, `rag.enabled=true` 실측) | ❌ 미착수 | Docker 없는 샌드박스라 직접 불가 — 사용자 쪽 재빌드 후 진행 필요 |
+| RAG(Chroma) 코드 구현 | ✅ 완료(단위 테스트 GREEN 확인) | `com.legacy.rag` 패키지 + 통합 지점(Java 전용) + MockWebServer 단위 테스트, `7a541df` 커밋. 25차(2026-08-11, JDK 17)에 `./gradlew clean test` 전체 실행으로 GREEN 확인(아래 행 참고) — 이전 22~23차의 "샌드박스 제약으로 미실행" 상태에서 해소됨 |
+| RAG 임베딩 속도 개선(배치화 + 불필요 패키지 스킵) | ✅ 코드+단위 테스트 검증 완료, 실측 비교 미착수 | `EmbeddingClient.embedBatch()` 신설(파일당 1왕복 → 인덱싱 대상 패키지당 1왕복), `compactPackageGroups()`가 topK 이하 패키지를 인덱싱 대상에서 사전 제외. 25차(2026-08-11, JDK 17)에 `./gradlew clean test` 실행해 `OpenAiCompatibleEmbeddingClientTest`/`ProjectStructureRagServiceTest` 포함 전체 200건 GREEN 확인(이전 23차의 "sandbox 제약으로 미실행" 상태 해소). RAG가 실운영에서 아직 미발동이라 배치화 전/후 소요 시간 실측 비교치는 여전히 없음 |
+| RAG(Chroma) 실행 검증(실서버 스모크 테스트, `rag.enabled=true` 실측) | ⚠️ 완료(결함 2건 발견, 2건 모두 수정 완료) | 실제 Chroma/Ollama 컨테이너에 직접 재현해 create/embed/add/query 흐름은 정상 확인. `ChromaClient.deleteCollection()`이 id로 삭제를 시도해 실제 서버(name만 인식)에서 항상 실패하던 버그(id→name, `ProjectStructureRagService.cleanup()`도 sessionId 전달로 변경, 실서버 재확인)와 `compactPackageGroups()`의 지역변수 섀도잉으로 `index()` 도중 실패 시 별도 누수 경로가 남던 버그(finally에서 조건 없이 `cleanup(sessionId)` 호출하도록 변경) **둘 다 수정 완료** — `./gradlew clean test` 전체 68건 GREEN 재확인(2차 수정은 기존 테스트 변경 없이 통과). 기본 임계값(20000자)으로는 100파일 규모 실사용 프로젝트에서 RAG 자체가 미발동돼 두 버그 모두 실운영에서는 아직 한 번도 트리거된 적 없었음 — 자세한 내용은 위 "RAG(Chroma) 실제 서버 대상 결함 조사" 절 참고 |
 
 ## 다음에 이 문서를 갱신할 시점
 
+- RAG 임베딩 속도 개선(배치화 + 불필요 패키지 스킵)은 25차(2026-08-11)에 `./gradlew clean test`(200건) GREEN 확인까지 끝남. 남은 건 임계값을 낮춘 실측 비교(배치화 전/후 소요 시간)뿐 — 나오면 이 문서 갱신 필요.
+- RAG cleanup 버그 2건(`ChromaClient.deleteCollection` id/name 불일치, `compactPackageGroups` 지역변수 섀도잉) 모두 수정 완료, 단위 테스트 GREEN도 25차에 재확인. 다음 단계는 임계값을 임시로 낮춘 상태에서 실제 대형 프로젝트로 RAG 발동 경로 자체를 재검증하는 것 — 아직 실제 분석 파이프라인을 통해 RAG가 발동된 사례가 한 번도 없어 "index() 도중 실패 시에도 실제로 정리되는지"를 포함해 정상 동작 여부를 실측으로 확인할 필요가 있음.
 - 7b 품질 미달 + anthropic(Haiku) 대비 열위(속도 16.5배 차이, 주석 위치 오류 0건 vs 다수)까지 확인 완료. 다음은 GPU 오버레이 + `qwen2.5-coder:14b`로 같은 패키지를 재분석해 7b보다 나아지는지, anthropic과의 격차가 줄어드는지 비교하는 시점(이 노트북은 GPU가 없어 별도 환경 필요).
 - 주석 삽입 위치 오류(fluent 체인/record 파라미터 중간)는 **anthropic(Haiku) 대조 결과 0건으로 확인** — 같은 JSON `lineNumber` 삽입 로직을 공유하는데도 anthropic만 정확하다는 건 삽입 로직 자체의 버그가 아니라 **7b 모델이 lineNumber를 부정확하게 계산/응답하는 모델 능력 한계**일 가능성이 높음(원인 분리 완료, 추가 조사는 우선순위 낮음).
 - "진짜 새 머신"(볼륨·이미지 캐시 없는 상태) 기준 클린 재현을 별도로 진행하게 되면 그 결과 반영.

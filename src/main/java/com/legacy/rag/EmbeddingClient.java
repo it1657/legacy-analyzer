@@ -14,4 +14,15 @@ public interface EmbeddingClient {
      * @return 임베딩 벡터(float 성분을 담은 double 리스트)
      */
     List<Double> embed(String text);
+
+    /**
+     * 여러 텍스트를 한 번의 API 호출로 임베딩한다. {@link #embed(String)}을 텍스트 수만큼
+     * 반복 호출하면 네트워크 왕복이 그대로 쌓여 파일이 많은 프로젝트에서 지연의 대부분을
+     * 차지하므로({@code ProjectStructureRagService.index()}가 이 메서드의 주 호출부), 배치
+     * 지원 백엔드에서는 반드시 이 메서드로 한 번에 처리해야 한다.
+     *
+     * @param texts 임베딩할 텍스트 목록
+     * @return texts와 순서가 1:1 대응하는 임베딩 벡터 목록
+     */
+    List<List<Double>> embedBatch(List<String> texts);
 }

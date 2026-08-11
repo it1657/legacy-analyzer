@@ -110,10 +110,16 @@ public class ChromaClient {
         return inner.stream().map(String::valueOf).toList();
     }
 
-    public void deleteCollection(String collectionId) {
+    /**
+     * 실제 Chroma v2 서버(1.5.9 확인)는 다른 엔드포인트(생성/조회/add/query)와 달리 DELETE만
+     * id가 아니라 컬렉션 **이름**을 받는다(id로 호출하면 404 NotFoundError) — 실제 서버 대상
+     * 재현으로 확인된 동작이라 여기도 이름을 그대로 받는다. 호출부(`createOrGetCollection`을
+     * 호출할 때 쓴 이름)를 그대로 넘겨야 한다.
+     */
+    public void deleteCollection(String name) {
         try {
             webClient.delete()
-                    .uri(collectionsPath() + "/" + collectionId)
+                    .uri(collectionsPath() + "/" + name)
                     .retrieve()
                     .onStatus(status -> !status.is2xxSuccessful(),
                             clientResponse -> clientResponse.bodyToMono(String.class)
@@ -124,9 +130,9 @@ public class ChromaClient {
                     .toBodilessEntity()
                     .block();
         } finally {
-            // 캐시에서 name→id 역참조를 지운다 — 실패해도 다음 index()가 get_or_create로
-            // 다시 잡을 수 있으니 예외를 삼켜도 안전(호출부가 cleanup 실패로 전체를 막으면 안 됨).
-            collectionIdCache.values().removeIf(collectionId::equals);
+            // 실패해도 다음 index()가 get_or_create로 다시 잡을 수 있으니 예외를 삼켜도
+            // 안전(호출부가 cleanup 실패로 전체를 막으면 안 됨).
+            collectionIdCache.remove(name);
         }
     }
 

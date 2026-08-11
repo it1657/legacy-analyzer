@@ -43,6 +43,8 @@ RAG는 **로컬 모델의 좁은 컨텍스트 윈도우**를 보완하려는 목
 
 `scenario_1.md`은 원래 "`scenario_0.md` 배포 후 실사용 데이터로 컨텍스트 초과/품질 저하가 관측되면 착수"라는 조건부 결정이었으나, **2026-07-23 사용자 결정으로 관측 없이 채택을 확정하고 구현에 착수**했다 — 아래는 실제 구현에 쓰는 최신 설계다(각 시나리오 문서에서 이 섹션을 참조). `scenario_2.md`/`scenario_3.md`는 여전히 조건부로 남겨둔다.
 
+> **정책 재확인(2026-07-24)**: scenario_1의 선채택은 이 "관측 기반 채택" 원칙에 대한 **예외로 한정**되며, scenario_2/scenario_3의 신규 RAG 채택 판단에는 이 원칙을 그대로 적용한다 — scenario_1 사례를 근거로 다른 시나리오에서 같은 예외를 요구할 수 없다. 확정 경위는 `docs/advancement/3.confirmed/scenario_1_confirmed.md`의 "RAG 채택 원칙 재확인" 절 참고.
+
 ### 문제 지점 — 구현 착수 시 범위를 좁힘 (2026-07-23)
 
 원래는 `buildDetailedProjectStructure()`가 만드는 전체 텍스트가 다 문제라고 가정했으나, 실제 코드(`MainApiController.appendJavaStructure()`, 1925줄)를 보니 "계층별 클래스 통계" 섹션은 이미 레이어당 8개로 미리보기 제한이 걸려 있어(`files.subList(0, Math.min(files.size(), 8))`) 프로젝트가 아무리 커도 크기가 고정된다. **진짜로 프로젝트 크기에 비례해 무한정 커지는 부분은 "프로젝트 패키지 구조" 섹션(`packageGroups` 기반, 패키지별 파일을 전부 나열)뿐**이라 RAG 압축 대상을 여기로 좁혔다. 적용 범위도 Java 프로젝트로 한정(사용자 결정, 2026-07-23) — `appendFrontendStructure`/`appendPythonStructure`/`appendGeneralStructure`는 각자 다른 방식으로 텍스트를 만들어서 별도 분석·설계가 필요하므로 이번 구현에서 제외했다.
