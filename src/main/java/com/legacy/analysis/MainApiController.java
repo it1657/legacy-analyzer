@@ -8,6 +8,9 @@ import com.legacy.core.PresentationGeneratorService;
 import com.legacy.core.ProjectStructureSnapshot;
 import com.legacy.core.ProjectTypeDetector;
 import com.legacy.notification.NotificationService;
+import com.github.difflib.DiffUtils;
+import com.github.difflib.UnifiedDiffUtils;
+import com.github.difflib.patch.Patch;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -559,6 +562,56 @@ public class MainApiController {
   }
 
   /**
+   * 완료 파일 미리보기/Diff 조회 (1단계, 세션 한정).
+   * write-back 직후 세션 메모리(previewCache)에 캐시해 둔 원본/결과 전체 텍스트로 unified diff를
+   * 그 자리에서 생성해 반환한다. 세션이 종료(재시작 포함)되면 캐시가 GC로 소멸하므로 조회 불가.
+   */
+  @GetMapping("/api/session/{sessionId}/preview")
+  @ResponseBody
+  public ResponseEntity<Map<String, Object>> getFilePreview(
+      @PathVariable String sessionId, @RequestParam String path, Authentication authentication) {
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND)
+          .body(Map.of("error", "세션을 찾을 수 없습니다. 이번 분석 세션 동안만 확인할 수 있습니다."));
+    }
+    SessionState.PreviewEntry entry = session.getPreviewEntry(path);
+    if (entry == null) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND)
+          .body(Map.of("error", "미리보기 캐시를 찾을 수 없습니다. 이번 분석 세션에서 처리된 파일만 확인할 수 있습니다."));
+    }
+
+    // 원본은 파일 그대로(CRLF일 수 있음)인데 write-back 로직(mergeCommentsIntoCode)이 결과물을
+    // 항상 LF로 정규화해서 쓰기 때문에, 줄바꿈 문자만 다르고 내용은 같은 줄까지 전부 변경된 것처럼
+    // diff가 나오는 문제가 있었다(QA 중 발견). write-back 자체는 건드리지 않고, 미리보기/Diff 표시용
+    // 텍스트만 양쪽 다 CRLF로 통일해서 비교한다.
+    String original = normalizeToCrlf(entry.original());
+    String commented = normalizeToCrlf(entry.commented());
+
+    Map<String, Object> result = new HashMap<>();
+    result.put("original", original);
+    result.put("commented", commented);
+    result.put("diff", buildUnifiedDiff(path, original, commented));
+    return ResponseEntity.ok(result);
+  }
+
+  // 줄바꿈을 CRLF로 통일한다 (먼저 LF로 접었다가 다시 CRLF로 펼쳐서 원본이 LF/CRLF 혼용이어도 안전)
+  private String normalizeToCrlf(String text) {
+    if (text == null) return null;
+    return text.replace("\r\n", "\n").replace("\n", "\r\n");
+  }
+
+  // 원본/결과 전체 텍스트로 unified diff 텍스트를 생성한다 (java-diff-utils)
+  private String buildUnifiedDiff(String fileName, String original, String commented) {
+    List<String> originalLines = Arrays.asList(original.split("\n", -1));
+    List<String> commentedLines = Arrays.asList(commented.split("\n", -1));
+    Patch<String> patch = DiffUtils.diff(originalLines, commentedLines);
+    List<String> unified = UnifiedDiffUtils.generateUnifiedDiff(
+        fileName, fileName, originalLines, patch, 3);
+    return String.join("\n", unified);
+  }
+
+  /**
    * CLAUDE.md 내용 단독 조회 (완료 화면 표시용)
    */
   @GetMapping("/api/analysis/claude-md")
@@ -924,7 +977,7 @@ public class MainApiController {
       // CLAUDE.md 생성: prompt.md 표준 템플릿 + 사용자 추가 요구사항(있는 경우)을 AI로 결합하여
       // 이번 분석 세션 전용 시스템 프롬프트를 만들고, 파일별 분석에 사용하도록 등록한다.
       session.addRecentLog("[시스템] 🧭 분석 지침(CLAUDE.md) 생성 중...");
-      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements());
+      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList));
       claudeService.setSessionSystemPrompt(sourceRootPath.toString(), generatedClaudeMd);
       if (history != null) {
         history.setClaudeMdContent(generatedClaudeMd);
@@ -1202,7 +1255,7 @@ public class MainApiController {
       // 저장된 내용이 없으면(구버전 세션 등) 새로 생성한다.
       String claudeMdContent = (history != null) ? history.getClaudeMdContent() : null;
       if (claudeMdContent == null || claudeMdContent.isBlank()) {
-        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements());
+        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList));
         if (history != null) {
           history.setClaudeMdContent(claudeMdContent);
           analysisHistoryRepository.save(history);
@@ -1691,6 +1744,26 @@ public class MainApiController {
     }
   }
 
+  /**
+   * 이번 세션에서 실제로 분석할 파일들의 확장자 집합을 추출한다(소문자, "." 포함, 예: ".java").
+   * generateSessionClaudeMd에 넘겨 base+role 병합 시 실제 스캔된 확장자에 매칭되는 role만 붙이도록
+   * 하기 위한 용도 — 이미 갖고 있는 fileList에서 추출하므로 디스크 재스캔이 없다(2026-07-29 설계안
+   * 4.2절). appendGeneralStructure의 확장자 통계 로직은 디스크 재스캔 기반 UI 리포트 텍스트 생성용이라
+   * 용도가 달라 재사용하지 않는다.
+   */
+  private Set<String> detectExtensions(List<Path> fileList) {
+    if (fileList == null || fileList.isEmpty()) return Set.of();
+    Set<String> extensions = new LinkedHashSet<>();
+    for (Path path : fileList) {
+      String name = path.getFileName().toString();
+      int dotIdx = name.lastIndexOf('.');
+      if (dotIdx > 0) {
+        extensions.add(name.substring(dotIdx).toLowerCase());
+      }
+    }
+    return extensions;
+  }
+
   // 추적 파일 경로 (출력 루트에 위치)
   private static final String TRACKER_FILE_NAME = ".ai-analysis-done.txt";
 
@@ -1851,6 +1924,10 @@ public class MainApiController {
       SessionState curSession = sessionManager.getSession(sessionId);
       if (curSession != null) {
         markFileAsPatched(targetPath, curSession, finalOutputPath);
+        // 완료 파일 미리보기/Diff 기능(1단계, 세션 한정)용 캐시 적재 — patchedFilePaths와 동일한
+        // 절대경로 식별자로 원본/결과 전체 텍스트를 세션 메모리에 보관한다.
+        String previewKey = targetPath.toAbsolutePath().normalize().toString();
+        curSession.putPreviewEntry(previewKey, originalCode, commentedCode);
       }
 
       fileState.setStatus("SUCCESS");

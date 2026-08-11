@@ -1,5 +1,7 @@
 package com.legacy.analysis;
 
+import java.util.Set;
+
 /**
  * AI 인공지능 연동 서비스 인터페이스 (표준 아키텍처 레이어)
 // 분석 대상 파일명: ClaudeService.java
@@ -41,12 +43,15 @@ public interface ClaudeService {
     void setModel(String model);
 
     /**
-     * prompt.md 표준 템플릿과 사용자가 입력한 추가 요구사항을 결합하여
-     * 이번 분석 세션 전용 CLAUDE.md(시스템 프롬프트) 내용을 AI로 생성한다.
+     * base(공통 규칙) + 이번 세션에서 실제로 분석할 확장자에 매칭되는 role(언어별 예시) 파일들을
+     * 병합한 표준 템플릿과, 사용자가 입력한 추가 요구사항을 결합하여 이번 분석 세션 전용
+     * CLAUDE.md(시스템 프롬프트) 내용을 AI로 생성한다.
      * @param customRequirements 사용자 추가 요구사항 (없으면 null/빈 문자열 가능 — 이 경우 표준 템플릿만으로 생성)
+     * @param extensions 이번 세션에서 실제로 스캔된 파일 확장자 집합(소문자, "." 포함, 예: ".java"). null/빈 집합이면
+     *                   매칭되는 role 없이 base만 사용한다(미매칭 확장자 폴백 정책과 동일).
      * @return 생성된 CLAUDE.md 마크다운 전체 내용
      */
-    String generateSessionClaudeMd(String customRequirements);
+    String generateSessionClaudeMd(String customRequirements, Set<String> extensions);
 
     /**
      * 특정 소스 경로(세션)에 대해 이번 분석에서 사용할 CLAUDE.md 내용을 등록한다.

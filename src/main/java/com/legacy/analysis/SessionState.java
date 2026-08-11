@@ -105,6 +105,17 @@ public class SessionState {
   @Transient
   private java.util.Set<String> patchedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+  /**
+   * 완료 파일 미리보기/Diff 기능(1단계, 세션 한정)용 캐시 항목.
+   * write-back 직후 원본/결과 전체 텍스트를 그대로 보관하며, 서버가 unified diff를 즉석 생성하는 데 쓰인다.
+   */
+  public record PreviewEntry(String original, String commented) {}
+
+  // 완료 파일 미리보기/Diff 캐시 (메모리 전용, key: 타겟 파일 절대경로 = patchedFilePaths와 동일한 식별자 방식)
+  // 세션 종료/재시작 시 자연 소멸(GC) — 명시적 정리 로직 불필요
+  @Transient
+  private final Map<String, PreviewEntry> previewCache = new java.util.concurrent.ConcurrentHashMap<>();
+
   // 폴링용 필드 (메모리 전용, DB 저장 안함)
   @Transient
   private String currentPhase = "STARTING";
@@ -302,6 +313,15 @@ public class SessionState {
 
   public java.util.Set<String> getPatchedFilePaths() { return patchedFilePaths; }
   public void setPatchedFilePaths(java.util.Set<String> set) { this.patchedFilePaths = set; }
+
+  // 완료 파일 미리보기/Diff 캐시 조회·기록
+  public void putPreviewEntry(String absPath, String original, String commented) {
+    previewCache.put(absPath, new PreviewEntry(original, commented));
+  }
+
+  public PreviewEntry getPreviewEntry(String absPath) {
+    return previewCache.get(absPath);
+  }
 
   public String getUsername() { return username; }
   public void setUsername(String username) { this.username = username; }

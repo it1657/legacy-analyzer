@@ -50,7 +50,7 @@ class MainApiControllerLlmProviderTest {
     }
 
     @Override
-    public String generateSessionClaudeMd(String customRequirements) {
+    public String generateSessionClaudeMd(String customRequirements, java.util.Set<String> extensions) {
       throw new UnsupportedOperationException();
     }
 

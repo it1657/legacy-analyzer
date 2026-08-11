@@ -63,6 +63,35 @@ public class ClaudeServiceImpl implements ClaudeService {
     @Value("${app.analysis.system-prompt-filename:CLAUDE.md}")
     private String systemPromptFilename;
 
+    // base(prompt-base.md) 안에서 role 콘텐츠가 삽입될 위치를 나타내는 마커.
+    // "베끼기 금지 경고"/"응답 포맷(JSON)" 두 섹션은 base의 고정 위치(마커보다 앞/뒤)에 그대로 있으므로
+    // role 병합 여부와 무관하게 항상 원형 그대로 유지되고, "응답 포맷" 섹션은 항상 프롬프트 맨 끝에 온다.
+    private static final String ROLE_CONTENT_MARKER = "{{ROLE_CONTENT}}";
+
+    // 확장자 → role 파일명 매핑 (2026-07-29 설계안 3.2절). role-js/role-vue는 원본에서 한 블록으로
+    // 묶여 있던 JS/TS/Vue를 분리한 것 — Vue 전용 예시가 순수 JS/TS 분석 시 섞여 들어가는 것을 막는다.
+    private static final Map<String, String> ROLE_FILE_BY_EXTENSION = Map.ofEntries(
+        Map.entry(".java", "role-java.md"),
+        Map.entry(".py", "role-python.md"),
+        Map.entry(".js", "role-js.md"),
+        Map.entry(".ts", "role-js.md"),
+        Map.entry(".jsx", "role-js.md"),
+        Map.entry(".tsx", "role-js.md"),
+        Map.entry(".vue", "role-vue.md"),
+        Map.entry(".xml", "role-xml.md"),
+        Map.entry(".html", "role-xml.md"),
+        Map.entry(".xfdl", "role-nexacro.md"),
+        // Phase 1.5(2026-08-11, 설계안 3.4절) — isSupportedFile() 화이트리스트 확장자 중
+        // 실제 파일 개수 상위 2개만 우선 추가. .json은 표준 문법상 주석을 지원하지 않아
+        // 이번 범위에서 완전히 제외(설계안 3.4절 참고).
+        Map.entry(".properties", "role-properties.md"),
+        Map.entry(".yml", "role-yaml.md"),
+        Map.entry(".yaml", "role-yaml.md"),
+        // 2026-08-11 후속 반영 — 최초엔 후속 이슈로 보류했다가, 사용자 요청으로 이번 범위에 포함
+        Map.entry(".gradle", "role-gradle.md"),
+        Map.entry(".css", "role-css.md")
+    );
+
     // Claude API ↔ 로컬/사내 LLM 전환 스위치 (기본값 anthropic — LlmClient 빈 선택과 동일한 기본값)
     @Value("${llm.provider:anthropic}")
     private String llmProvider;
@@ -153,8 +182,8 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     @Override
-    public String generateSessionClaudeMd(String customRequirements) {
-        String baseTemplate = loadBaseSystemPromptTemplate();
+    public String generateSessionClaudeMd(String customRequirements, Set<String> extensions) {
+        String baseTemplate = loadBaseSystemPromptTemplate(extensions);
         boolean hasRequirements = customRequirements != null && !customRequirements.isBlank();
 
         // 추가 요구사항이 없으면 "표준 지침을 그대로 반환하라"고 LLM에 시킬 이유가 없다 —
@@ -206,29 +235,74 @@ public class ClaudeServiceImpl implements ClaudeService {
         return baseTemplate;
     }
 
+    // Phase 3.5(a) 검증 강화(2026-08-11, 2026-07-29 설계안 5절 리스크 대응): base의 핵심 섹션
+    // 제목을 나타내는 키워드. customRequirements 병합용 시스템 프롬프트가 LLM에게 "표준 기본
+    // 지침의 구조(섹션 제목 등)를 최대한 유지"하라고 지시하므로, 정상적인 결과라면 이 중
+    // 과반수는 그대로 남아있어야 한다. 소형 로컬 모델이 "마크다운이긴 한데 지침 내용이 통째로
+    // 빠진" 저품질 문서를 반환하는 경우(기존 JSON 시작 여부 검사만으로는 못 걸러냄)를 잡아낸다.
+    private static final String[] CORE_SECTION_KEYWORDS = {
+        "분석 철학", "주석 우선순위", "베끼기", "레거시 코드 특이사항", "주석 삽입 규칙", "응답 포맷"
+    };
+
     /**
-     * LLM이 생성한 결과가 CLAUDE.md(마크다운 지침 문서)처럼 보이는지 최소한으로 검증한다.
-     * 완벽한 검증은 아니지만, 실측된 실패 패턴(JSON 배열/객체를 그대로 반환)을 걸러내는 데는
-     * 충분하다 — JSON으로 시작하면 지침 문서 대신 다른 형식을 반환한 것으로 간주해 거부한다.
+     * LLM이 생성한 결과가 CLAUDE.md(마크다운 지침 문서)처럼 보이는지 검증한다. 완벽한 검증은
+     * 아니지만 두 가지 실측된 실패 패턴을 걸러내는 데는 충분하다: (1) JSON 배열/객체를 그대로
+     * 반환(과거 장애 이력) — JSON으로 시작하면 즉시 거부. (2) 마크다운 형식은 갖췄지만 base의
+     * 핵심 섹션 제목이 대부분 사라진 저품질 응답(2026-07-29 설계안 5절 신규 리스크) — 6개 핵심
+     * 섹션 키워드 중 과반수(4개) 이상 남아있어야 통과시킨다.
      */
     private boolean looksLikeClaudeMd(String content) {
         if (content == null) return false;
         String trimmed = content.trim();
         if (trimmed.isEmpty()) return false;
-        return !trimmed.startsWith("[") && !trimmed.startsWith("{");
-    }
+        if (trimmed.startsWith("[") || trimmed.startsWith("{")) return false;
 
-    /** 세션 전용 CLAUDE.md가 등록되어 있으면 그것을, 없으면 prompt.md 표준 템플릿을 시스템 프롬프트로 사용한다. */
-    private String resolveSystemPrompt(String sourceFolderPath) {
-        String sessionPrompt = sourceFolderPath != null ? sessionSystemPrompts.get(sourceFolderPath) : null;
-        return sessionPrompt != null ? sessionPrompt : loadBaseSystemPromptTemplate();
+        int matchedKeywords = 0;
+        for (String keyword : CORE_SECTION_KEYWORDS) {
+            if (trimmed.contains(keyword)) matchedKeywords++;
+        }
+        int required = (CORE_SECTION_KEYWORDS.length / 2) + 1;
+        if (matchedKeywords < required) {
+            log.warn("[CLAUDE.md 검증 실패] 핵심 섹션 키워드 {}개 중 {}개만 확인됨(최소 {}개 필요) — 표준 템플릿으로 대체",
+                CORE_SECTION_KEYWORDS.length, matchedKeywords, required);
+            return false;
+        }
+        return true;
     }
 
     /**
-     * 표준 기본 지침 템플릿(prompt.md)을 로드합니다. 리소스 폴더에 파일이 없거나 비어있으면
-     * 간소화된 기본 지침 내용을 반환합니다 (analyzeCodeWithClaude 호출 자체는 실패하지 않도록 함).
+     * 세션 전용 CLAUDE.md가 등록되어 있으면 그것을, 없으면 base+role(이 파일 확장자 1개) 병합
+     * 템플릿을 시스템 프롬프트로 사용한다(Phase 2, 2026-08-11, 설계안 4.1절). 정상 흐름에서는
+     * 세션 시작 시 generateSessionClaudeMd(role N개 병합 포함)가 항상 먼저 호출되어 캐시에
+     * 저장되므로, 여기서 쓰는 폴백 경로는 세션 CLAUDE.md가 없는 예외 상황을 위한 안전망이다
+     * (설계안 4.2절 — Phase 3이 실제 체감 효과의 주력, 여기는 그 폴백).
      */
-    private String loadBaseSystemPromptTemplate() {
+    private String resolveSystemPrompt(String sourceFolderPath, String extension) {
+        String sessionPrompt = sourceFolderPath != null ? sessionSystemPrompts.get(sourceFolderPath) : null;
+        return sessionPrompt != null ? sessionPrompt : loadSystemPromptTemplate(extension);
+    }
+
+    /**
+     * base(prompt-base.md) + 이 파일 확장자 1개에 매칭되는 role 파일을 병합한 시스템 프롬프트
+     * 템플릿을 로드한다(Phase 2, 설계안 4.1절). 파일별 분석은 한 번에 확장자 1개만 다루므로
+     * (혼합 확장자 배치가 발생하지 않음 — 파일/청크 단위 개별 호출 확인됨) role은 최대 1개만
+     * 병합하면 충분하다. 실제 병합 로직은 세션 CLAUDE.md 생성 경로(generateSessionClaudeMd)와
+     * 동일한 loadBaseSystemPromptTemplate(Set)을 재사용해 병합 규칙이 두 경로에서 갈라지지 않게 한다.
+     */
+    private String loadSystemPromptTemplate(String extension) {
+        Set<String> extensions = (extension == null || extension.isBlank()) ? Set.of() : Set.of(extension);
+        return loadBaseSystemPromptTemplate(extensions);
+    }
+
+    /**
+     * base(prompt-base.md) 템플릿을 로드하고, extensions에 매칭되는 role 파일(있으면 전부)을 base
+     * 안의 {{ROLE_CONTENT}} 마커 위치에 병합해 반환한다. extensions가 null/빈 집합이거나 매칭되는
+     * role이 하나도 없으면(예: .gradle/.properties/.yml 등) base만 적용한다 — 2026-07-29 설계안
+     * 3.3절 결정(미매칭 확장자 폴백: base만 적용, role 없이 진행).
+     * 리소스 폴더에 base 파일이 없거나 비어있으면 간소화된 기본 지침 내용을 반환합니다
+     * (analyzeCodeWithClaude 호출 자체는 실패하지 않도록 함).
+     */
+    private String loadBaseSystemPromptTemplate(Set<String> extensions) {
         // [레거시 시스템 분석 전문가 프롬프트 - 간소화]
         String defaultTemplate = """
                 레거시 시스템 분석가: 파일(fileName, 확장자: ${extension})의 비즈니스 로직만 한글 주석으로 설명하자.
@@ -258,16 +332,66 @@ public class ClaudeServiceImpl implements ClaudeService {
                 ]
                 주의: 마크다운 또는 다른 형식은 절대 금지. JSON만 반환.""";
 
-        try (InputStream is = getClass().getClassLoader().getResourceAsStream(systemPromptFilename)) {
-            if (is == null) {
-                log.warn("[{} 없음] 간소화된 기본 지침으로 대체합니다.", systemPromptFilename);
-                return defaultTemplate;
-            }
-            String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            return content.trim().isEmpty() ? defaultTemplate : content;
-        } catch (Exception e) {
-            log.error("prompt.md 로드 중 예외 발생", e);
+        String base = loadResourceFile(systemPromptFilename);
+        if (base == null || base.trim().isEmpty()) {
+            log.warn("[{} 없음] 간소화된 기본 지침으로 대체합니다.", systemPromptFilename);
             return defaultTemplate;
+        }
+
+        return mergeRoleContent(base, loadRoleContent(extensions));
+    }
+
+    /**
+     * extensions에 매칭되는 role 파일들을 전부 로드해 하나로 합친다(세션 CLAUDE.md 생성 경로처럼
+     * N개 확장자를 동시에 병합해야 하는 경우 대비). 매칭되는 role이 없으면 빈 문자열을 반환한다.
+     */
+    private String loadRoleContent(Set<String> extensions) {
+        if (extensions == null || extensions.isEmpty()) return "";
+
+        // 같은 role 파일이 여러 확장자에 매핑될 수 있으므로(.js/.ts/.jsx/.tsx → role-js.md 전부 동일)
+        // LinkedHashSet으로 중복 로드를 막고 매핑 순서(ROLE_FILE_BY_EXTENSION 삽입 순)를 보존한다.
+        Set<String> roleFiles = new LinkedHashSet<>();
+        for (String ext : extensions) {
+            String roleFile = ext == null ? null : ROLE_FILE_BY_EXTENSION.get(ext.toLowerCase());
+            if (roleFile != null) roleFiles.add(roleFile);
+        }
+        if (roleFiles.isEmpty()) return "";
+
+        StringBuilder merged = new StringBuilder();
+        for (String roleFile : roleFiles) {
+            String content = loadResourceFile(roleFile);
+            if (content == null || content.isBlank()) {
+                log.warn("[role 파일 없음] {} — 건너뜁니다.", roleFile);
+                continue;
+            }
+            if (merged.length() > 0) merged.append("\n\n");
+            merged.append(content.trim());
+        }
+        return merged.toString();
+    }
+
+    /**
+     * base 템플릿의 {{ROLE_CONTENT}} 마커를 실제 role 콘텐츠로 치환한다. 마커를 base 중간(베끼기
+     * 금지 경고 뒤, 도메인 용어/응답 포맷 앞)에 둔 이유는 role 병합 여부와 무관하게 "응답 포맷(JSON)"
+     * 섹션이 항상 프롬프트 맨 끝에 오도록 하기 위함이다(2026-08-11 결정 — 단순 base+role 이어붙이기는
+     * role 내용이 JSON 응답 포맷 뒤로 밀려 순서가 깨지므로 채택하지 않음).
+     */
+    private String mergeRoleContent(String base, String roleContent) {
+        String merged = (roleContent == null || roleContent.isEmpty())
+            ? base.replace(ROLE_CONTENT_MARKER, "")
+            : base.replace(ROLE_CONTENT_MARKER, roleContent);
+        // 마커 제거/치환 과정에서 생기는 빈 줄 뭉침만 정리(내용 자체에는 영향 없음)
+        return merged.replaceAll("\n{3,}", "\n\n");
+    }
+
+    /** 클래스패스 리소스 파일(UTF-8 텍스트)을 문자열로 읽는다. 파일이 없거나 읽기 실패 시 null. */
+    private String loadResourceFile(String filename) {
+        try (InputStream is = getClass().getClassLoader().getResourceAsStream(filename)) {
+            if (is == null) return null;
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            log.error("{} 로드 중 예외 발생", filename, e);
+            return null;
         }
     }
 
@@ -276,6 +400,48 @@ public class ClaudeServiceImpl implements ClaudeService {
      */
     private boolean isXmlFamily(String extension) {
         return ".html".equals(extension) || ".xml".equals(extension) || ".xfdl".equals(extension);
+    }
+
+    /**
+     * `#` 한 줄 주석만 허용하는 파일군. role-properties.md/role-yaml.md 신설(Phase 1.5,
+     * 2026-08-11)로 Properties/YAML도 Python과 동일하게 `#` 스타일 강제가 필요해졌다 —
+     * 이 분기가 없으면 normalizeComment()가 이 파일들을 "마커 없는 텍스트"로 오인해
+     * `//` 접두어를 붙여버리는데, `//`는 Properties/YAML 어느 쪽에서도 유효한 주석 마커가
+     * 아니라서 실제 분석 결과 파일에 문법상 잘못된 주석이 삽입되는 문제가 있었다.
+     */
+    private boolean isHashCommentFamily(String extension) {
+        return ".py".equals(extension) || ".properties".equals(extension)
+            || ".yml".equals(extension) || ".yaml".equals(extension);
+    }
+
+    /**
+     * `/* ... *&#47;` 블록 주석만 허용하는 파일군(role-css.md 신설, 2026-08-11). 표준 CSS는
+     * `//` 한 줄 주석을 지원하지 않는다 — 지원하지 않는 문법을 만나면 파서에 따라 그 줄(또는
+     * 그 뒤 규칙까지)이 통째로 무시되거나 깨질 수 있어, properties/yaml과 같은 이유로 별도
+     * 처리가 필요하다.
+     */
+    private boolean isCssFamily(String extension) {
+        return ".css".equals(extension);
+    }
+
+    /**
+     * `//` 스타일 또는 마커 없는 텍스트를 CSS 표준 `/* ... *&#47;` 블록 주석으로 변환한다.
+     * 한 줄만 있으면 한 줄 블록으로, 여러 줄이면 XML 계열과 동일한 스타일로 여러 줄 블록으로 감싼다.
+     */
+    private String toCssBlockComment(String rawText) {
+        String[] lines = rawText.split("\n");
+        List<String> content = new ArrayList<>();
+        for (String line : lines) {
+            String l = line.trim();
+            if (l.startsWith("//")) l = l.substring(2).trim();
+            if (!l.isEmpty()) content.add(l);
+        }
+        if (content.isEmpty()) return "/* */";
+        if (content.size() == 1) return "/* " + content.get(0) + " */";
+        StringBuilder fixed = new StringBuilder("/*\n");
+        for (String l : content) fixed.append(l).append("\n");
+        fixed.append("*/");
+        return fixed.toString();
     }
 
     /**
@@ -461,7 +627,7 @@ public class ClaudeServiceImpl implements ClaudeService {
                 new RuntimeException("Claude API KEY가 설정되지 않았습니다. application.properties를 확인하세요."));
         }
 
-        String baseSystemPrompt = resolveSystemPrompt(sourceFolderPath);
+        String baseSystemPrompt = resolveSystemPrompt(sourceFolderPath, extension);
 
         String finalSystemPrompt = baseSystemPrompt
                 .replace("${fileName}", fileName)
@@ -774,8 +940,8 @@ public class ClaudeServiceImpl implements ClaudeService {
         if (comment == null || comment.isBlank()) return comment;
         String trimmed = comment.trim();
 
-        // Python 파일: # 주석 형식만 사용
-        if (".py".equals(extension)) {
+        // Python/Properties/YAML 파일: # 주석 형식만 사용
+        if (isHashCommentFamily(extension)) {
             if (trimmed.startsWith("#")) return comment;
             // //, /*, /** 등 다른 언어 스타일은 # 스타일로 변환
             String[] pyLines = trimmed.split("\n");
@@ -840,6 +1006,7 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         // JavaScript/CSS 블록 내 // 주석으로 시작하는 HTML 블록 처리 (HTML/XML 파일에서만 해당)
         if (trimmed.startsWith("//") && trimmed.contains("<!--")) {
+            if (isCssFamily(extension)) return toCssBlockComment(trimmed);
             if (!isXmlFamily(extension)) {
                 // Java 등 비-XML 파일: 이미 // 형식이므로 변환 없이 그대로 사용
                 return comment;
@@ -852,7 +1019,9 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         // HTML/XML 본문에서 발견된 // 주석 → HTML 주석으로 변환 (HTML/XML 파일에서만 해당)
         // (HTML 파일의 경우 <script>, <style> 태그 외부에서는 // 주석이 유효하지 않음)
+        // CSS는 // 한 줄 주석을 지원하지 않으므로 /* */ 로 변환(role-css.md 신설, 2026-08-11)
         if (trimmed.startsWith("//") && !trimmed.startsWith("// <!--")) {
+            if (isCssFamily(extension)) return toCssBlockComment(trimmed);
             if (!isXmlFamily(extension)) {
                 // Java 등 비-XML 파일: 이미 올바른 // 형식이므로 변환 없이 그대로 사용
                 return comment;
@@ -919,10 +1088,11 @@ public class ClaudeServiceImpl implements ClaudeService {
             return result;
         }
 
-        // // 스타일은 그대로 통과
+        // // 스타일은 그대로 통과 (CSS는 위쪽 // 분기에서 이미 /* */ 로 변환되어 여기 도달하지 않음)
         if (trimmed.startsWith("//")) return comment;
 
-        // 주석 마커가 전혀 없는 순수 텍스트: // 접두어를 붙여 컴파일 에러 방지
+        // 주석 마커가 전혀 없는 순수 텍스트: CSS는 /* */, 그 외에는 // 접두어를 붙여 컴파일 에러 방지
+        if (isCssFamily(extension)) return toCssBlockComment(trimmed);
         String[] lines = trimmed.split("\n");
         StringBuilder fixed = new StringBuilder();
         for (String line : lines) {
