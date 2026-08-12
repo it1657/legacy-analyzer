@@ -89,6 +89,11 @@ public class SessionState {
   @Column(name = "force_active")
   private boolean forceActive = false;
 
+  // 최종 보고서(README) 생성 여부 - 부분 선택 분석은 기본 생략(옵트인), 전체 분석은 기본 생성.
+  // '이어서 분석'(재개) 시에도 최초 선택을 그대로 유지해야 하므로 forceActive와 동일하게 세션에 영속한다.
+  @Column(name = "generate_readme")
+  private boolean generateReadme = true;
+
   @Transient
   @JsonProperty("sessionSummary")
   private SessionSummaryDto sessionSummary;
@@ -329,6 +334,8 @@ public class SessionState {
   public void setRequirements(String requirements) { this.requirements = requirements; }
   public boolean isForceActive() { return forceActive; }
   public void setForceActive(boolean forceActive) { this.forceActive = forceActive; }
+  public boolean isGenerateReadme() { return generateReadme; }
+  public void setGenerateReadme(boolean generateReadme) { this.generateReadme = generateReadme; }
 
   // 분석을 중단해야 하는지 판단
   public boolean shouldStop() {

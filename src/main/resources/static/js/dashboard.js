@@ -21,6 +21,9 @@ let globalFilesCache = [];
 let selectedFilePaths = new Set();
 // 트리 빌드 시점의 전체 파일 수 - "전체 선택 상태(=선택 파라미터 생략)" 판단 기준
 let fileTreeTotalCount = 0;
+// README 생성 체크박스를 사용자가 직접 클릭해서 기본값을 덮어썼는지 여부.
+// true가 되면 트리 선택 상태가 바뀌어도(updateSelectionCounter) 더 이상 자동으로 체크값을 바꾸지 않는다.
+let generateReadmeUserOverridden = false;
 let analysisTimer = null;
 let currentSessionId = null;
 let pollingIntervalId = null;   // SSE 대신 폴링 인터벌
@@ -84,7 +87,8 @@ function setExtraControlsLocked(locked) {
     '#analysisRequirements',
     'button[onclick="resetDashboard()"]',
     '#fileTreeSection button',
-    '#fileTreeContainer input.tree-checkbox'
+    '#fileTreeContainer input.tree-checkbox',
+    '#generateReadmeCheckbox'
   ];
   selectors.forEach(sel => {
     document.querySelectorAll(sel).forEach(el => {
@@ -372,6 +376,11 @@ function buildAndRenderFileTree(filesArray) {
   selectedFilePaths = new Set();
   fileTreeTotalCount = filesArray.length;
   filesArray.forEach(file => selectedFilePaths.add(normalizeFilePath(file.fileName)));
+  // 새 트리는 항상 전량 선택(=전체 분석) 상태로 시작하므로, README 생성 체크박스도 기본값(체크)으로
+  // 되돌리고 사용자 수동 조작 여부도 초기화한다.
+  generateReadmeUserOverridden = false;
+  const generateReadmeCheckbox = document.getElementById('generateReadmeCheckbox');
+  if (generateReadmeCheckbox) generateReadmeCheckbox.checked = true;
 
   if (filesArray.length === 0) {
     section.style.display = 'none';
@@ -509,6 +518,16 @@ function updateAncestorState(li) {
 function updateSelectionCounter() {
   const el = document.getElementById('txtTreeSelected');
   if (el) el.textContent = `선택됨: ${selectedFilePaths.size} / ${fileTreeTotalCount}`;
+
+  // README 생성 체크박스 기본값 자동 조정: 전체 분석(전량 선택)은 기본 체크, 부분 선택은 기본 해제.
+  // 사용자가 체크박스를 직접 조작한 적이 있으면(generateReadmeUserOverridden) 그 선택을 존중해 건드리지 않는다.
+  if (!generateReadmeUserOverridden) {
+    const generateReadmeCheckbox = document.getElementById('generateReadmeCheckbox');
+    if (generateReadmeCheckbox) {
+      const isPartialSelection = selectedFilePaths.size > 0 && selectedFilePaths.size < fileTreeTotalCount;
+      generateReadmeCheckbox.checked = !isPartialSelection;
+    }
+  }
 }
 
 // 트리 전체를 선택하거나(현재 전량 선택 상태면) 전체 해제한다.
@@ -575,6 +594,15 @@ async function initLlmProviderConfig() {
 // 컨테이너 레벨 이벤트 위임: 체크박스/토글 개수만큼 리스너를 달지 않아 대량 파일에서도 가볍다.
 document.addEventListener('DOMContentLoaded', () => {
   initLlmProviderConfig();
+
+  // 사용자가 README 생성 체크박스를 직접 클릭하면, 이후 트리 선택이 바뀌어도(updateSelectionCounter)
+  // 자동 기본값 로직이 그 선택을 덮어쓰지 않도록 override 플래그를 세운다.
+  const generateReadmeCheckbox = document.getElementById('generateReadmeCheckbox');
+  if (generateReadmeCheckbox) {
+    generateReadmeCheckbox.addEventListener('change', () => {
+      generateReadmeUserOverridden = true;
+    });
+  }
 
   const container = document.getElementById('fileTreeContainer');
   if (!container) return;
@@ -666,6 +694,11 @@ async function runBatchAnalysis() {
 
   const selectedModel = document.getElementById('modelSelect')?.value || 'claude-sonnet-4-6';
 
+  // README 생성 체크박스 현재 상태를 그대로 전달한다 (전체 분석 기본 체크/부분 선택 기본 해제,
+  // 사용자가 직접 켜거나 끈 경우 그 값 우선). 요소가 없으면(트리 미조회 등 예외 상황) 기존과 동일하게
+  // 자동 생성되도록 true로 폴백한다.
+  const generateReadme = document.getElementById('generateReadmeCheckbox')?.checked !== false;
+
   // 백엔드에 분석 시작 요청
   const requestBody = {
     sourcePath,
@@ -673,12 +706,16 @@ async function runBatchAnalysis() {
     sessionId: currentSessionId,
     model: selectedModel,
     forceActive: 'false',
+    generateReadme: generateReadme ? 'true' : 'false',
     requirements: document.getElementById('analysisRequirements')?.value?.trim() || ''
   };
   // 트리에서 일부만 체크된 경우에만 selectedPaths를 실어보낸다. 전량 선택 상태면 기존과 동일하게 생략(=전체 분석).
   if (selectedFilePaths.size > 0 && selectedFilePaths.size < fileTreeTotalCount) {
     requestBody.selectedPaths = JSON.stringify(Array.from(selectedFilePaths));
     logConsole.textContent += `[안내] ${selectedFilePaths.size}개 파일만 선택되어 분석됩니다.\n`;
+    if (!generateReadme) {
+      logConsole.textContent += `[안내] README(최종 보고서) 생성이 생략됩니다.\n`;
+    }
   }
 
   let startResp;
@@ -1333,6 +1370,12 @@ async function runUploadAnalysis() {
       + `(AI 주석 분석 대상 ${analyzableCount}개 / 로그·설정·인증서 등 원본 보존 대상 ${skippedCount}개)`
       + (isTreeFiltered ? ` — 트리에서 ${selectedFilePaths.size}개 파일만 선택됨\n` : '...\n');
 
+  // README 생성 체크박스는 서버 경로 직접 지정 분석과 같은 UI(#fileTreeSection)를 공유하므로 값도 동일하게 전달한다.
+  const generateReadme = document.getElementById('generateReadmeCheckbox')?.checked !== false;
+  if (!generateReadme) {
+    logConsole.textContent += `[안내] README(최종 보고서) 생성이 생략됩니다.\n`;
+  }
+
   currentSessionId = generateSessionId();
   isUploadModeSession = true;
   isAnalysisPaused = false;
@@ -1349,6 +1392,7 @@ async function runUploadAnalysis() {
   formData.append('model', document.getElementById('modelSelect')?.value || 'claude-sonnet-4-6');
   formData.append('projectName', uploadSourceHandle.name);
   formData.append('requirements', document.getElementById('analysisRequirements')?.value?.trim() || '');
+  formData.append('generateReadme', generateReadme ? 'true' : 'false');
 
   let startResp;
   try {
