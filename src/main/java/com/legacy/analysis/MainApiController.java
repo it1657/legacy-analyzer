@@ -179,6 +179,14 @@ public class MainApiController {
     boolean forceActive = "true".equalsIgnoreCase(request.getOrDefault("forceActive", "false"));
     // 프론트 파일 트리에서 일부만 선택했을 때만 값이 실려 온다 (없으면 전체 분석)
     final Set<String> selectedRelativePaths = parseSelectedPaths(request.get("selectedPaths"));
+    boolean isPartialSelection = selectedRelativePaths != null && !selectedRelativePaths.isEmpty();
+    // README(최종 보고서) 생성 여부 - 프론트가 명시적으로 값을 실어보내면 그 값을 그대로 따르고,
+    // 값이 없으면 기본 정책을 적용한다: 전체 분석은 기존과 동일하게 자동 생성(true),
+    // 부분 선택 분석은 LLM 호출 비용을 아끼도록 기본 생략(false, 옵트인 - 체크박스로 켜야 생성됨).
+    String generateReadmeParam = request.get("generateReadme");
+    final boolean generateReadme = (generateReadmeParam == null || generateReadmeParam.isBlank())
+        ? !isPartialSelection
+        : "true".equalsIgnoreCase(generateReadmeParam);
 
     // 모델 선택 적용
     if (!selectedModel.isBlank()) {
@@ -208,6 +216,7 @@ public class MainApiController {
     session.setUserId(userSeq);
     session.setUsername(userLoginId);
     session.setForceActive(forceActive);
+    session.setGenerateReadme(generateReadme);
     if (!requirements.isBlank()) session.setRequirements(requirements);
     session.setCurrentPhase("STARTING");
     session.addRecentLog("[세션 시작] 사용자: " + userLoginId);
@@ -218,7 +227,7 @@ public class MainApiController {
 
     // 비동기 분석 시작
     new Thread(() -> runAnalysis(sessionId, finalSourcePath, finalOutputPath, isForce,
-        finalUserId, finalUsername, selectedRelativePaths)).start();
+        finalUserId, finalUsername, selectedRelativePaths, generateReadme)).start();
 
     result.put("sessionId", sessionId);
     result.put("message", "분석을 시작했습니다.");
@@ -305,6 +314,7 @@ public class MainApiController {
       @RequestParam(value = "model", required = false) String selectedModel,
       @RequestParam(value = "projectName", required = false) String projectName,
       @RequestParam(value = "requirements", required = false) String requirements,
+      @RequestParam(value = "generateReadme", required = false) String generateReadmeParam,
       Authentication authentication) {
 
     Map<String, Object> result = new HashMap<>();
@@ -363,7 +373,13 @@ public class MainApiController {
     session.addRecentLog("[세션 시작] 업로드 분석 - 사용자: " + userLoginId + ", 파일 " + files.length + "개");
 
     // 업로드 모드는 프론트에서 이미 선택된 파일만 올라오므로 서버 단에서 추가 필터링할 필요가 없다.
-    new Thread(() -> runAnalysis(sessionId, uploadRootStr, null, false, userSeq, userLoginId, null)).start();
+    // README 생성 여부는 서버 경로 직접 지정 분석과 같은 체크박스(UI 공용)를 그대로 사용하므로,
+    // 프론트가 값을 명시하지 않은 경우(구버전 클라이언트 등)에만 기존 동작(자동 생성)으로 폴백한다.
+    boolean generateReadme = (generateReadmeParam == null || generateReadmeParam.isBlank())
+        ? true
+        : "true".equalsIgnoreCase(generateReadmeParam);
+    session.setGenerateReadme(generateReadme);
+    new Thread(() -> runAnalysis(sessionId, uploadRootStr, null, false, userSeq, userLoginId, null, generateReadme)).start();
 
     result.put("sessionId", sessionId);
     result.put("message", "업로드 분석을 시작했습니다.");
@@ -867,7 +883,7 @@ public class MainApiController {
 
   private void runAnalysis(String sessionId, String normalizedSourcePath,
       String normalizedOutputPath, boolean isForceActive, Long userId, String username,
-      Set<String> selectedRelativePaths) {
+      Set<String> selectedRelativePaths, boolean generateReadme) {
 
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) {
@@ -1189,7 +1205,7 @@ public class MainApiController {
       session.setCurrentPhase("FINALIZING");
       session.addRecentLog("[시스템] ✓ AI 분석 완료! 최종 보고서를 생성합니다.");
       String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
-      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName,
+      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName, generateReadme,
           successCount.get(), alreadyProcessedCount.get(), skipCount.get(), startTime, history);
 
     } catch (InterruptedException e) {
@@ -1237,6 +1253,8 @@ public class MainApiController {
       String normalizedSourcePath = session.getSourcePath();
       String normalizedOutputPath = session.getOutputPath();
       boolean isForceActive = session.isForceActive();
+      // README 생성 여부는 최초 분석 시작 시 정한 값을 재개 시에도 그대로 유지한다.
+      boolean generateReadme = session.isGenerateReadme();
 
       boolean isCopyMode = !normalizedSourcePath.equals(normalizedOutputPath);
       Path sourceRootPath = Path.of(normalizedSourcePath);
@@ -1420,7 +1438,7 @@ public class MainApiController {
 
       session.setCurrentPhase("FINALIZING");
       String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
-      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName,
+      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName, generateReadme,
           successCount.get(), alreadyProcessedCount.get(), skipCount.get(), startTime, history);
 
     } catch (InterruptedException e) {
@@ -1570,7 +1588,7 @@ public class MainApiController {
   }
 
   private void finalizeAnalysis(SessionState session, String sessionId,
-      Path finalProjectOutputPath, String readmeFileName, int successCount,
+      Path finalProjectOutputPath, String readmeFileName, boolean generateReadme, int successCount,
       int alreadyProcessedCount, int skipCount, long startTime, AnalysisHistory history) {
 
     try {
@@ -1627,27 +1645,32 @@ public class MainApiController {
       // 완료 통계 세션에 저장
       sessionManager.completeSession(sessionId);
 
-      // README 생성
-      session.addRecentLog("[시스템] 📄 최종 보고서(README) 생성 중...");
+      // README 생성 (부분 선택 분석에서 사용자가 생성을 생략하도록 선택한 경우, LLM 호출까지
+      // 이어지는 이 블록 전체를 건너뛰어 분석 시간을 단축한다 - generateReadme 옵트인 옵션)
       String readmeFullPath = "";
       String generatedReadmeContent = "";
-      try {
-        StringBuilder projectStructureSummary = buildDetailedProjectStructure(session, finalProjectOutputPath);
-        generatedReadmeContent = retryHandler.executeWithRetry(sessionId, readmeFileName,
-            () -> claudeService.analyzeCodeWithClaude(
-                projectStructureSummary.toString(), readmeFileName,
-                finalProjectOutputPath.toString()));
-        final String readmeContentFinal = generatedReadmeContent;
-        Path readmePath = finalProjectOutputPath.resolve(readmeFileName);
-        retryHandler.executeWithRetry(sessionId, readmeFileName, () -> {
-          Files.writeString(readmePath, readmeContentFinal, StandardCharsets.UTF_8);
-          return null;
-        });
-        readmeFullPath = readmePath.toAbsolutePath().toString();
-        session.addRecentLog("[시스템] ✅ 최종 보고서(README) 생성 완료: " + readmeFileName);
-      } catch (Exception e) {
-        log.error("[README 생성 오류]", e);
-        session.addRecentLog("[경고] README 생성 중 오류 (분석은 완료됨): " + e.getMessage());
+      if (generateReadme) {
+        session.addRecentLog("[시스템] 📄 최종 보고서(README) 생성 중...");
+        try {
+          StringBuilder projectStructureSummary = buildDetailedProjectStructure(session, finalProjectOutputPath);
+          generatedReadmeContent = retryHandler.executeWithRetry(sessionId, readmeFileName,
+              () -> claudeService.analyzeCodeWithClaude(
+                  projectStructureSummary.toString(), readmeFileName,
+                  finalProjectOutputPath.toString()));
+          final String readmeContentFinal = generatedReadmeContent;
+          Path readmePath = finalProjectOutputPath.resolve(readmeFileName);
+          retryHandler.executeWithRetry(sessionId, readmeFileName, () -> {
+            Files.writeString(readmePath, readmeContentFinal, StandardCharsets.UTF_8);
+            return null;
+          });
+          readmeFullPath = readmePath.toAbsolutePath().toString();
+          session.addRecentLog("[시스템] ✅ 최종 보고서(README) 생성 완료: " + readmeFileName);
+        } catch (Exception e) {
+          log.error("[README 생성 오류]", e);
+          session.addRecentLog("[경고] README 생성 중 오류 (분석은 완료됨): " + e.getMessage());
+        }
+      } else {
+        session.addRecentLog("[시스템] ℹ️ README 생성 생략 (사용자 옵션)");
       }
 
       // 완료 요약 메시지

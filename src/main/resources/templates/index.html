@@ -107,9 +107,13 @@
                         </span>
                         <span id="txtTreeSelected" style="font-size:12px; color:#4e73df; font-weight:bold;"></span>
                     </div>
-                    <div style="display:flex; gap:8px;">
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                         <button type="button" onclick="toggleTreeSelectAll()" class="btn" style="padding:4px 10px; font-size:12px;">전체 선택/해제</button>
                         <button type="button" onclick="toggleTreeExpandAll()" class="btn" style="padding:4px 10px; font-size:12px;">모두 펼치기/접기</button>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:#c9d1d9; margin-left:8px; cursor:pointer;" title="전체 분석은 기본 체크(자동 생성), 부분 선택 분석은 기본 해제(생략)됩니다. 필요하면 직접 켜고 끌 수 있습니다.">
+                            <input type="checkbox" id="generateReadmeCheckbox" checked>
+                            📄 README 생성
+                        </label>
                     </div>
                     <div id="fileTreeContainer" class="file-tree-container"></div>
                 </div>
