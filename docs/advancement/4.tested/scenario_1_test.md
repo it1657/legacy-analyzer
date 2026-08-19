@@ -1,5 +1,7 @@
 # 시나리오 1 테스트 기록 — GPU 없는 노트북 경량 배포판
 
+> **⏸ 보류(hold, 2026-08-19)**: 이 트랙은 더 이상 진행하지 않는다 — `scenario_3`이 유일한 활성 트랙으로 확정됐다(경위: `docs/advancement/0.status/handOff.md` 26차). 아래 실측 기록은 그대로 보존하고, 관련 코드/이미지/CI/compose 파일도 삭제·비활성화 없이 그대로 유지한다 — 재개 시 이 문서의 "검증 상태" 표를 그대로 이어서 쓸 수 있게 하는 게 목적이다.
+
 이 문서는 `docs/advancement/2.scenario/scenario_1.md`의 "검증 방법" 절, `docs/advancement/3.confirmed/scenario_1_confirmed.md`의 확정 스펙을 기준으로 실제 검증이 됐는지/안 됐는지를 추적한다.
 
 ## 구현 완료 (2026-07-23) — 아직 실행 검증은 안 됨

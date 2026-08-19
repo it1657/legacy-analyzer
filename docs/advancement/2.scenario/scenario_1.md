@@ -1,5 +1,7 @@
 # 시나리오 1: GPU 없는 노트북 — `docker-compose pull`만으로 구동하는 경량 배포판
 
+> **⏸ 보류(hold, 2026-08-19)**: 이 트랙은 더 이상 진행하지 않는다 — `scenario_3`이 유일한 활성 트랙으로 확정됐다(경위: `docs/advancement/0.status/handOff.md` 26차). 단, 이미 만들어둔 코드/Docker Hub 이미지(`it1657/legacy-analyzer`)/CI 파이프라인(`.github/workflows/docker-publish.yml`)/compose 파일(`docker-compose.gpu.yml`/`.env.lite.example`/`docker/ollama-entrypoint.sh` 등)은 **삭제·비활성화하지 않고 그대로 유지**한다 — 재개 시 즉시 이어갈 수 있는 상태를 보존하는 게 목적이다. 아래 본문은 보류 시점까지의 설계·결정 기록으로 그대로 둔다.
+
 전제: `scenario_0.md`의 `LlmClient` 추상화가 이미 적용돼 있다는 가정 하에 작성한다.
 
 ## 목표

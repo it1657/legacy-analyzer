@@ -8,10 +8,12 @@
 
 이 문서는 인덱스 역할이다 — 실제 작업 순서와 각 문서의 위치는 다음과 같다:
 
-- **`scenario_0.md`** — **가장 먼저.** 설정 프로퍼티 하나만 바꾸면 Anthropic ↔ 다른 LLM(사내/로컬 LLM 서버 등)으로 전환할 수 있게 앱 코드를 분리하는 작업. 다른 시나리오는 전부 이 작업이 끝난 뒤 시작한다.
-- **`scenario_1.md`** — GPU 없는 노트북에서 `docker-compose pull`만으로 구동 가능한 경량 배포판.
-- **`scenario_2.md`** — GPU·디스크는 여유 있지만 인터넷망을 쓸 수 없는 폐쇄망/에어갭 환경.
-- **`scenario_3.md`** — 인터넷망도 쓸 수 있고 리소스도 충분해서 Anthropic API와 로컬 LLM을 상황에 따라 선택하는 환경.
+> **트랙 상태 갱신(2026-08-19)**: `scenario_1`/`scenario_2`는 **보류(hold)** 상태로 전환됐다 — 이미 만들어둔 코드/Docker Hub 이미지(`it1657/legacy-analyzer`)/CI 파이프라인(`.github/workflows/docker-publish.yml`)/compose 파일(`docker-compose.gpu.yml` 등)은 전부 그대로 두고(삭제·비활성화 없음, 재개 시 즉시 이어갈 수 있는 상태 유지), 문서 상태 표기만 보류로 바꿨다. **`scenario_3`이 현재 유일한 활성 트랙**이다. 경위는 `docs/advancement/0.status/handOff.md` 26차 참고.
+
+- **`scenario_0.md`** — **가장 먼저.** 설정 프로퍼티 하나만 바꾸면 Anthropic ↔ 다른 LLM(사내/로컬 LLM 서버 등)으로 전환할 수 있게 앱 코드를 분리하는 작업. 다른 시나리오는 전부 이 작업이 끝난 뒤 시작한다. (완료됨)
+- **`scenario_1.md`** — GPU 없는 노트북에서 `docker-compose pull`만으로 구동 가능한 경량 배포판. **보류(hold, 2026-08-19)**.
+- **`scenario_2.md`** — GPU·디스크는 여유 있지만 인터넷망을 쓸 수 없는 폐쇄망/에어갭 환경. **보류(hold, 2026-08-19)**.
+- **`scenario_3.md`** — 인터넷망도 쓸 수 있고 리소스도 충분해서 Anthropic API와 로컬 LLM을 상황에 따라 선택하는 환경. **유일한 활성 트랙(2026-08-19)**.
 
 이 문서(`plan.md`)에는 특정 시나리오에 속하지 않는 **공통 설계**만 남긴다: 컨테이너 구성 원칙, RAG(P1, `scenario_1.md` 기준 채택 확정·구현 착수), Provider 선택 UI/UX(P2). 로컬/사내 LLM 설치 절차, DB 선택(H2 vs Postgres), 네트워크 노출 정책 같은 시나리오별 결정은 각 `scenario_*.md`를 본다.
 

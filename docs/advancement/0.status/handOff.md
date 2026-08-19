@@ -1,4 +1,4 @@
-# 진행 현황 핸드오프 (2026-08-11 기준, 25차 갱신)
+# 진행 현황 핸드오프 (2026-08-19 기준, 26차 갱신)
 
 이 문서는 `legacy-analyzer`를 "Claude API ↔ 로컬/사내 LLM 설정만으로 전환" 가능하게 만드는 작업의 현재까지 진행 상황을 정리한다. 새 세션/다른 담당자가 이어받을 때 이 문서만 읽고 바로 이어갈 수 있도록 작성한다.
 
@@ -326,3 +326,35 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
   - `admin/dashboard.html` **1507-1513줄**(`myShortModel(name)` 함수) — my-activity.html과 완전히 동일한 패턴/폴백 구조.
 - ~~`GET /api/config/llm-provider` 응답 스키마를 지금 단순하게 갈지, P2를 미리 염두에 두고 설계할지~~ — **완료, 단순한 스키마로 확정**(위 "구현 진행 상황 3차" 4번 참고).
 - `docker-compose.yml` 배포 방식(수동 SSH vs CI/CD) 확인 — 환경변수 이름/배선 자체는 끝났고(위 5번), 실제로 어떤 방식으로 서버에 반영할지만 남음.
+
+## scenario_1/2 보류, scenario_3 단일 활성 트랙 확정 + README 생략 옵션 배포 완료 + PGX Qwen3/RAG 샌드박스 계획 (26차, 2026-08-19)
+
+`analyzer-plan` 프로젝트(별도 리드 트랙)에서 로드맵을 정리한 결과와, 그 직전에 논의된 PGX 서버 자체 LLM 샌드박스 계획을 이번 세션에서 `legacy-analyzer` 쪽 문서에 반영했다(`analyzer-plan`은 `legacy-analyzer` 문서를 직접 수정하지 않는 트랙이라 인계됨). 이번 세션은 **문서만 갱신했다 — 실제 코드 변경 없음**.
+
+### 1. scenario_1/2 보류(hold), scenario_3 단일 활성 트랙 확정
+- **결정**: `scenario_1`(경량 노트북)/`scenario_2`(폐쇄망)는 더 이상 진행하지 않고 **보류(hold)** 상태로 전환. `scenario_3`(선택형, 회사 서버 조건)만 유일한 활성 트랙으로 계속 진행.
+- **이유**: `scenario_1`은 이미 실측으로 품질 미달(CPU 7b, Haiku 대비 16.5배 느림 + 품질도 열위, 18~19차 참고)이 확인됐고, PGX GPU 트랙(아래 3번)이 속도·품질을 동시에 개선할 더 실질적인 해법으로 판단됨 — 로드맵을 `scenario_3` 하나로 집중하기로 정리.
+- **인프라 처리 방침**: 이미 만들어둔 산출물(Docker Hub 이미지 `it1657/legacy-analyzer`, GitHub Actions CI 파이프라인 `.github/workflows/docker-publish.yml`, `docker-compose.gpu.yml`/`.env.lite.example`/`docker/ollama-entrypoint.sh` 등)은 **삭제·비활성화하지 않고 그대로 유지** — 재개 시 즉시 이어갈 수 있는 상태 보존이 목적. 실제로 정리 작업은 하지 않음(사용자 명시적 결정).
+- **문서 반영**: `1.plan/plan.md`(인덱스 절), `2.scenario/scenario_1.md`/`scenario_2.md`, `3.confirmed/scenario_1_confirmed.md`, `4.tested/scenario_1_test.md`에 "보류(hold, 2026-08-19)" 안내 블록 추가 완료. 이 `handOff.md`가 이번 갱신 대상.
+- PM이 앞서 제안했던 "PGX 8B→14B 비교 = scenario_1의 GPU+14B 미완료 백로그를 닫는 작업"이라는 프레이밍은 이제 무효 — scenario_1 자체가 보류이므로 그 백로그를 닫을 필요가 없어짐. PGX 작업(아래 3번)은 순수하게 **scenario_3 선행 학습/검증**으로만 의미를 갖는다.
+
+### 2. "부분선택 분석 README 생성 생략 옵션" 기능 — 구현→QA→master 병합·push 전체 완료 확인
+- 이전에 인계했던 이 기능이 **다른 세션에서 이미 구현 → QA(3개 시나리오 Pass) → PL이 master 병합·push(`f8e2f75`..`bc5810a`)까지 전체 완료**돼 있었음을 확인. 관련 기록 파일 2건(`docs/chat/dev/2026-08-12-partial-analysis-readme-skip-option-implementation.md`, `docs/chat/etc/2026-08-13-partial-analysis-readme-skip-option-completion.md`)이 커밋되지 않은 채 working tree에 남아있던 것을 발견해 별도 커밋(`19f6cae`)으로 반영·push까지 완료된 상태.
+
+### 3. scenario_0 로컬 테스트 — 기존 CPU 실측치와 동일 증상 재확인
+- 사용자가 scenario_0(`LlmClient` 추상화)를 본인 로컬 PC(회사 PGX 서버 아님)에 설치해 직접 테스트 — 속도가 너무 느려 "경량화가 더 필요한가?"라는 질의가 나왔음.
+- **결론**: 이번 로컬 테스트의 "느림" 증상은 scenario_1의 기확정 실측치(18차 참고 — CPU 7b, **파일당 120.8초, Haiku 대비 16.5배 느림, 품질도 미달**)와 **정확히 같은 증상**임을 재확인. 모델을 더 줄이는 "경량화"는 7B가 이미 품질 하한선에 걸려있어 역효과(속도는 소폭 개선돼도 품질은 더 나빠짐) — 반대로 **모델을 키우면서 GPU로 옮기는 쪽(PGX+Qwen3, 8B→14B)이 속도·품질을 동시에 개선할 수 있는 실질적 해법**으로 재확인됨. 즉 "경량화 필요성"이 아니라 GPU 트랙(PGX)이 왜 필요한지를 재확인해주는 근거로 해석.
+
+### 4. PGX 서버 Qwen3+RAG 독립 샌드박스 구축 계획 (scenario_3 선행 작업으로 프레이밍)
+회사 PGX 서버(Lenovo ThinkStation PGX / NVIDIA DGX Spark, **ARM64**, GPU NVIDIA GB10, **UMA 통합메모리 128GB**, Ubuntu 24.04.4 LTS)에 사용자 본인 계정으로 Qwen3 기반 LLM+RAG 스택을 독립적으로 구축하는 계획을 PM/PL 자문을 거쳐 논의했다. **legacy-analyzer 운영 서버와 지금 당장 연동하는 게 아니라, 본인 계정 안에서 완결되는 독립 학습/검증 샌드박스**로 범위를 재확정했고(운영 서버가 아직 scenario_0/RAG 등 모더나이제이션 코드를 배포받지 못한 상태이기도 함), scenario_3 실 연동을 겨냥한 **선행 작업**으로만 프레이밍됨(인프라팀 공식 확인을 대체하지 않음).
+
+- **모델**: **Qwen3-8B(호환성 스모크) → Qwen3-14B(실비교 대상)** 단계적 승급으로 확정 — PM은 14B로 바로 시작하자는 의견이었으나, PL이 제기한 기술 리스크(GB10이 UMA라 메모리 대역폭이 병목일 수 있음, 매우 신규 하드웨어라 Ollama 0.32.1 태그의 GB10 CUDA 빌드 지원 여부 미검증)를 받아들여 PL 안(8B→14B 단계적 승급)을 채택.
+- **서빙**: Ollama로 별도 구성(공용 vLLM에 얹지 않음), Ollama 컨테이너에 `deploy.resources.limits.memory` cgroup 상한 신규 추가 필요(scenario_1엔 없던 항목, 공용 vLLM과의 자원 경합 방지 목적).
+- **RAG**: 미루지 않고 Qwen3와 함께 구축하기로 결정 — "관측 기반 채택" 원칙(`plan.md`)은 운영 서비스에 불필요한 인프라를 얹지 말라는 취지였지 개인 샌드박스엔 적용 이유가 약하다고 재해석. `com.legacy.rag`의 검증된 설계(임베딩 클라이언트/Chroma v2 REST/cleanup 패턴)를 참고 아키텍처로 재사용 예정. Chroma UI 모니터링(chromadb-ui 등)도 스택에 포함.
+- **LangChain4j**: PM/PL 공통 의견으로 **라이브 도입 보류**(Chroma 통합 베타 + 기존 자체구현이 이미 검증됨) — 개인 샌드박스 파일럿 여지만 저우선순위로 남김.
+- **범위/보안**: 네트워크 노출 불필요(localhost 바인딩 유지), 주 계정(A) 1개로 우선 구축(보조 계정 B는 보류).
+- **미착수**: 본인 계정의 **sudo/Docker(또는 Podman rootless) 권한 확인이 아직 미착수** — 사용자가 직접 `sudo -l`/`groups`/`docker ps`/`which podman`으로 확인해야 하고, 그 결과에 따라 4가지 설치 경로(Docker 컨테이너/rootless 컨테이너/유저공간 바이너리/유저 systemd) 중 하나를 확정할 예정.
+
+자세한 논의 경위는 `analyzer-plan` 프로젝트의 `docs/chat/etc/2026-08-19-scenario-1-2-hold-scenario-3-active-decision.md`, `docs/chat/etc/2026-08-19-pgx-qwen3-rag-langchain4j-exploration-plan.md` 참고.
+
+**남은 것**: (1) PGX 계정 sudo/Docker 권한 확인(사용자가 직접), (2) 확인 결과에 맞는 설치 스텝 확정, (3) 설치 방식 확정 후 PM/PL에 방향 전환(독립 샌드박스, RAG 동시 구축) 재확인 검토, (4) scenario_1의 실행 검증 미착수 항목들(총파일 카운터 버그 등)은 보류 상태 그대로 유지 — CoP 리뷰 취합 시점까지 보류.

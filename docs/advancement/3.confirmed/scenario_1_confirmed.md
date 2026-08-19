@@ -1,5 +1,7 @@
 # 시나리오 1 확정 스펙 — GPU 없는 노트북 경량 배포판 (1단계)
 
+> **⏸ 보류(hold, 2026-08-19)**: 이 트랙은 더 이상 진행하지 않는다 — `scenario_3`이 유일한 활성 트랙으로 확정됐다(경위: `docs/advancement/0.status/handOff.md` 26차). 아래 표에 정리된 이미 확정·구현된 인프라(Docker Hub 이미지 `it1657/legacy-analyzer`, CI 파이프라인 `.github/workflows/docker-publish.yml`, compose/entrypoint 파일 등)는 **삭제·비활성화하지 않고 그대로 유지**한다 — 재개 가능한 상태 보존이 목적이다.
+
 확정일: 2026-07-22. 이 문서는 `docs/advancement/2.scenario/scenario_1.md`(설계 워킹 드래프트, 전체 논의 과정·근거는 그쪽 참고)에서 결정이 끝난 항목만 스냅샷으로 고정한다. 구현 중 실제 검증 현황은 `docs/advancement/4.tested/scenario_1_test.md`에서 추적하고, 구현·테스트가 전부 끝나면 `docs/advancement/5.completed/scenario_1_completed.md`로 넘어간다.
 
 ## 범위: 1단계(build 기준)만 확정, 2단계(CI 파이프라인)는 별도
