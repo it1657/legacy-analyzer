@@ -72,7 +72,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".java"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".java"), "/test/session-source");
 
     assertTrue(result.contains(JAVA_MARKER), "java role 내용이 반영되어야 함");
     assertFalse(result.contains(PYTHON_MARKER), "python role은 섞이면 안 됨");
@@ -87,7 +87,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".java", ".vue", ".py"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".java", ".vue", ".py"), "/test/session-source");
 
     assertTrue(result.contains(JAVA_MARKER));
     assertTrue(result.contains(VUE_MARKER));
@@ -103,7 +103,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".ts", ".tsx"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".ts", ".tsx"), "/test/session-source");
 
     assertTrue(result.contains(JS_MARKER));
     assertFalse(result.contains(VUE_MARKER), "Vue 컴포넌트 전용 규칙은 순수 JS/TS 프로젝트에 섞이면 안 됨");
@@ -115,7 +115,7 @@ class ClaudeServiceImplRoleMergeTest {
     ClaudeServiceImpl service = newService(llmClient);
 
     String result = service.generateSessionClaudeMd(null,
-        Set.of(".java", ".py", ".js", ".xml", ".xfdl"));
+        Set.of(".java", ".py", ".js", ".xml", ".xfdl"), "/test/session-source");
 
     assertTrue(result.contains(JAVA_MARKER));
     assertTrue(result.contains(PYTHON_MARKER));
@@ -130,7 +130,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".js", ".ts", ".jsx", ".tsx"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".js", ".ts", ".jsx", ".tsx"), "/test/session-source");
 
     int occurrences = result.split(java.util.regex.Pattern.quote(JS_MARKER), -1).length - 1;
     assertEquals(1, occurrences, "role-js 내용이 확장자 개수만큼 중복 병합되면 안 됨");
@@ -144,7 +144,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".json", ".txt", ".sql"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".json", ".txt", ".sql"), "/test/session-source");
 
     assertTrue(result.contains("레거시 엔터프라이즈 시스템"), "base 내용은 그대로 있어야 함");
     assertFalse(result.contains(JAVA_MARKER));
@@ -166,11 +166,11 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String gradleOnly = service.generateSessionClaudeMd(null, Set.of(".gradle"));
+    String gradleOnly = service.generateSessionClaudeMd(null, Set.of(".gradle"), "/test/session-source");
     assertTrue(gradleOnly.contains(GRADLE_MARKER));
     assertFalse(gradleOnly.contains(CSS_MARKER));
 
-    String cssOnly = service.generateSessionClaudeMd(null, Set.of(".css"));
+    String cssOnly = service.generateSessionClaudeMd(null, Set.of(".css"), "/test/session-source");
     assertTrue(cssOnly.contains(CSS_MARKER));
     assertFalse(cssOnly.contains(GRADLE_MARKER));
   }
@@ -183,7 +183,7 @@ class ClaudeServiceImplRoleMergeTest {
     ClaudeServiceImpl service = newService(llmClient);
 
     String result = service.generateSessionClaudeMd(null,
-        Set.of(".java", ".gradle", ".properties", ".yml", ".css"));
+        Set.of(".java", ".gradle", ".properties", ".yml", ".css"), "/test/session-source");
 
     assertTrue(result.contains(JAVA_MARKER));
     assertTrue(result.contains(GRADLE_MARKER));
@@ -202,16 +202,16 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String propertiesOnly = service.generateSessionClaudeMd(null, Set.of(".properties"));
+    String propertiesOnly = service.generateSessionClaudeMd(null, Set.of(".properties"), "/test/session-source");
     assertTrue(propertiesOnly.contains(PROPERTIES_MARKER));
     assertFalse(propertiesOnly.contains(YAML_MARKER));
 
-    String yamlOnly = service.generateSessionClaudeMd(null, Set.of(".yml"));
+    String yamlOnly = service.generateSessionClaudeMd(null, Set.of(".yml"), "/test/session-source");
     assertTrue(yamlOnly.contains(YAML_MARKER));
     assertFalse(yamlOnly.contains(PROPERTIES_MARKER));
 
     // .yml/.yaml 둘 다 role-yaml.md 하나로 매핑되므로 중복 병합되면 안 됨
-    String bothYamlExt = service.generateSessionClaudeMd(null, Set.of(".yml", ".yaml"));
+    String bothYamlExt = service.generateSessionClaudeMd(null, Set.of(".yml", ".yaml"), "/test/session-source");
     int occurrences = bothYamlExt.split(java.util.regex.Pattern.quote(YAML_MARKER), -1).length - 1;
     assertEquals(1, occurrences, "role-yaml 내용이 확장자 개수만큼 중복 병합되면 안 됨");
   }
@@ -222,7 +222,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, Set.of(".java", ".properties", ".yml"));
+    String result = service.generateSessionClaudeMd(null, Set.of(".java", ".properties", ".yml"), "/test/session-source");
 
     assertTrue(result.contains(JAVA_MARKER));
     assertTrue(result.contains(PROPERTIES_MARKER));
@@ -238,7 +238,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String result = service.generateSessionClaudeMd(null, null);
+    String result = service.generateSessionClaudeMd(null, null, "/test/session-source");
 
     assertTrue(result.contains("레거시 엔터프라이즈 시스템"));
     assertFalse(result.contains(JAVA_MARKER));
@@ -253,7 +253,7 @@ class ClaudeServiceImplRoleMergeTest {
     ClaudeServiceImpl service = newService(llmClient);
 
     String result = service.generateSessionClaudeMd(null,
-        Set.of(".java", ".py", ".js", ".vue", ".xml", ".xfdl", ".properties", ".yml", ".gradle", ".css"));
+        Set.of(".java", ".py", ".js", ".vue", ".xml", ".xfdl", ".properties", ".yml", ".gradle", ".css"), "/test/session-source");
 
     int responseFormatIdx = result.indexOf(RESPONSE_FORMAT_HEADING);
     assertTrue(responseFormatIdx > 0, "응답 포맷 섹션이 존재해야 함");
@@ -276,7 +276,7 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient(validMd);
     ClaudeServiceImpl service = newService(llmClient);
 
-    service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of(".vue"));
+    service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of(".vue"), "/test/session-source");
 
     assertTrue(llmClient.called);
     assertTrue(llmClient.lastUserContent.contains(VUE_MARKER),
@@ -288,8 +288,8 @@ class ClaudeServiceImplRoleMergeTest {
     CapturingLlmClient llmClient = new CapturingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient);
 
-    String withoutRole = service.generateSessionClaudeMd(null, Set.of());
-    String withRole = service.generateSessionClaudeMd(null, Set.of(".java", ".py", ".xfdl"));
+    String withoutRole = service.generateSessionClaudeMd(null, Set.of(), "/test/session-source");
+    String withRole = service.generateSessionClaudeMd(null, Set.of(".java", ".py", ".xfdl"), "/test/session-source");
 
     String copyWarningHeading = "## 절대 금지: 아래 예시 문장을 그대로 베끼는 것";
     assertTrue(withoutRole.contains(copyWarningHeading));

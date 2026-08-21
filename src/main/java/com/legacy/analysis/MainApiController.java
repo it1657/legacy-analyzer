@@ -127,7 +127,8 @@ public class MainApiController {
   public Map<String, Object> getLlmProviderConfig() {
     Map<String, Object> result = new HashMap<>();
     result.put("provider", isAnthropicMode() ? "anthropic" : "local");
-    result.put("model", claudeService.getCurrentModel());
+    // 특정 세션에 종속되지 않은 전역 설정 조회이므로 sourceFolderPath 없이(null) 기본 모델을 조회한다.
+    result.put("model", claudeService.getCurrentModel(null));
     // Docker 컨테이너로 구동 중이면 관리자 전용 "서버 경로 직접 지정" 기능이 무의미하다
     // (app 컨테이너에 임의 호스트 경로 bind mount가 없어 필연적으로 오류남 — 2026-07 확인).
     // 프런트엔드가 이 값을 보고 해당 UI 섹션을 숨긴다.
@@ -188,9 +189,10 @@ public class MainApiController {
         ? !isPartialSelection
         : "true".equalsIgnoreCase(generateReadmeParam);
 
-    // 모델 선택 적용
+    // 모델 선택 적용 (2026-08-20 긴급수정: 세션별 격리 — sourcePath를 키로 등록해
+    // 동시에 분석 중인 다른 세션의 모델이 함께 바뀌는 레이스 컨디션을 방지)
     if (!selectedModel.isBlank()) {
-      claudeService.setModel(selectedModel);
+      claudeService.setModel(Path.of(sourcePath).toString(), selectedModel);
       log.info("[모델 선택] user={}, model={}", userLoginId, selectedModel);
     }
 
@@ -360,8 +362,9 @@ public class MainApiController {
       return result;
     }
 
+    // 2026-08-20 긴급수정: 세션별 격리 — uploadRoot(이 세션의 sourcePath가 될 경로)를 키로 등록
     if (selectedModel != null && !selectedModel.isBlank()) {
-      claudeService.setModel(selectedModel);
+      claudeService.setModel(uploadRoot.toString(), selectedModel);
     }
 
     String uploadRootStr = uploadRoot.toString().replace("\\", "/");
@@ -993,7 +996,7 @@ public class MainApiController {
       // CLAUDE.md 생성: prompt.md 표준 템플릿 + 사용자 추가 요구사항(있는 경우)을 AI로 결합하여
       // 이번 분석 세션 전용 시스템 프롬프트를 만들고, 파일별 분석에 사용하도록 등록한다.
       session.addRecentLog("[시스템] 🧭 분석 지침(CLAUDE.md) 생성 중...");
-      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList));
+      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList), sourceRootPath.toString());
       claudeService.setSessionSystemPrompt(sourceRootPath.toString(), generatedClaudeMd);
       if (history != null) {
         history.setClaudeMdContent(generatedClaudeMd);
@@ -1273,7 +1276,7 @@ public class MainApiController {
       // 저장된 내용이 없으면(구버전 세션 등) 새로 생성한다.
       String claudeMdContent = (history != null) ? history.getClaudeMdContent() : null;
       if (claudeMdContent == null || claudeMdContent.isBlank()) {
-        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList));
+        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList), sourceRootPath.toString());
         if (history != null) {
           history.setClaudeMdContent(claudeMdContent);
           analysisHistoryRepository.save(history);
@@ -1613,10 +1616,14 @@ public class MainApiController {
             history.setInputTokens(tokenUsage.getInputTokens());
             history.setOutputTokens(tokenUsage.getOutputTokens());
             history.setTotalTokens(tokenUsage.getTotalTokens());
-            history.setModelName(claudeService.getCurrentModel());
+            // 2026-08-20 긴급수정: 이 세션(session.getSourcePath())에 실제로 설정된 모델을 조회
+            // — sourceFolderPath 없이 조회하면 다른 세션의 오버라이드와 뒤섞일 수 있었던 지점.
+            String sessionModel = claudeService.getCurrentModel(
+                session.getSourcePath() != null ? Path.of(session.getSourcePath()).toString() : null);
+            history.setModelName(sessionModel);
             double cost = calculateEstimatedCost(
                 tokenUsage.getInputTokens(), tokenUsage.getOutputTokens(),
-                claudeService.getCurrentModel());
+                sessionModel);
             history.setEstimatedCost(cost);
           }
         } catch (Exception e) {

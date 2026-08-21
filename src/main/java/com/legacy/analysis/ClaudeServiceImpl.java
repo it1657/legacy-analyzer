@@ -40,8 +40,12 @@ public class ClaudeServiceImpl implements ClaudeService {
     @Value("${anthropic.api.model}")
     private String apiModel;
 
-    // 런타임 모델 오버라이드 (선택한 모델이 있으면 우선 사용)
-    private volatile String modelOverride = null;
+    // 런타임 모델 오버라이드 (2026-08-20 긴급수정: 싱글턴 인스턴스 필드였던 modelOverride를
+    // sessionSystemPrompts와 동일한 세션별(sourceFolderPath 키) 격리 패턴으로 전환.
+    // 기존에는 사용자 A가 모델을 바꾸면 동시에 분석 중인 사용자 B도 그 모델로 전환되는
+    // 레이스 컨디션이 있었다 — 자세한 배경은 analyzer-plan
+    // docs/chat/etc/2026-08-20-user-selectable-provider-analysis-and-setmodel-race-bug.md 참고.
+    private final Map<String, String> sessionModelOverrides = new java.util.concurrent.ConcurrentHashMap<>();
 
     // 분석 세션(소스 경로)별로 AI가 생성한 CLAUDE.md 내용을 보관 (세션 종료 시 정리)
     private final Map<String, String> sessionSystemPrompts = new java.util.concurrent.ConcurrentHashMap<>();
@@ -144,24 +148,35 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     @Override
-    public String getCurrentModel() {
+    public String getCurrentModel(String sourceFolderPath) {
         // local 모드에서는 Anthropic 모델명을 반환하면 안 됨 — llmClient.call()에 그대로 넘어가
         // 자체 LLM 서버로 "claude-sonnet-4-6" 같은 존재하지 않는 모델명이 전송되는 버그를 방지
         if (!isAnthropicMode()) {
             return llmLocalModel;
         }
-        return modelOverride != null ? modelOverride : apiModel;
+        // sourceFolderPath가 없는 호출(예: 세션 무관 설정 조회 API)은 오버라이드를 조회할 대상이
+        // 없으므로 기본 모델을 그대로 반환한다. ConcurrentHashMap은 null 키를 허용하지 않으므로
+        // 조회 전에 반드시 걸러내야 한다.
+        if (sourceFolderPath == null) {
+            return apiModel;
+        }
+        String override = sessionModelOverrides.get(sourceFolderPath);
+        return override != null ? override : apiModel;
     }
 
     @Override
-    public void setModel(String model) {
+    public void setModel(String sourceFolderPath, String model) {
+        if (sourceFolderPath == null) {
+            log.warn("[모델 변경 실패] sourceFolderPath가 없어 세션을 특정할 수 없습니다.");
+            return;
+        }
         if (model == null || model.isBlank()) {
-            this.modelOverride = null;
+            sessionModelOverrides.remove(sourceFolderPath);
             return;
         }
         // 유효 모델만 허용
         if (SUPPORTED_MODELS.containsKey(model)) {
-            this.modelOverride = model;
+            sessionModelOverrides.put(sourceFolderPath, model);
             log.info("[모델 변경] 선택된 모델: {}", model);
         } else {
             log.warn("[모델 변경 실패] 지원하지 않는 모델: {} - 기본값 유지", model);
@@ -178,10 +193,13 @@ public class ClaudeServiceImpl implements ClaudeService {
     public void clearSessionSystemPrompt(String sourceFolderPath) {
         if (sourceFolderPath == null) return;
         sessionSystemPrompts.remove(sourceFolderPath);
+        // 2026-08-20 긴급수정: 모델 오버라이드도 세션 종료 시 함께 정리해 메모리 누수를 방지한다
+        // (sessionSystemPrompts와 동일한 세션 종료 정리 지점을 그대로 재사용).
+        sessionModelOverrides.remove(sourceFolderPath);
     }
 
     @Override
-    public String generateSessionClaudeMd(String customRequirements, Set<String> extensions) {
+    public String generateSessionClaudeMd(String customRequirements, Set<String> extensions, String sourceFolderPath) {
         String baseTemplate = loadBaseSystemPromptTemplate(extensions);
         boolean hasRequirements = customRequirements != null && !customRequirements.isBlank();
 
@@ -214,8 +232,9 @@ public class ClaudeServiceImpl implements ClaudeService {
             + "\n\n## 추가 요구사항 (사용자 지정)\n\n" + customRequirements;
 
         try {
-            LlmResult result = llmClient.call(systemPrompt, userContent, getCurrentModel(), 4096);
-            extractAndStoreTokenUsage(result);
+            String modelToUse = getCurrentModel(sourceFolderPath);
+            LlmResult result = llmClient.call(systemPrompt, userContent, modelToUse, 4096);
+            extractAndStoreTokenUsage(result, modelToUse);
             String generated = result.text();
             // 소형 로컬 모델은 이 생성 단계에서도 지침 문서 대신 다른 형식(JSON 배열/객체 등)을
             // 뱉어내는 경우가 있다. 명백히 마크다운 문서가 아니면 폐기하고 표준 템플릿으로
@@ -622,11 +641,12 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         for (int retry = 0; retry < maxRetries; retry++) {
             try {
-                LlmResult result = llmClient.call(finalSystemPrompt, userContent, getCurrentModel(), apiMaxTokens);
+                String modelToUse = getCurrentModel(sourceFolderPath);
+                LlmResult result = llmClient.call(finalSystemPrompt, userContent, modelToUse, apiMaxTokens);
                 String aiJsonResponse = result.text();
 
                 // 토큰 사용량 추출 및 저장
-                extractAndStoreTokenUsage(result);
+                extractAndStoreTokenUsage(result, modelToUse);
 
                 log.info("[API 분석 성공] 파일명: {}", fileName);
                 return mergeCommentsIntoCode(sourceCode, aiJsonResponse, extension);
@@ -712,8 +732,9 @@ public class ClaudeServiceImpl implements ClaudeService {
         String userContent = "프로젝트명: " + projectName + "\n\n" + projectStructure;
 
         try {
-            LlmResult result = llmClient.call(systemPrompt, userContent, getCurrentModel(), 4096);
-            extractAndStoreTokenUsage(result);
+            String modelToUse = getCurrentModel(sourceFolderPath);
+            LlmResult result = llmClient.call(systemPrompt, userContent, modelToUse, 4096);
+            extractAndStoreTokenUsage(result, modelToUse);
             log.info("[README 생성 완료] 프로젝트: {}, 길이: {}자", projectName, result.text().length());
             return result.text();
         } catch (Exception e) {
@@ -1274,8 +1295,13 @@ public class ClaudeServiceImpl implements ClaudeService {
      * LlmClient 호출 결과에서 토큰 사용량 정보를 추출하여 누적 저장.
      * (이전엔 Anthropic 원시 응답 Map을 직접 파싱했으나, LlmClient 추상화 도입 이후
      * 각 구현체가 이미 파싱해 담아둔 LlmResult를 받는 형태로 단순화됨)
+     *
+     * 2026-08-20 긴급수정: getCurrentModel()이 sourceFolderPath를 요구하는 세션별 조회로
+     * 바뀌면서, 이 메서드 내부에서 "현재" 모델을 다시 조회하면 호출 시점 사이에 다른 세션이
+     * setModel()을 호출했을 때 실제 이 호출에 쓰인 모델과 다른 값이 기록될 위험이 있다.
+     * 그래서 호출부가 이미 알고 있는 실제 사용 모델(modelUsed)을 그대로 넘겨받는다.
      */
-    private void extractAndStoreTokenUsage(LlmResult result) {
+    private void extractAndStoreTokenUsage(LlmResult result, String modelUsed) {
         try {
             if (result == null) return;
 
@@ -1288,7 +1314,7 @@ public class ClaudeServiceImpl implements ClaudeService {
             long totalOutput = accumulatedOutputTokens.addAndGet(outputTokens);
             accumulatedCacheReadTokens.addAndGet(cacheReadTokens);
             accumulatedCacheCreationTokens.addAndGet(cacheCreationTokens);
-            lastModelName = getCurrentModel();
+            lastModelName = modelUsed;
 
             if (cacheReadTokens > 0) {
                 log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시히트: {} (90% 절약), 누적: {}",

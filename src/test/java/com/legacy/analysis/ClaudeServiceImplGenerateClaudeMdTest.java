@@ -61,7 +61,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd(null, Set.of());
+    String result = service.generateSessionClaudeMd(null, Set.of(), "/test/session-source");
 
     assertFalse(llmClient.called, "추가 요구사항이 없으면 LLM 호출 자체가 생략돼야 함");
     assertTrue(result.contains("레거시 엔터프라이즈 시스템"), "표준 템플릿(prompt-base.md) 내용이 그대로 반환돼야 함");
@@ -72,7 +72,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient("이 값이 반환되면 안 됨");
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    service.generateSessionClaudeMd("   ", Set.of());
+    service.generateSessionClaudeMd("   ", Set.of(), "/test/session-source");
 
     assertFalse(llmClient.called);
   }
@@ -84,7 +84,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient(fakeJson);
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of());
+    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of(), "/test/session-source");
 
     assertTrue(llmClient.called, "추가 요구사항이 있으면 LLM을 호출해야 함");
     assertFalse(result.startsWith("["), "JSON 배열 응답은 폐기되고 표준 템플릿으로 대체돼야 함");
@@ -96,7 +96,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient("{\"error\": \"이해하지 못함\"}");
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("추가 요구사항", Set.of());
+    String result = service.generateSessionClaudeMd("추가 요구사항", Set.of(), "/test/session-source");
 
     assertTrue(result.contains("레거시 엔터프라이즈 시스템"));
   }
@@ -115,7 +115,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient(validMd);
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("보안 취약점 우선 설명", Set.of());
+    String result = service.generateSessionClaudeMd("보안 취약점 우선 설명", Set.of(), "/test/session-source");
 
     assertEquals(validMd, result);
   }
@@ -128,7 +128,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
     RecordingLlmClient llmClient = new RecordingLlmClient(hollowMd);
     ClaudeServiceImpl service = newService(llmClient, "local");
 
-    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of());
+    String result = service.generateSessionClaudeMd("보안 관련 주석을 더 상세히 작성해줘", Set.of(), "/test/session-source");
 
     assertTrue(llmClient.called);
     assertNotEquals(hollowMd, result, "핵심 섹션 제목이 없는 저품질 응답은 폐기되어야 함");

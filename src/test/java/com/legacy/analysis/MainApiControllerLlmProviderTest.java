@@ -40,17 +40,17 @@ class MainApiControllerLlmProviderTest {
     }
 
     @Override
-    public String getCurrentModel() {
+    public String getCurrentModel(String sourceFolderPath) {
       return model;
     }
 
     @Override
-    public void setModel(String model) {
+    public void setModel(String sourceFolderPath, String model) {
       this.model = model;
     }
 
     @Override
-    public String generateSessionClaudeMd(String customRequirements, java.util.Set<String> extensions) {
+    public String generateSessionClaudeMd(String customRequirements, java.util.Set<String> extensions, String sourceFolderPath) {
       throw new UnsupportedOperationException();
     }
 
