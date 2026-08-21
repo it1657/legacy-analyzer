@@ -498,3 +498,115 @@ index.html/dashboard.js 하드코딩 제거) 착수 예정.
 
 **남은 것**: Phase 4(failover 컨펌 백엔드) ~ Phase 7(통합/회귀 검증)은 다음 세션 몫. 이 세션은
 Phase 3까지만 범위였음.
+
+## 모델 목록 DB화 — Phase 4(failover 컨펌 백엔드) 완료 (29차, 2026-08-21)
+
+인계 지시(사람 메시지)에 따라 이번 세션은 **Phase 4만** 범위로 진행. Phase 0~3에서 이미 만들어둔
+`LlmModelOptionService`(특히 `getActiveFailoverTarget()` — 이미 구현돼 있어 재사용만 함)/
+`ClaudeServiceImpl.setModel(...)`을 그대로 활용했고, 이번 세션에서 새로 만든 인프라는 없음(설계
+문서 §3-4가 이미 정확히 예견한 대로 기존 PAUSED/`pendingFilePathsJson`/`/api/session/resume` 인프라를
+재사용). 근거 문서: analyzer-plan
+`docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md` §3~§4.
+
+### 1. `SessionState` — 신규 필드/상태값
+- `failoverModelKey`(String, `failover_model_key`)/`failoverConfirmedAt`(LocalDateTime,
+  `failover_confirmed_at`) 컬럼 추가(`ddl-auto=update`라 별도 마이그레이션 스크립트 불필요).
+- `STATUS_AWAITING_FAILOVER_CONFIRM = "AWAITING_FAILOVER_CONFIRM"` 상수 신설 — status/currentPhase
+  두 free-text 필드에 공용으로 쓴다(설계 문서 지시대로 enum화하지 않음, 기존 PAUSED 등과 동일한
+  문자열 컨벤션 유지).
+- `shouldStop()`에 이 상태 인식 추가(`isCancelled || PAUSED(status/currentPhase) ||
+  AWAITING_FAILOVER_CONFIRM(status/currentPhase)`) — 기존 PAUSED 인식은 그대로 보존.
+
+### 2. **기존 버그 수정** — `session.cancel()` 영구화 문제
+`runAnalysis()`/`runAnalysisResume()` 양쪽의 `INSUFFICIENT_CREDITS` 분기에서 `session.cancel()`
+호출을 제거했다(설계 문서 §3이 사전에 지적한 정확한 지점). 이 호출은 `isCancelled`를 영구 true로
+만드는데 이를 되돌리는 코드가 전체 코드베이스에 없어서, 크레딧 충전 후 `/api/session/resume`으로
+재개해도 재개된 스레드의 매 파일이 `shouldStop()`(→ `isCancelled` 체크)에 걸려 즉시 중단되는 버그가
+있었다 — **이번 범위(failover 신규 기능)와 무관하게 존재하던 기존 결함을 함께 고친 것**이며, 새
+기능을 위해 일부러 도입한 변경이 아니다. `creditExhausted` 플래그(latch.await() 이후 분기)만으로도
+"남은 파일 중단 후 PAUSED/컨펌대기 저장" 처리가 이미 충분해 `cancel()` 호출 자체가 애초에
+불필요했다 — 그 외 로그 메시지 문구 정리 외에는 이 두 분기의 다른 로직을 건드리지 않았다(외과적
+수정).
+
+### 3. 크레딧소진 분기 → `handleCreditExhaustedPause(...)` 공통 헬퍼로 통합
+`runAnalysis()`/`runAnalysisResume()` 두 곳에 중복돼 있던 "PAUSED 저장" 블록을 `MainApiController`의
+신규 private 메서드로 합쳤다:
+- `llmModelOptionService.getActiveFailoverTarget()`으로 활성 LOCAL failover 대상이 있는지 확인.
+- **있으면**: `session.setFailoverModelKey(대상 modelKey)`, `session.setStatus(...)`/
+  `setCurrentPhase(...)`를 `AWAITING_FAILOVER_CONFIRM`으로 전이. `AnalysisHistory`(내 분석 이력
+  목록에 노출되는 값)는 의도적으로 기존과 동일하게 `"PAUSED"`로 유지 — 새 상태값을 여기까지
+  전파하면 `my-activity.html`의 `h.status === 'PAUSED'` 분기(이어서 분석 버튼 노출 등, 프런트
+  Phase 5 이전)가 깨지므로, 이번 범위(백엔드만)에서는 세션 쪽 상태만 새 값을 갖고 이력 화면은
+  그대로 "일시정지"로 보이게 둔다.
+- **없으면**(관리자가 아직 failover 대상을 지정하지 않은 배포): 기존과 100% 동일하게 단순 PAUSED로
+  폴백(수동 재개만 가능) — 이 분기는 리팩터링 전 로직을 그대로 옮긴 것이라 동작 변경 없음.
+
+### 4. 신규 API `POST /api/session/failover/confirm`
+- 검증 순서: sessionId 필요 → 세션 존재 → `currentPhase == AWAITING_FAILOVER_CONFIRM` → 세션에
+  `failoverModelKey`가 있는지 → **재개할 pending 파일이 실제로 있는지**(모델 전환 같은 부작용을
+  남기기 전에 먼저 확인 — 아래 "설계 중 발견한 세부사항" 참고).
+- 통과하면 `claudeService.setModel(Path.of(session.getSourcePath()).toString(), failoverModelKey)`로
+  이 세션(소스경로 키)의 이후 LLM 호출을 자체 LLM으로 전환하고(2026-08-20 setModel 레이스컨디션
+  핫픽스의 세션 격리 키 정규화와 동일하게 맞춤), `failoverConfirmedAt`을 기록한 뒤 재개 스레드를
+  기동한다.
+- 재개 스레드 기동 로직은 새로 안 만들고, 기존 `/api/session/resume`의 로직을
+  `resumePendingFilesInThread(session, sessionId)` private 메서드로 추출해 두 엔드포인트가 공유하게
+  했다(설계 문서 §4 "기존 resume 로직 재사용/위임" 지시 그대로 반영) — `resumeSession()`도 이
+  헬퍼를 호출하도록 리팩터링했지만 외부 동작(요청/응답 스키마)은 변경 없음.
+- "아니오"(중단 유지) 케이스는 설계 문서 지시대로 별도 API를 만들지 않음 — `AWAITING_FAILOVER_CONFIRM`
+  상태 그대로 두면 됨.
+- 인증/권한: 기존 `/api/session/pause`·`/api/session/resume`과 동일하게 `Authentication` 파라미터나
+  세션 소유자 검증 없이 `SecurityConfig`의 전역 `.requestMatchers("/api/**").authenticated()`에만
+  의존한다(코드로 직접 확인 — 기존 pause/resume도 이 방식이라 신규 API만 다르게 갈 이유가 없음).
+
+### 설계 중 발견한 세부사항 (원 설계에 없던 결정)
+- `claudeService.setModel(...)`은 세션의 pending 파일이 하나도 없는 비정상 상태(이론상 거의 발생
+  안 하지만)에서도 호출되면 "모델은 바뀌었는데 재개는 실패"라는 애매한 부작용이 남는다. 그래서
+  `resumePendingFilesInThread(...)`가 내부적으로 하는 pending-empty 체크를 `confirmFailover(...)`
+  앞단에서 한 번 더(의도적 중복) 수행해, 실패 응답일 때는 모델 전환/컨펌시각 기록이 전혀 없었던
+  것처럼 부작용 없이 거부하도록 했다.
+- `GET /api/analysis/status/{sessionId}`(폴링 엔드포인트)의 `completed` 플래그 계산에
+  `AWAITING_FAILOVER_CONFIRM`을 **의도적으로 추가하지 않았다.** 처음엔 PAUSED와 동일하게 넣으려
+  했으나, 현재 `dashboard.js`의 폴링 로직(`startPolling()`)이 `completed===true`를 받으면
+  `phase==='PAUSED'`/`'CANCELLED'`가 아닌 한 무조건 `handleAnalysisCompletion()`(정상 완료 처리 —
+  write-back까지 트리거)으로 빠지는 구조라, 그대로 뒀다면 컨펌 대기 상태를 "분석 완료"로 오인하는
+  실질적 회귀가 생겼을 것이다(발견 후 되돌림). Phase 5(프런트 컨펌 모달)에서 `dashboard.js`에
+  `AWAITING_FAILOVER_CONFIRM` 전용 분기를 추가하는 시점에 이 플래그도 함께 넣어야 한다 — **Phase 5
+  착수 시 필수 확인 항목**으로 남김.
+
+### 테스트
+- `SessionStateFailoverTest`(7건) — 신규 필드 기본값/getter-setter, `shouldStop()`이
+  `AWAITING_FAILOVER_CONFIRM`을 status/currentPhase 양쪽에서 인식하는지, 기존 PAUSED/isCancelled
+  인식이 그대로인지 검증.
+- `MainApiControllerFailoverConfirmTest`(8건, 기존 리플렉션+Mockito 패턴 재사용) —
+  `handleCreditExhaustedPause`가 failover 대상 유무에 따라 올바르게 분기하는지(대상 있으면
+  AWAITING_FAILOVER_CONFIRM 전이 + AnalysisHistory는 PAUSED 유지, 없으면 기존과 동일한 단순 PAUSED
+  폴백 — `session.setStatus(...)`를 호출하지 않는 기존 동작까지 회귀 확인), `confirmFailover`의
+  상태검증(세션 없음/상태 불일치/모델키 없음/pending 없음) 4종 실패 케이스와 정상 케이스(모델 전환
+  호출 인자, `failoverConfirmedAt` 기록, `ANALYZING`/`IN_PROGRESS` 전이) 검증.
+- `./gradlew clean test` — **317건 전부 통과, 실패/에러 0건**(기존 302건 + 신규 15건). 회귀 없음
+  확인. `session.cancel()` 제거가 기존 "충전 후 이어서 분석" 관련 테스트를 깨지 않았음(애초에 그
+  경로를 직접 실행하는 기존 테스트가 없었음 — `runAnalysis`/`runAnalysisResume`이 스레드풀/파일
+  I/O가 얽힌 private 메서드라 기존에도 단위 테스트 대상이 아니었다).
+
+### 리스크/제안 (dev-progress 성격 기록)
+- `MainApiController` 생성자 파라미터는 이번에 늘지 않았다(13개 그대로) — `handleCreditExhaustedPause`/
+  `resumePendingFilesInThread`/`confirmFailover`가 전부 기존 필드(`sessionManager`,
+  `analysisHistoryRepository`, `llmModelOptionService`, `claudeService`)만 사용해 신규 의존성 주입이
+  필요 없었다. 27차에 남겼던 "생성자 파라미터 객체화 검토" 제안은 이번 범위에서는 실현할 필요가
+  없었음(향후 Phase 5/6/7에서 파라미터가 더 늘어나면 그때 다시 검토 권장).
+- 트랜잭션: 이번 변경은 `LlmModelOptionService.getActiveFailoverTarget()`(이미
+  `@Transactional(readOnly = true)`) 조회만 추가했고, `SessionState`/`AnalysisHistory` 저장은 이
+  프로젝트 관행대로 `@Transactional` 없이 그대로 뒀다(기존 pause/resume/credit-exhausted 경로와
+  동일 — 여러 쓰기가 얽혀 있긴 하지만 원래부터 트랜잭션 없이 동작하던 코드를 그대로 옮긴 것뿐이라
+  이번에 새로 도입한 리스크는 아님).
+- Phase 5 착수 시 반드시 함께 볼 것: (1) 위에서 언급한 `AnalysisStatusDto.completed`/`dashboard.js`
+  폴링 분기, (2) `AnalysisHistory.status`를 계속 `"PAUSED"`로만 남길지, 프런트가 컨펌 모달을 띄우기
+  위해 별도로 `AWAITING_FAILOVER_CONFIRM`을 구분해서 노출해야 하는 필드가 필요할지(현재는
+  `GET /api/analysis/status/{sessionId}`의 `phase`로만 구분 가능하고 `failoverModelKey`를 프런트에
+  내려주는 필드가 아직 없음 — 컨펌 모달에 "자체 LLM(qwen3-32b)으로 진행하시겠습니까?"처럼 모델명을
+  보여주려면 `AnalysisStatusDto`나 별도 조회 API에 이 값을 추가해야 함, 이번 범위에서는 의도적으로
+  보류).
+
+**남은 것**: Phase 5(failover 컨펌 프론트) ~ Phase 7(통합/회귀 검증)은 다음 세션 몫. 이 세션은
+Phase 4까지만 범위였음.

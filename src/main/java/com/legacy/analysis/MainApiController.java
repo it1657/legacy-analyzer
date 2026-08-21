@@ -543,6 +543,12 @@ public class MainApiController {
 
     // PAUSED(사용자 일시정지 또는 크레딧 소진 등)도 폴링을 멈춰야 하는 종료 상태다.
     // 여기 빠져있으면 서버는 이미 멈췄는데 화면은 계속 "처리 중" 스피너를 돌리게 된다.
+    //
+    // AWAITING_FAILOVER_CONFIRM(Phase 4, 2026-08-21)은 의도적으로 이 목록에 넣지 않는다 — 지금
+    // 프런트(dashboard.js)의 폴링 로직은 completed=true를 받으면 phase가 'PAUSED'/'CANCELLED'가
+    // 아닌 한 무조건 handleAnalysisCompletion()(정상 완료 처리, write-back까지 트리거)으로 빠지므로,
+    // 여기서 completed=true를 반환하면 컨펌 대기 상태를 "분석 완료"로 오인하는 회귀가 생긴다.
+    // 프런트 컨펌 모달(Phase 5)이 이 phase를 인식하는 분기를 추가하는 시점에 함께 반영한다.
     boolean isDone = "COMPLETED".equals(phase) || "FAILED".equals(phase)
         || "CANCELLED".equals(phase) || "PAUSED".equals(phase);
     dto.setCompleted(isDone);
@@ -854,7 +860,73 @@ public class MainApiController {
     if (session == null) {
       response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
     }
+    return resumePendingFilesInThread(session, sessionId);
+  }
 
+  /**
+   * 크레딧소진 컨펌("자체 LLM으로 진행하시겠습니까?")에서 "예" 선택 시 호출. 세션이
+   * AWAITING_FAILOVER_CONFIRM 상태인지 확인한 뒤, claudeService.setModel(...)로 이 세션(소스 경로)의
+   * 이후 LLM 호출을 failover 대상 모델로 전환하고, 기존 /api/session/resume과 동일한 재개 스레드를
+   * 그대로 기동한다(재개 로직 자체는 resumePendingFilesInThread로 공통화). "아니오"(중단 유지)는
+   * 별도 API 없이 이 상태 그대로 두는 것으로 충분하다(설계 문서 §4 — 범위 최소화).
+   */
+  @PostMapping("/api/session/failover/confirm")
+  @ResponseBody
+  public Map<String, Object> confirmFailover(@RequestBody Map<String, String> request) {
+    Map<String, Object> response = new HashMap<>();
+    String sessionId = request.get("sessionId");
+    if (sessionId == null || sessionId.isEmpty()) {
+      response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
+    }
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(session.getCurrentPhase())) {
+      response.put("success", false);
+      response.put("message", "크레딧 소진 컨펌 대기 상태가 아닙니다.");
+      return response;
+    }
+    String failoverModelKey = session.getFailoverModelKey();
+    if (failoverModelKey == null || failoverModelKey.isBlank()) {
+      response.put("success", false);
+      response.put("message", "failover 대상 모델이 지정되어 있지 않습니다.");
+      return response;
+    }
+
+    // resumePendingFilesInThread()에서도 동일한 검사를 하지만, 재개할 파일이 아예 없는 비정상
+    // 상태에서는 모델 전환(claudeService.setModel) 같은 부작용을 남기지 않고 그대로 거부하기 위해
+    // 여기서 먼저 확인한다.
+    if (session.getPendingFilePaths().isEmpty()) {
+      response.put("success", false);
+      response.put("message", "재개할 파일이 없습니다. 처음부터 새로 분석해 주세요.");
+      return response;
+    }
+
+    // setModel()은 sourceFolderPath(세션의 소스 경로)를 키로 세션별 모델 오버라이드를 저장한다
+    // (2026-08-20 setModel 레이스컨디션 핫픽스 이후의 세션 격리 컨벤션) — runAnalysis()가
+    // claudeService.setModel(Path.of(sourcePath).toString(), ...)로 호출하는 것과 동일한 정규화.
+    claudeService.setModel(Path.of(session.getSourcePath()).toString(), failoverModelKey);
+    session.setFailoverConfirmedAt(LocalDateTime.now());
+    log.info("[failover 컨펌] sessionId={}, model={}", sessionId, failoverModelKey);
+
+    Map<String, Object> resumeResponse = resumePendingFilesInThread(session, sessionId);
+    if (Boolean.TRUE.equals(resumeResponse.get("success"))) {
+      resumeResponse.put("message", String.format(
+          "자체 LLM(%s)으로 이어서 분석합니다. (남은 파일: %s개)",
+          failoverModelKey, resumeResponse.get("pendingCount")));
+      resumeResponse.put("failoverModelKey", failoverModelKey);
+    }
+    return resumeResponse;
+  }
+
+  /**
+   * '이어서 분석'(/api/session/resume)과 failover 컨펌 수락(/api/session/failover/confirm) 양쪽에서
+   * 공유하는 재개 공통 로직 — pending 파일을 읽어 재개 스레드를 기동한다(설계 문서 §4 "기존 resume
+   * 로직 재사용/위임" 원칙).
+   */
+  private Map<String, Object> resumePendingFilesInThread(SessionState session, String sessionId) {
+    Map<String, Object> response = new HashMap<>();
     List<String> pendingPaths = session.getPendingFilePaths();
     if (pendingPaths.isEmpty()) {
       response.put("success", false);
@@ -918,6 +990,46 @@ public class MainApiController {
   // ===================================================================
   // 핵심 분석 로직 (비동기 스레드)
   // ===================================================================
+
+  /**
+   * 크레딧 소진(INSUFFICIENT_CREDITS) 감지 시 공통 처리 — runAnalysis()/runAnalysisResume() 양쪽에서
+   * 재사용한다. 관리자가 failover 대상(활성 LOCAL 모델, {@link LlmModelOptionService#getActiveFailoverTarget()})을
+   * 지정해뒀으면 AWAITING_FAILOVER_CONFIRM 상태로 전이해 사용자의 "자체 LLM으로 진행하시겠습니까?"
+   * 컨펌 응답을 기다리고, 지정돼 있지 않으면 기존과 동일하게 단순 PAUSED(수동 재개만 가능)로
+   * 폴백한다 — 관리자가 아직 failover 대상을 지정하지 않은 배포에서 이 흐름이 깨지지 않게 하기
+   * 위함이다(근거: analyzer-plan
+   * docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §4).
+   */
+  private void handleCreditExhaustedPause(SessionState session, AnalysisHistory history,
+      List<String> pendingPaths, int completedCount) {
+    session.setPendingFilePaths(pendingPaths);
+    if (history != null) {
+      history.setStatus("PAUSED");
+      history.setTotalFiles(session.getTotalFiles());
+      history.setSuccessCount(session.getStatistics().getSuccessCount());
+      history.setSkipCount(session.getStatistics().getSkipCount());
+      history.setFailureCount(session.getStatistics().getFailureCount());
+      analysisHistoryRepository.save(history);
+    }
+
+    Optional<LlmModelOption> failoverTarget = llmModelOptionService.getActiveFailoverTarget();
+    if (failoverTarget.isPresent()) {
+      String failoverModelKey = failoverTarget.get().getModelKey();
+      session.setFailoverModelKey(failoverModelKey);
+      session.setStatus(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+      sessionManager.saveSessionState(session);
+      session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+      session.addRecentLog(String.format(
+          "💳 [크레딧 소진] %d개 완료, %d개 미처리. 자체 LLM(%s)으로 이어서 진행하시겠습니까?",
+          completedCount, pendingPaths.size(), failoverModelKey));
+    } else {
+      sessionManager.saveSessionState(session);
+      session.setCurrentPhase("PAUSED");
+      session.addRecentLog(String.format(
+          "💳 [크레딧 소진 일시정지] %d개 완료, %d개 미처리. 충전 후 '이어서 분석'으로 재개하세요.",
+          completedCount, pendingPaths.size()));
+    }
+  }
 
   private void runAnalysis(String sessionId, String normalizedSourcePath,
       String normalizedOutputPath, boolean isForceActive, Long userId, String username,
@@ -1112,11 +1224,16 @@ public class MainApiController {
               // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
               // 병렬 처리 중이라 여러 스레드가 동시에 크레딧 소진을 만날 수 있으므로,
               // 로그/에러기록은 가장 먼저 발견한 스레드 1회만 남긴다.
+              // 2026-08-21(Phase 4, failover 컨펌): 예전엔 여기서 session.cancel()을 호출해
+              // isCancelled를 영구 true로 만들었다 — 이를 되돌리는 코드가 없어 '충전 후 이어서 분석'
+              // 으로 재개해도 매 파일이 shouldStop()에 걸려 즉시 중단되는 기존 버그가 있었다.
+              // creditExhausted 플래그(아래 latch.await() 이후 분기)만으로 이미 "남은 파일 중단 후
+              // PAUSED 저장" 처리가 되므로 cancel() 호출 자체를 제거한다(외과적 수정, 근거: analyzer-plan
+              // docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §3).
               if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
                 boolean firstDetection = creditExhausted.compareAndSet(false, true);
-                session.cancel();
                 if (firstDetection) {
-                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다. 크레딧 충전 후 '이어서 분석'으로 재개하세요.");
+                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다.");
                   session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
                 }
               }
@@ -1149,26 +1266,13 @@ public class MainApiController {
       log.info("[병렬 분석 완료] 성공:{}, 스킵:{}, 이미처리:{}",
           successCount.get(), skipCount.get(), alreadyProcessedCount.get());
 
-      // 크레딧 소진으로 중단 - PAUSED 저장하여 충전 후 재개 가능하게
+      // 크레딧 소진으로 중단 - failover 대상이 지정돼 있으면 컨펌 대기, 없으면 기존처럼 PAUSED 저장
       if (creditExhausted.get()) {
         List<String> pendingPaths = fileList.stream()
             .map(Path::toString)
             .filter(p -> !completedFilePaths.contains(p))
             .collect(Collectors.toList());
-        session.setPendingFilePaths(pendingPaths);
-        if (history != null) {
-          history.setStatus("PAUSED");
-          history.setTotalFiles(session.getTotalFiles());
-          history.setSuccessCount(session.getStatistics().getSuccessCount());
-          history.setSkipCount(session.getStatistics().getSkipCount());
-          history.setFailureCount(session.getStatistics().getFailureCount());
-          analysisHistoryRepository.save(history);
-        }
-        sessionManager.saveSessionState(session);
-        session.setCurrentPhase("PAUSED");
-        session.addRecentLog(String.format(
-            "💳 [크레딧 소진 일시정지] %d개 완료, %d개 미처리. 충전 후 '이어서 분석'으로 재개하세요.",
-            completedFilePaths.size(), pendingPaths.size()));
+        handleCreditExhaustedPause(session, history, pendingPaths, completedFilePaths.size());
         return;
       }
 
@@ -1364,11 +1468,12 @@ public class MainApiController {
               } else { skipCount.incrementAndGet(); }
             } else if ("FAILED".equals(fileState.getStatus())) {
               session.getStatistics().setFailureCount(session.getStatistics().getFailureCount() + 1);
+              // 2026-08-21(Phase 4, failover 컨펌): runAnalysis()와 동일한 이유로 session.cancel()
+              // 호출을 제거한다 — 재개 흐름에서 또다시 isCancelled가 영구화되는 것을 막기 위함.
               if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
                 boolean firstDetection = creditExhausted.compareAndSet(false, true);
-                session.cancel();
                 if (firstDetection) {
-                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다. 크레딧 충전 후 '이어서 분석'으로 재개하세요.");
+                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다.");
                   session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
                 }
               }
@@ -1397,27 +1502,15 @@ public class MainApiController {
       latch.await();
       executor.shutdown();
 
-      // 크레딧 소진으로 중단 - PAUSED로 저장하여 충전 후 재개 가능하게 한다 (누락되어 있던 처리를 보강).
-      // 이 체크가 없으면 아래 취소 체크에 걸려 "재시도 가능한 PAUSED"가 아니라 "CANCELLED"로 잘못 기록된다.
+      // 크레딧 소진으로 중단 - failover 대상이 지정돼 있으면 컨펌 대기, 없으면 기존처럼 PAUSED 저장
+      // (누락되어 있던 처리를 보강한 부분은 그대로 유지 — 이 체크가 없으면 아래 취소 체크에 걸려
+      // "재시도 가능한 PAUSED"가 아니라 "CANCELLED"로 잘못 기록된다).
       if (creditExhausted.get()) {
         List<String> newPending = fileList.stream()
             .map(Path::toString)
             .filter(p -> !completedFilePaths.contains(p))
             .collect(Collectors.toList());
-        session.setPendingFilePaths(newPending);
-        if (history != null) {
-          history.setStatus("PAUSED");
-          history.setTotalFiles(session.getTotalFiles());
-          history.setSuccessCount(session.getStatistics().getSuccessCount());
-          history.setSkipCount(session.getStatistics().getSkipCount());
-          history.setFailureCount(session.getStatistics().getFailureCount());
-          analysisHistoryRepository.save(history);
-        }
-        sessionManager.saveSessionState(session);
-        session.setCurrentPhase("PAUSED");
-        session.addRecentLog(String.format(
-            "💳 [크레딧 소진 일시정지] %d개 완료, %d개 미처리. 충전 후 '이어서 분석'으로 재개하세요.",
-            completedFilePaths.size(), newPending.size()));
+        handleCreditExhaustedPause(session, history, newPending, completedFilePaths.size());
         return;
       }
 
