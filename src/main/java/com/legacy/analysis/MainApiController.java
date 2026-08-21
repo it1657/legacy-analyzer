@@ -1,5 +1,7 @@
 package com.legacy.analysis;
 
+import com.legacy.analysis.llm.LlmModelOption;
+import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.auth.JwtTokenProvider;
 import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
@@ -56,6 +58,8 @@ public class MainApiController {
   private final NotificationService notificationService;
   private final ProjectTypeDetector projectTypeDetector;
   private final PresentationGeneratorService presentationGeneratorService;
+  // 사용자 드롭다운(GET /api/config/llm-models)이 조회할 활성 모델 목록 — Phase 3(2026-08-21).
+  private final LlmModelOptionService llmModelOptionService;
   // rag.enabled=false(기본값)면 이 빈이 아예 등록되지 않으므로 ObjectProvider로 선택 주입한다
   // (일반 생성자 주입이면 빈이 없을 때 컨텍스트 기동 자체가 실패함) — appendJavaStructure()에서
   // getIfAvailable()로 안전하게 사용.
@@ -96,7 +100,8 @@ public class MainApiController {
       NotificationService notificationService,
       ProjectTypeDetector projectTypeDetector,
       PresentationGeneratorService presentationGeneratorService,
-      org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider) {
+      org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider,
+      LlmModelOptionService llmModelOptionService) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -109,6 +114,7 @@ public class MainApiController {
     this.projectTypeDetector = projectTypeDetector;
     this.presentationGeneratorService = presentationGeneratorService;
     this.ragServiceProvider = ragServiceProvider;
+    this.llmModelOptionService = llmModelOptionService;
   }
 
   @GetMapping("/")
@@ -134,6 +140,35 @@ public class MainApiController {
     // 프런트엔드가 이 값을 보고 해당 UI 섹션을 숨긴다.
     result.put("containerized", isRunningInContainer());
     return result;
+  }
+
+  /**
+   * 사용자 화면(index.html)의 AI 모델 드롭다운을 채우는 조회 엔드포인트 (Phase 3, 2026-08-21).
+   * 기존에 index.html에 하드코딩돼 있던 하이쿠/소넷/오퍼스 3개 &lt;option&gt;을 대체한다.
+   * 관리자 CRUD API({@code /api/admin/llm-models}, {@code @PreAuthorize("hasRole('ADMIN')")})와
+   * 달리 이 엔드포인트는 인증만 필요하고 관리자 권한은 요구하지 않는다 — 일반 사용자도 드롭다운을
+   * 채워야 하기 때문이다. 활성(active=true) 모델만, 관리자가 지정한 노출 순서(displayOrder)대로 반환한다.
+   *
+   * 전역 local 모드({@code isAnthropicMode()==false}) 여부와 무관하게 항상 DB 목록을 그대로 반환한다.
+   * local 모드에서는 프런트(dashboard.js의 initLlmProviderConfig())가 기존과 동일하게
+   * /api/config/llm-provider 응답을 보고 드롭다운을 "로컬 모델: {model}" 단일 표시로 강제 치환하므로,
+   * 이 API가 반환한 목록은 그 경우 화면에 쓰이지 않는다(설계 문서 §3 "전역 local 모드 경로는 그대로 유지").
+   */
+  @GetMapping("/api/config/llm-models")
+  @ResponseBody
+  public List<Map<String, Object>> getLlmModelOptions() {
+    return llmModelOptionService.listActive().stream()
+        .map(this::toModelOptionResponse)
+        .collect(Collectors.toList());
+  }
+
+  private Map<String, Object> toModelOptionResponse(LlmModelOption option) {
+    Map<String, Object> map = new HashMap<>();
+    map.put("modelKey", option.getModelKey());
+    map.put("displayName", option.getDisplayName());
+    map.put("provider", option.getProvider().name());
+    map.put("displayOrder", option.getDisplayOrder());
+    return map;
   }
 
   /**

@@ -434,3 +434,67 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 
 **다음 단계**: Phase 3(사용자 드롭다운 DB화, `GET /api/config/llm-models` API 신설 +
 index.html/dashboard.js 하드코딩 제거) 착수 예정.
+
+## 모델 목록 DB화 — Phase 3(사용자 드롭다운 DB화) 완료 (28차, 2026-08-21)
+
+직전 세션(27차)이 API 세션 한도 오류로 중단된 뒤, 사람이 이어서 진행을 요청해 워킹트리 상태를
+`git status`/`git diff`로 먼저 확인함 — 27차 커밋(`7ec533d`) 이후 워킹트리는 clean했고 Phase 3
+관련 코드는 아직 전혀 없었음(index.html 하드코딩 3개 `<option>` 그대로, `GET /api/config/llm-models`
+엔드포인트 미존재) 확인 후 처음부터 이 세션에서 새로 진행.
+
+### 백엔드 — `GET /api/config/llm-models` 신설
+- `MainApiController`에 `LlmModelOptionService` 생성자 주입 추가(12번째 파라미터 — 기존 11개
+  뒤에 추가, 기존 파라미터 순서/의미는 그대로 보존).
+- `GET /api/config/llm-models` 신설: `llmModelOptionService.listActive()`(활성 모델만,
+  `displayOrder` 오름차순 — Repository가 이미 정렬해서 반환하는 기존 계약을 그대로 사용)를
+  `List<Map<String,Object>>`(modelKey/displayName/provider/displayOrder)로 변환해 반환.
+  관리자 CRUD API(`/api/admin/llm-models`, `@PreAuthorize("hasRole('ADMIN')")`)와 달리 이
+  엔드포인트는 인증만 요구하고 관리자 권한은 요구하지 않음(일반 사용자용 조회).
+- **전역 local 모드 처리**: 설계 문서 §3 "전역 local 모드 경로는 그대로 유지" 원칙에 따라 이
+  엔드포인트 자체는 `isAnthropicMode()` 여부와 무관하게 항상 DB 목록을 반환하도록 구현하고, 그
+  대신 프런트(`dashboard.js`)가 `/api/config/llm-provider` 응답의 `provider==='local'`일 때만
+  기존과 동일하게 드롭다운을 "로컬 모델: {model}" 단일 표시로 강제 치환하고, `provider==='anthropic'`
+  일 때만 이 신규 API를 호출하도록 분기했다 — `initLlmProviderConfig()`의 기존 local 분기 코드는
+  전혀 건드리지 않음.
+
+### 프런트엔드
+- `index.html`: 하드코딩된 `<option>` 3개(하이쿠/소넷/오퍼스) 제거, "모델 목록 불러오는 중..."
+  placeholder 1개만 남김.
+- `dashboard.js`:
+  - `populateModelSelectOptions(models)` 신설 — `#modelSelect`를 주어진 목록으로 채움. 기존
+    선택값이 새 목록에도 있으면 유지, 없으면 첫 항목 선택.
+  - `loadAnthropicModelOptions()` 신설 — `GET /api/config/llm-models` 호출해 드롭다운을 채움.
+  - `initLlmProviderConfig()` 수정 — `provider==='anthropic'`이면 `loadAnthropicModelOptions()`
+    호출. `/api/config/llm-provider` 자체가 실패하거나(네트워크 오류/비정상 응답) `llm-models`
+    조회가 실패/빈 배열이면 `FALLBACK_MODEL_OPTIONS`(기존 하드코딩 3개와 동일한 값)로 안전하게
+    폴백 — 관리자가 DB 모델을 전부 비활성화하는 것은 `LlmModelOptionService`가 막지만, 그와
+    별개로 프런트 자체 안전망도 남겨둠.
+  - 분석 완료 결과 패널의 모델 라벨 표시(`showCompletionResult` 내부) — 기존엔
+    `modelDisplayNames` 하드코딩 맵만 사용했으나, 이제 `#modelSelect`의 선택된 `<option>` 텍스트
+    (=DB의 `displayName`)를 우선 사용하고, 옛 하드코딩 모델키가 어딘가 남아있는 경우(예: 과거
+    이력)를 위해 기존 맵을 폴백으로 유지, 최종 폴백은 raw modelKey.
+  - `initLlmProviderConfig()`의 local 분기(레이어 A)와 formData에 modelSelect 값을 담는 기존
+    로직(제출 시 `document.getElementById('modelSelect')?.value`)은 변경 없음 — DB 기반으로
+    채워진 `<option value="{modelKey}">`를 그대로 읽으므로 자연히 맞물림.
+
+### 테스트
+- `MainApiControllerLlmProviderTest`: 생성자 파라미터 12개 → 13개로 늘어난 것에 맞춰
+  `newController()` 헬퍼를 오버로드(`LlmModelOptionService` 목 주입 가능하게)하고, 신규 테스트 2건
+  추가 — `listActive()` 결과를 controller가 순서 그대로/필드 그대로 변환하는지, 빈 목록일 때도
+  깨지지 않는지 검증(Mockito로 `LlmModelOptionService` 목킹, 기존 admin 패키지 관례와 동일).
+- `MainApiControllerDetectExtensionsTest`: 생성자 인자 개수 변경에 맞춰 `null` 1개 추가만 반영
+  (동작 변경 없음).
+- `./gradlew clean test` — **302건 전부 통과, 실패/에러 0건**(기존 300건 + 신규 2건). 회귀 없음
+  확인.
+
+### 리스크/제안 (dev-progress 성격 기록)
+- `MainApiController` 생성자 파라미터가 13개로 늘어남 — 이미 27차 시점에 `LlmClientResolver`
+  도입 등으로 여러 컨트롤러/서비스 생성자가 길어지는 추세였는데, Phase 4(failover 컨펌 백엔드)에서
+  세션 상태 저장이 추가로 필요해지면 한 번 더 늘어날 가능성이 있음. 지금 범위는 아니지만 Phase 4
+  착수 시 생성자 파라미터 객체화(예: 설정 묶음 Bean) 여부를 PL이 판단하면 좋겠다는 제안만 남김
+  (코드로 옮기지 않음).
+- 트랜잭션: 이번 변경은 조회(`listActive()`, 이미 `@Transactional(readOnly = true)`)만 추가했고
+  여러 쓰기 작업이 얽힌 로직은 없어 트랜잭션 관련 리스크 없음.
+
+**남은 것**: Phase 4(failover 컨펌 백엔드) ~ Phase 7(통합/회귀 검증)은 다음 세션 몫. 이 세션은
+Phase 3까지만 범위였음.
