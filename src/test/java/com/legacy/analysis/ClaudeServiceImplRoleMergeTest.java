@@ -1,6 +1,7 @@
 package com.legacy.analysis;
 
 import com.legacy.analysis.llm.LlmClient;
+import com.legacy.analysis.llm.LlmClientResolver;
 import com.legacy.analysis.llm.LlmResult;
 import org.junit.jupiter.api.Test;
 
@@ -39,7 +40,10 @@ class ClaudeServiceImplRoleMergeTest {
   }
 
   private ClaudeServiceImpl newService(CapturingLlmClient llmClient) throws Exception {
-    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, llmClient);
+    // llmProvider="local" 고정 테스트라 resolveLlmClient()가 DB 조회 없이 LlmClientResolver의
+    // 로컬 클라이언트로 바로 고정된다 — anthropicLlmClient 자리는 쓰이지 않아 null로 둬도 안전하다.
+    LlmClientResolver llmClientResolver = new LlmClientResolver(null, llmClient);
+    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, llmClientResolver, null);
     setField(service, "llmProvider", "local");
     setField(service, "llmLocalModel", "qwen2.5-coder:7b");
     setField(service, "apiModel", "claude-sonnet-5");

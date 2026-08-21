@@ -1,5 +1,9 @@
 package com.legacy.analysis;
 import com.legacy.analysis.llm.LlmClient;
+import com.legacy.analysis.llm.LlmClientResolver;
+import com.legacy.analysis.llm.LlmModelOption;
+import com.legacy.analysis.llm.LlmModelOptionService;
+import com.legacy.analysis.llm.LlmProvider;
 import com.legacy.analysis.llm.LlmResult;
 import com.legacy.core.ApiErrorHandler;
 import com.legacy.core.FileIoErrorHandler;
@@ -50,13 +54,10 @@ public class ClaudeServiceImpl implements ClaudeService {
     // 분석 세션(소스 경로)별로 AI가 생성한 CLAUDE.md 내용을 보관 (세션 종료 시 정리)
     private final Map<String, String> sessionSystemPrompts = new java.util.concurrent.ConcurrentHashMap<>();
 
-    // 지원 모델 목록과 표시명
-    public static final Map<String, String> SUPPORTED_MODELS = new java.util.LinkedHashMap<>();
-    static {
-        SUPPORTED_MODELS.put("claude-sonnet-4-6", "Claude Sonnet ($3/$15 per 1M)");
-        SUPPORTED_MODELS.put("claude-opus-4-8", "Claude Opus ($15/$75 per 1M)");
-        SUPPORTED_MODELS.put("claude-haiku-4-5-20251001", "Claude Haiku ($0.80/$4 per 1M)");
-    }
+    // 2026-08-21(모델 목록 DB화) 이전에는 지원 모델 목록이 이 정적 맵으로 하드코딩돼 있었다.
+    // setModel()의 유효성 검증이 이제 llmModelOptionService(DB, llm_model_options 테이블)를
+    // 기준으로 바뀌었으므로 이 맵은 더 이상 검증에 쓰이지 않는다 — 기존 기본값 3종은
+    // LlmModelOptionService.seedDefaultsIfEmpty()가 최초 기동 시 DB에 그대로 시드한다.
 
     @Value("${anthropic.api.max-tokens:4000}")
     private int apiMaxTokens;
@@ -108,16 +109,47 @@ public class ClaudeServiceImpl implements ClaudeService {
     private final FileIoErrorHandler fileIoErrorHandler;
     private final SessionConfig sessionConfig;
     private final ProjectTypeDetector projectTypeDetector;
-    private final LlmClient llmClient;
+    // 2026-08-21(모델 목록 DB화 + 크레딧소진 failover) 리팩터링: 과거 단일 llmClient 필드를
+    // 제거하고 LlmClientResolver(provider별 구현체 선택)/LlmModelOptionService(모델→provider 조회)로
+    // 교체했다 — @ConditionalOnProperty를 뗀 두 LlmClient 빈이 동시에 등록되므로 더 이상 단일
+    // LlmClient를 주입받을 수 없다(NoUniqueBeanDefinitionException). 근거: analyzer-plan
+    // docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §3-4.
+    private final LlmClientResolver llmClientResolver;
+    private final LlmModelOptionService llmModelOptionService;
 
     @Autowired
     public ClaudeServiceImpl(ApiErrorHandler apiErrorHandler, FileIoErrorHandler fileIoErrorHandler,
-        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector, LlmClient llmClient) {
+        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector,
+        LlmClientResolver llmClientResolver, LlmModelOptionService llmModelOptionService) {
       this.apiErrorHandler = apiErrorHandler;
       this.fileIoErrorHandler = fileIoErrorHandler;
       this.sessionConfig = sessionConfig;
       this.projectTypeDetector = projectTypeDetector;
-      this.llmClient = llmClient;
+      this.llmClientResolver = llmClientResolver;
+      this.llmModelOptionService = llmModelOptionService;
+    }
+
+    /**
+     * 호출에 쓸 modelKey를 기준으로 실제 LlmClient 구현체를 고른다.
+     *
+     * "레이어 A"(전역 {@code llm.provider=local} 스위치)는 이번 변경과 무관하게 그대로 유지한다 —
+     * !isAnthropicMode()이면 세션 선택과 무관하게 항상 로컬 클라이언트로 고정(기존 동작 100% 보존,
+     * DB(llm_model_options) 조회조차 하지 않음 — 전역 local 모드는 애초에 DB에 등록되지 않은
+     * llmLocalModel 설정값을 그대로 쓰므로 DB 조회 대상이 아니다).
+     *
+     * isAnthropicMode()==true(기본값, 대다수 배포)일 때만 modelKey로 llm_model_options를 조회해
+     * provider(ANTHROPIC/LOCAL)를 확인한다 — 크레딧소진 컨펌 수락 후 setModel()로 로컬 failover
+     * 모델이 세션에 지정되면, 같은 세션의 이후 호출은 이 조회를 통해 자동으로 로컬 클라이언트로 전환된다.
+     * DB에 없는 modelKey(비정상 상황에 대한 안전망)는 기존 기본값과 동일하게 ANTHROPIC으로 처리한다.
+     */
+    private LlmClient resolveLlmClient(String modelKey) {
+        if (!isAnthropicMode()) {
+            return llmClientResolver.resolve(LlmProvider.LOCAL);
+        }
+        LlmProvider provider = llmModelOptionService.findByModelKey(modelKey)
+            .map(LlmModelOption::getProvider)
+            .orElse(LlmProvider.ANTHROPIC);
+        return llmClientResolver.resolve(provider);
     }
 
     /**
@@ -174,12 +206,13 @@ public class ClaudeServiceImpl implements ClaudeService {
             sessionModelOverrides.remove(sourceFolderPath);
             return;
         }
-        // 유효 모델만 허용
-        if (SUPPORTED_MODELS.containsKey(model)) {
+        // 유효 모델만 허용 — 2026-08-21부터 하드코딩 화이트리스트(SUPPORTED_MODELS) 대신
+        // llm_model_options(DB, 활성 상태) 기준으로 검증한다.
+        if (llmModelOptionService.isActiveModel(model)) {
             sessionModelOverrides.put(sourceFolderPath, model);
             log.info("[모델 변경] 선택된 모델: {}", model);
         } else {
-            log.warn("[모델 변경 실패] 지원하지 않는 모델: {} - 기본값 유지", model);
+            log.warn("[모델 변경 실패] 지원하지 않거나 비활성 상태인 모델: {} - 기본값 유지", model);
         }
     }
 
@@ -233,7 +266,7 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         try {
             String modelToUse = getCurrentModel(sourceFolderPath);
-            LlmResult result = llmClient.call(systemPrompt, userContent, modelToUse, 4096);
+            LlmResult result = resolveLlmClient(modelToUse).call(systemPrompt, userContent, modelToUse, 4096);
             extractAndStoreTokenUsage(result, modelToUse);
             String generated = result.text();
             // 소형 로컬 모델은 이 생성 단계에서도 지침 문서 대신 다른 형식(JSON 배열/객체 등)을
@@ -642,7 +675,8 @@ public class ClaudeServiceImpl implements ClaudeService {
         for (int retry = 0; retry < maxRetries; retry++) {
             try {
                 String modelToUse = getCurrentModel(sourceFolderPath);
-                LlmResult result = llmClient.call(finalSystemPrompt, userContent, modelToUse, apiMaxTokens);
+                LlmResult result = resolveLlmClient(modelToUse)
+                    .call(finalSystemPrompt, userContent, modelToUse, apiMaxTokens);
                 String aiJsonResponse = result.text();
 
                 // 토큰 사용량 추출 및 저장
@@ -733,7 +767,7 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         try {
             String modelToUse = getCurrentModel(sourceFolderPath);
-            LlmResult result = llmClient.call(systemPrompt, userContent, modelToUse, 4096);
+            LlmResult result = resolveLlmClient(modelToUse).call(systemPrompt, userContent, modelToUse, 4096);
             extractAndStoreTokenUsage(result, modelToUse);
             log.info("[README 생성 완료] 프로젝트: {}, 길이: {}자", projectName, result.text().length());
             return result.text();

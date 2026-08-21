@@ -1,11 +1,15 @@
 package com.legacy.analysis;
 
+import com.legacy.analysis.llm.LlmModelOptionService;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * handOff.md "구현 진행 상황 (2차)"에서 완료로 기록된 getCurrentModel()의 local 모드 분기
@@ -21,11 +25,19 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * "서로_다른_세션끼리_모델_오버라이드가_섞이지_않는다" 테스트는 그 레이스 컨디션 버그의
  * 회귀 테스트다 — 이 수정 전이었다면 실패했을 케이스.
  * (참고: analyzer-plan docs/chat/etc/2026-08-20-user-selectable-provider-analysis-and-setmodel-race-bug.md)
+ *
+ * 2026-08-21(모델 목록 DB화) 후속수정: setModel()의 유효성 검증이 하드코딩 화이트리스트
+ * (SUPPORTED_MODELS)에서 LlmModelOptionService(DB) 기준으로 바뀌었다. 이 테스트의 관심사는
+ * "세션별 격리"이지 "어떤 모델이 유효한가"가 아니므로, LlmModelOptionService는 Mockito로
+ * 목킹해 모든 modelKey를 유효(active)로 취급하게 만든다(그 검증 로직 자체는 별도
+ * LlmModelOptionServiceTest가 다룬다).
  */
 class ClaudeServiceImplModelSwitchTest {
 
   private ClaudeServiceImpl newService(String llmProvider, String llmLocalModel, String apiModel) throws Exception {
-    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, null);
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.isActiveModel(anyString())).thenReturn(true);
+    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, null, llmModelOptionService);
     setField(service, "llmProvider", llmProvider);
     setField(service, "llmLocalModel", llmLocalModel);
     setField(service, "apiModel", apiModel);

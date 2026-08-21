@@ -1,4 +1,4 @@
-# 진행 현황 핸드오프 (2026-08-19 기준, 26차 갱신)
+# 진행 현황 핸드오프 (2026-08-21 기준, 27차 갱신)
 
 이 문서는 `legacy-analyzer`를 "Claude API ↔ 로컬/사내 LLM 설정만으로 전환" 가능하게 만드는 작업의 현재까지 진행 상황을 정리한다. 새 세션/다른 담당자가 이어받을 때 이 문서만 읽고 바로 이어갈 수 있도록 작성한다.
 
@@ -358,3 +358,66 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 자세한 논의 경위는 `analyzer-plan` 프로젝트의 `docs/chat/etc/2026-08-19-scenario-1-2-hold-scenario-3-active-decision.md`, `docs/chat/etc/2026-08-19-pgx-qwen3-rag-langchain4j-exploration-plan.md` 참고.
 
 **남은 것**: (1) PGX 계정 sudo/Docker 권한 확인(사용자가 직접), (2) 확인 결과에 맞는 설치 스텝 확정, (3) 설치 방식 확정 후 PM/PL에 방향 전환(독립 샌드박스, RAG 동시 구축) 재확인 검토, (4) scenario_1의 실행 검증 미착수 항목들(총파일 카운터 버그 등)은 보류 상태 그대로 유지 — CoP 리뷰 취합 시점까지 보류.
+
+## 모델 목록 DB화(관리자 CRUD) + 크레딧소진 컨펌 기반 failover 착수 — Phase 0~1 완료 (27차, 2026-08-21)
+
+`analyzer-plan` 프로젝트(별도 리드 트랙)에서 PM/PL 협의로 확정한 신규 이니셔티브 착수. 하드코딩된
+모델 드롭다운(하이쿠/소넷/오퍼스)을 관리자가 DB로 CRUD하는 구조로 옮기고, 분석 도중 크레딧
+(결제 잔액) 소진 시 자동전환이 아니라 "자체 LLM으로 진행하시겠습니까?" 컨펌 후 전환하는 기능을
+추가한다. Phase 0~7(17개 task)로 분해된 계획을 이 세션에서 순서대로 진행 중.
+
+**근거 문서**:
+- `analyzer-plan/docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md`
+- `analyzer-plan/docs/chat/etc/2026-08-21-llm-model-min-active-guard-and-handoff.md`
+
+작업 브랜치: `feature/2026-08-21-llm-model-db-failover` (시작 커밋 `5cbe055`, setModel 레이스컨디션
+핫픽스 직후).
+
+### Phase 0 — 엔티티/Resolver 기반 (T1~T4)
+- **T1**: `LlmProvider` enum(`ANTHROPIC`/`LOCAL`) + `LlmModelOption` JPA 엔티티 신설
+  (`com.legacy.analysis.llm`, 테이블 `llm_model_options`). `ddl-auto=update`(기존 설정 그대로)라
+  별도 마이그레이션 스크립트 없이 재기동 시 테이블이 자동 생성된다.
+- **T2**: `LlmModelOptionRepository` 신설(활성 목록/모델키 조회/failover 대상 조회/활성 카운트).
+- **T3**: `AnthropicLlmClient`/`OpenAiCompatibleLlmClient`에서 `@ConditionalOnProperty` 제거 —
+  두 빈이 `llm.provider` 값과 무관하게 항상 함께 등록되도록 변경(세션별 동시 사용 전제).
+- **T4**: `LlmClientResolver` 신설. provider(enum)를 받아 알맞은 `LlmClient` 구현체를 반환한다.
+  테스트 편의를 위해 생성자 파라미터 타입을 구현체가 아닌 `LlmClient` 인터페이스로 두고, 파라미터명을
+  스프링 빈 이름(`anthropicLlmClient`/`openAiCompatibleLlmClient`)과 일치시켜 `@Qualifier` 없이도
+  모호성 없이 주입되게 했다(가짜 LlmClient를 그대로 주입해 실제 HTTP 없이 단위 테스트 가능).
+
+### Phase 1 — Service/CRUD 백엔드 (T5~T8)
+- **T5**: `LlmModelOptionService` 신설(`com.legacy.analysis.llm`). CRUD + 사람이 확정한 두 가지
+  가드를 트랜잭션 안에서 카운트 확인 후 적용: `setActive(id, false)`/`delete(id)`가 활성 모델을
+  0개로 만들면 `IllegalStateException("최소 1개 모델은 활성 상태여야 합니다.")` 거부. `setFailoverTarget`은
+  대상이 비활성이거나 `ANTHROPIC`이면 거부하고, 지정 시 기존에 지정돼 있던 다른 모델은 자동 해제해
+  "정확히 0개 또는 1개"만 유지한다. 패키지를 `com.legacy.analysis.llm`에 둔 이유: 컨트롤러만
+  `com.legacy.admin`에 둬서 기존 `admin → analysis` 의존 방향(역방향 금지)을 그대로 지키기 위함
+  (근거: 위 설계 문서 §4).
+- **T6**: `LlmModelAdminController`(`com.legacy.admin`) 신설 — 관리자 CRUD API 6종
+  (`GET/POST /api/admin/llm-models`, `PUT /{id}`, `PATCH /{id}/active`, `PATCH /{id}/failover-target`,
+  `DELETE /{id}`). 응답은 기존 `AdminController`와 동일하게 `Map<String,Object>` 기반(이 패키지의
+  실제 컨벤션 — 신설 DTO 클래스를 별도로 만들지 않고 기존 스타일을 따름).
+- **T7**(회귀 리스크 최대) — `ClaudeServiceImpl` 리팩터링: 단일 `LlmClient llmClient` 필드를
+  제거하고 `LlmClientResolver`/`LlmModelOptionService`를 주입받도록 생성자 변경. 3개 호출 지점
+  (`analyzeCodeWithClaude`/`generateSessionClaudeMd`/`generateProjectReadmeWithClaude`)을
+  `resolveLlmClient(modelKey).call(...)`로 교체. `resolveLlmClient()`는 전역 local 모드
+  (`!isAnthropicMode()`)면 기존처럼 DB 조회 없이 무조건 로컬 클라이언트로 고정(레이어 A 100% 보존),
+  anthropic 모드(기본값)면 modelKey로 `llm_model_options`를 조회해 provider를 확인한다(DB에 없는
+  모델은 안전하게 기존 기본값 ANTHROPIC 처리). `setModel()`의 유효성 검증도 하드코딩
+  `SUPPORTED_MODELS` 화이트리스트 대신 `llmModelOptionService.isActiveModel(...)`(DB) 기준으로 교체.
+  생성자 시그니처 변경으로 `ClaudeServiceImpl`을 직접 `new`하던 기존 테스트 5개
+  (`ClaudeServiceImplNormalizeCommentTest`/`ModelSwitchTest`/`GenerateClaudeMdTest`/
+  `RoleMergeTest`/`AnalyzeCodeSystemPromptTest`)를 새 생성자에 맞게 갱신(로컬모드 테스트는
+  `LlmClientResolver`로 기존 가짜 LlmClient를 감싸서 그대로 재사용, `ModelSwitchTest`는
+  `LlmModelOptionService`를 Mockito로 목킹).
+- **T8**: `LlmModelOptionServiceTest`(19건, 가드 규칙 전수 검증)/`LlmModelAdminControllerTest`
+  (11건, HTTP 계층 변환 검증) 신규 작성. 기존 `LlmProviderSwitchTest`도 갱신 필요 — T3에서
+  `@ConditionalOnProperty`를 제거하면서 이 테스트의 전제("`llm.provider` 값에 따라 빈이 정확히
+  하나만 뜬다")가 깨져 2건 실패했음을 발견, "두 빈이 항상 공존 + `LlmClientResolver`가 provider
+  값에 맞게 정확히 라우팅"을 검증하도록 재작성해 원래 테스트 목표(설정값만으로 요청 목적지가
+  실제로 바뀐다)를 새 아키텍처 기준으로 그대로 보존.
+- **T7 이후 전체 회귀 테스트 실행**: `./gradlew clean test` — **300건 전부 통과, 실패/에러 0건**
+  (기존 267건 + `LlmProviderSwitchTest` 갱신분 포함 + 신규 Phase 0~1 테스트 33건). 회귀 없음 확인.
+
+**남은 것**: Phase 2(관리자 화면)부터 Phase 7(통합/회귀 검증)까지 계속 진행 예정. 이 세션 안에서
+이어서 진행한다.
