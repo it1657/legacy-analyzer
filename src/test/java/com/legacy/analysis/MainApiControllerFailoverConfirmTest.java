@@ -3,7 +3,11 @@ package com.legacy.analysis;
 import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.analysis.llm.LlmProvider;
+import com.legacy.auth.Role;
+import com.legacy.auth.User;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
 
 import java.lang.reflect.Method;
 import java.nio.file.Path;
@@ -11,6 +15,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -42,9 +47,27 @@ class MainApiControllerFailoverConfirmTest {
   @SuppressWarnings("unchecked")
   private Map<String, Object> confirmFailover(MainApiController controller, Map<String, String> request)
       throws Exception {
-    Method m = MainApiController.class.getDeclaredMethod("confirmFailover", Map.class);
+    return confirmFailover(controller, request, ownerAuthentication("owner"));
+  }
+
+  @SuppressWarnings("unchecked")
+  private Map<String, Object> confirmFailover(MainApiController controller, Map<String, String> request,
+      Authentication authentication) throws Exception {
+    Method m = MainApiController.class.getDeclaredMethod("confirmFailover", Map.class, Authentication.class);
     m.setAccessible(true);
-    return (Map<String, Object>) m.invoke(controller, request);
+    return (Map<String, Object>) m.invoke(controller, request, authentication);
+  }
+
+  /**
+   * 세션 소유자 검증(2026-08-21 버그 수정)용 기본 인증 객체 — 로그인ID "owner".
+   * 기존 confirmFailover 테스트들은 세션 소유자 검증 이전부터 있던 것들이라, 이 헬퍼가 만들어주는 "owner"
+   * 인증을 그대로 쓰고 각 테스트의 SessionState에 {@code setUsername("owner")}만 맞춰주면 그대로 통과한다.
+   */
+  private Authentication ownerAuthentication(String loginId) {
+    User user = new User(loginId, loginId + "@example.com", "hash");
+    user.setSeq(1L);
+    user.setRoles(Set.of(new Role("USER", "일반 사용자")));
+    return new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
   }
 
   private void handleCreditExhaustedPause(MainApiController controller, SessionState session,
@@ -129,6 +152,7 @@ class MainApiControllerFailoverConfirmTest {
   void AWAITING_FAILOVER_CONFIRM_상태가_아니면_거부한다() throws Exception {
     AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
     SessionState session = new SessionState("sid", "src", "out");
+    session.setUsername("owner");
     session.setCurrentPhase("ANALYZING");
     when(sessionManager.getSession("sid")).thenReturn(session);
     MainApiController controller = newController(null, sessionManager, null, null);
@@ -143,6 +167,7 @@ class MainApiControllerFailoverConfirmTest {
   void failoverModelKey가_없으면_거부한다() throws Exception {
     AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
     SessionState session = new SessionState("sid", "src", "out");
+    session.setUsername("owner");
     session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
     when(sessionManager.getSession("sid")).thenReturn(session);
     MainApiController controller = newController(null, sessionManager, null, null);
@@ -158,6 +183,7 @@ class MainApiControllerFailoverConfirmTest {
     AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
     ClaudeService claudeService = mock(ClaudeService.class);
     SessionState session = new SessionState("sid", "/tmp/src", "/tmp/out");
+    session.setUsername("owner");
     session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
     session.setFailoverModelKey("qwen3-32b");
     session.setPendingFilePaths(List.of("/tmp/src/A.java", "/tmp/src/B.java"));
@@ -180,6 +206,7 @@ class MainApiControllerFailoverConfirmTest {
     AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
     ClaudeService claudeService = mock(ClaudeService.class);
     SessionState session = new SessionState("sid", "/tmp/src", "/tmp/out");
+    session.setUsername("owner");
     session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
     session.setFailoverModelKey("qwen3-32b");
     session.setPendingFilePaths(List.of());
@@ -192,5 +219,54 @@ class MainApiControllerFailoverConfirmTest {
     assertTrue(((String) response.get("message")).contains("재개할 파일이 없습니다"));
     verify(claudeService, never()).setModel(anyString(), anyString());
     assertNull(session.getFailoverConfirmedAt(), "재개할 파일이 없어 거부된 경우 모델 전환/컨펌 시각 기록 같은 부작용이 없어야 함");
+  }
+
+  // ===================================================================
+  // 세션 소유자 검증 (2026-08-21 버그 수정 — bug-suspects.md)
+  // ===================================================================
+
+  @Test
+  void 세션_소유자가_아니면_거부되고_모델전환없이_실패한다() throws Exception {
+    AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
+    ClaudeService claudeService = mock(ClaudeService.class);
+    SessionState session = new SessionState("sid", "/tmp/src", "/tmp/out");
+    session.setUsername("owner");
+    session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+    session.setFailoverModelKey("qwen3-32b");
+    session.setPendingFilePaths(List.of("/tmp/src/A.java"));
+    when(sessionManager.getSession("sid")).thenReturn(session);
+    MainApiController controller = newController(claudeService, sessionManager, null, null);
+
+    Map<String, Object> response = confirmFailover(controller, Map.of("sessionId", "sid"), ownerAuthentication("attacker"));
+
+    assertEquals(false, response.get("success"));
+    assertTrue(((String) response.get("message")).contains("본인 세션만"));
+    verify(claudeService, never()).setModel(anyString(), anyString());
+    assertNull(session.getFailoverConfirmedAt(), "소유자가 아니면 모델 전환/컨펌 시각 기록 같은 부작용이 없어야 함");
+    assertEquals(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM, session.getCurrentPhase(),
+        "권한이 없으면 세션 상태를 건드리면 안 된다");
+  }
+
+  @Test
+  void ADMIN은_다른_사용자의_세션도_컨펌할_수_있다() throws Exception {
+    AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
+    ClaudeService claudeService = mock(ClaudeService.class);
+    SessionState session = new SessionState("sid", "/tmp/src", "/tmp/out");
+    session.setUsername("owner");
+    session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+    session.setFailoverModelKey("qwen3-32b");
+    session.setPendingFilePaths(List.of("/tmp/src/A.java"));
+    when(sessionManager.getSession("sid")).thenReturn(session);
+    MainApiController controller = newController(claudeService, sessionManager, null, null);
+
+    User admin = new User("admin", "admin@example.com", "hash");
+    admin.setSeq(2L);
+    admin.setRoles(Set.of(new Role("ADMIN", "관리자")));
+    Authentication adminAuth = new UsernamePasswordAuthenticationToken(admin, null, admin.getAuthorities());
+
+    Map<String, Object> response = confirmFailover(controller, Map.of("sessionId", "sid"), adminAuth);
+
+    assertEquals(true, response.get("success"));
+    verify(claudeService, times(1)).setModel(eq(Path.of("/tmp/src").toString()), eq("qwen3-32b"));
   }
 }

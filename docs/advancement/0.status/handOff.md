@@ -610,3 +610,70 @@ Phase 3까지만 범위였음.
 
 **남은 것**: Phase 5(failover 컨펌 프론트) ~ Phase 7(통합/회귀 검증)은 다음 세션 몫. 이 세션은
 Phase 4까지만 범위였음.
+
+## 보안 버그 수정 — 세션 제어 4개 API 소유자 검증 누락 (30차, 2026-08-21)
+
+QA가 `analyzer-plan/docs/pipeline/bug-suspects.md`에 등록한 인가 우회 버그를 사람이 즉시 수정
+승인해 이번 세션에서 처리했다. 29차 문서(§4 "인증/권한")에 이미 "기존 pause/resume도 세션 소유자
+검증 없이 전역 `.requestMatchers("/api/**").authenticated()`에만 의존한다"고 기록해 뒀던 바로 그
+문제 — **로그인만 하면 sessionId를 아는 임의 사용자가 `/api/session/pause`·`/resume`·`/cancel`·
+`/failover/confirm` 4개 API로 남의 세션을 제어(일시정지/재개/취소/failover 전환)할 수 있었다.**
+
+### 원인 조사 — 기존 컨벤션 확인
+- `MainApiController`가 `new Thread(() -> runAnalysis(...))`로 분석을 별도 스레드에서 돌리기 때문에
+  `SecurityContextHolder`(스레드 로컬)가 자동 전파되지 않는다는 건 이미 1차 세션부터 알려진 제약(위
+  "확정된 주요 설계 결정" 참고)이지만, **이번에 고친 4개 엔드포인트는 전부 스레드 진입 전의 동기
+  컨트롤러 메서드**라 이 제약과 무관 — `startAnalysis`/`uploadAnalysis`처럼 `Authentication
+  authentication` 파라미터를 그대로 주입받아 쓸 수 있었다(실제로 같은 파일의 다른 10개 엔드포인트가
+  이미 이 방식을 쓰고 있었음 — grep으로 확인).
+- 더 결정적으로, **완전히 동일한 문제(세션 소유자 검증)를 이미 겪고 고쳐둔 선례**를 찾았다 —
+  `com.legacy.api.monitoring.MonitoringController`가 세션 상세조회/메트릭/로그/요약/삭제 5개
+  엔드포인트에 `isOwnerOrAdmin(session, authentication)` private 헬퍼(세션 소유자 OR ADMIN 허용,
+  `user.getUserId()`(로그인ID, String) ↔ `session.getUsername()`(String) 비교)를 이미 쓰고 있었다.
+  이번 수정은 **이 기존 패턴을 그대로 재사용**했다(새 패턴을 발명하지 않음 — work order 지시 그대로).
+  ADMIN 예외를 넣을지 여부도 이 선례가 이미 "허용"으로 답을 갖고 있어 별도 논의 없이 그대로 따름.
+- `SessionState.userId`(Long, `user.getSeq()`와 비교 가능)도 존재하지만, 이미 확립된
+  `MonitoringController`의 `username`(String, `user.getUserId()`) 비교 방식과 다르면 두 컨트롤러가
+  서로 다른 소유자 검증 방식을 갖게 되므로, 일관성을 위해 `username` 비교 쪽을 그대로 채택했다.
+
+### 구현
+- `MainApiController`에 `isSessionOwnerOrAdmin(SessionState, Authentication)` private 헬퍼 신설
+  (기존 `isAdmin(Authentication)` 재사용 + `user.getUserId().equals(session.getUsername())`).
+- `pauseSession`/`resumeSession`/`confirmFailover`: 시그니처에 `Authentication authentication` 파라미터
+  추가, 기존 "세션을 찾을 수 없습니다" 체크 **바로 다음 단계**에 소유자 검증 삽입(세션 not-found
+  처리 순서는 그대로 유지 — work order 지시). 실패 시 이 컨트롤러의 기존 컨벤션대로
+  `{success:false, message:"본인 세션만 제어할 수 있습니다."}` 반환(별도 HTTP status 없이 200 +
+  success:false — 같은 메서드의 다른 실패 케이스들과 동일한 응답 스키마).
+- `cancelSession`: 원래 `sessionManager.cancelSession(sessionId)`을 먼저 호출한 뒤에야 세션을
+  조회하는 구조였는데(세션 not-found 시에도 그냥 `success:true`로 조용히 넘어가는 기존 동작 — 이건
+  건드리지 않음), 소유자 검증을 위해 `sessionManager.getSession(sessionId)`로 먼저 조회하고 세션이
+  실제로 존재할 때만 소유자 검증 → 통과하면 기존 `cancelSession(...)` 호출로 이어지도록 순서를
+  재구성했다. `getSession()`은 활성세션 맵 조회(+ 없으면 DB 폴백) 뿐인 조회 전용 메서드라 한 번 더
+  불러도 부작용 없음.
+- `SecurityConfig`는 건드리지 않았다 — 전역 `/api/**`.authenticated() 규칙은 그대로 유효하고, 이번
+  수정은 그 위에 컨트롤러 레벨 소유자 검증만 얹은 것.
+
+### 테스트
+- `MainApiControllerFailoverConfirmTest` 갱신 — 리플렉션 호출부를
+  `getDeclaredMethod("confirmFailover", Map.class, Authentication.class)`로 맞추고, 기존 6개 테스트는
+  전부 `session.setUsername("owner")` + `ownerAuthentication("owner")`(신규 헬퍼, real
+  `UsernamePasswordAuthenticationToken` 사용 — 이 저장소의 `AuthControllerTest`/`AuthTestFixtures`가
+  이미 쓰는 방식과 동일)를 추가해 **기존 정상 흐름이 소유자 본인 호출 전제로 그대로 통과**하도록
+  갱신(회귀 아님 — 버그가 고쳐진 결과). 신규 2건: 세션 소유자가 아니면 거부(모델 전환 등 부작용 없음
+  확인 포함), ADMIN은 소유자가 아니어도 컨펌 가능.
+- `MainApiControllerSessionOwnershipTest`(신규, 8건) — pause/resume/cancel 3개 엔드포인트 각각
+  소유자 본인 성공 + 타인 거부(세션 상태 불변 확인 포함), pause는 ADMIN 예외 성공 케이스도 추가,
+  cancel은 세션이 아예 없는 경우 기존 동작(`success:true`) 유지 확인.
+- `./gradlew clean test` — **327건 전부 통과, 실패/에러 0건**(기존 317건 + 신규 10건: Failover
+  테스트 +2, 신규 Ownership 테스트 8건).
+
+### 리스크/제안
+- `getSessionFileList`/`getFilePreview`/`getUploadManifest`/`cleanupUploadSession` 등 같은 파일 안의
+  다른 세션 관련 엔드포인트도 소유자 검증이 없는 채로 남아있다(코드 확인함). 이번 work order 범위는
+  명시된 4개뿐이라 손대지 않았지만, 같은 유형의 잠재적 인가 우회이므로 **별도 버그로 등록해 후속
+  조치가 필요**하다고 제안만 남긴다(범위 확대 금지 지시 준수).
+- 트랜잭션: 이번 변경은 기존 로직 흐름에 조회(`getSession`) 1회를 앞당겨 추가한 것뿐이고 새로운
+  쓰기 로직을 넣지 않아 트랜잭션 관련 리스크 없음.
+
+**남은 것**: 위 "리스크/제안"의 나머지 세션 API 소유자 검증 미비 건, 그리고 여전히 Phase 5(failover
+컨펌 프론트) ~ Phase 7(통합/회귀 검증).

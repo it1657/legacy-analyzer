@@ -320,6 +320,20 @@ public class MainApiController {
   }
 
   /**
+   * 세션 제어 API(pause/resume/cancel/failover confirm)의 소유자 또는 ADMIN 여부를 확인한다.
+   * 로그인만 하면 sessionId를 아는 임의 사용자가 남의 세션을 제어(pause/resume/cancel/failover 전환)할 수
+   * 있던 인가 우회 버그(2026-08-21, analyzer-plan bug-suspects.md)를 막기 위해 추가했다.
+   * com.legacy.api.monitoring.MonitoringController#isOwnerOrAdmin과 동일한 패턴(세션 소유자 or ADMIN
+   * 허용, user.getUserId() ↔ session.getUsername() 비교)을 그대로 재사용한다 — 이 프로젝트에 이미 확립된
+   * "세션 소유자 검증" 컨벤션.
+   */
+  private boolean isSessionOwnerOrAdmin(SessionState session, Authentication authentication) {
+    if (authentication == null || !(authentication.getPrincipal() instanceof User user)) return false;
+    if (isAdmin(authentication)) return true;
+    return user.getUserId().equals(session.getUsername());
+  }
+
+  /**
    * 프론트엔드 파일 트리에서 선택된 상대경로 목록(JSON 배열 문자열)을 파싱한다.
    * 비어있거나 파싱 실패 시 null을 반환하며, 이는 "선택 없음 = 전체 분석"을 의미한다.
    */
@@ -814,7 +828,7 @@ public class MainApiController {
 
   @PostMapping("/api/session/pause")
   @ResponseBody
-  public Map<String, Object> pauseSession(@RequestBody Map<String, String> request) {
+  public Map<String, Object> pauseSession(@RequestBody Map<String, String> request, Authentication authentication) {
     Map<String, Object> response = new HashMap<>();
     String sessionId = request.get("sessionId");
     if (sessionId == null || sessionId.isEmpty()) {
@@ -823,6 +837,9 @@ public class MainApiController {
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) {
       response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
     }
     session.setPausedAt(LocalDateTime.now());
     session.setCurrentPhase("PAUSED");
@@ -849,7 +866,7 @@ public class MainApiController {
 
   @PostMapping("/api/session/resume")
   @ResponseBody
-  public Map<String, Object> resumeSession(@RequestBody Map<String, String> request) {
+  public Map<String, Object> resumeSession(@RequestBody Map<String, String> request, Authentication authentication) {
     Map<String, Object> response = new HashMap<>();
     String sessionId = request.get("sessionId");
     if (sessionId == null || sessionId.isEmpty()) {
@@ -859,6 +876,9 @@ public class MainApiController {
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) {
       response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
     }
     return resumePendingFilesInThread(session, sessionId);
   }
@@ -872,7 +892,7 @@ public class MainApiController {
    */
   @PostMapping("/api/session/failover/confirm")
   @ResponseBody
-  public Map<String, Object> confirmFailover(@RequestBody Map<String, String> request) {
+  public Map<String, Object> confirmFailover(@RequestBody Map<String, String> request, Authentication authentication) {
     Map<String, Object> response = new HashMap<>();
     String sessionId = request.get("sessionId");
     if (sessionId == null || sessionId.isEmpty()) {
@@ -881,6 +901,9 @@ public class MainApiController {
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) {
       response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
     }
     if (!SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(session.getCurrentPhase())) {
       response.put("success", false);
@@ -958,10 +981,14 @@ public class MainApiController {
 
   @PostMapping("/api/session/cancel")
   @ResponseBody
-  public Map<String, Object> cancelSession(@RequestBody Map<String, String> request) {
+  public Map<String, Object> cancelSession(@RequestBody Map<String, String> request, Authentication authentication) {
     Map<String, Object> response = new HashMap<>();
     String sessionId = request.get("sessionId");
     if (sessionId != null && !sessionId.isEmpty()) {
+      SessionState existingSession = sessionManager.getSession(sessionId);
+      if (existingSession != null && !isSessionOwnerOrAdmin(existingSession, authentication)) {
+        response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+      }
       sessionManager.cancelSession(sessionId);
       SessionState session = sessionManager.getSession(sessionId);
       if (session != null) {
