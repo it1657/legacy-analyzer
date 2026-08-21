@@ -579,8 +579,17 @@ function populateModelSelectOptions(models) {
   if (!select || !models || models.length === 0) return;
 
   const previousValue = select.value;
-  select.innerHTML = models.map(m =>
-    `<option value="${m.modelKey}">${m.displayName}</option>`).join('');
+  // 저장형 XSS 방지(2026-08-21 버그 수정): displayName은 관리자가 /api/admin/llm-models CRUD로
+  // 자유 입력하는 값이라 <script>/onerror= 같은 HTML을 그대로 문자열 템플릿으로 조립해 innerHTML에
+  // 넣으면 인증된 전체 사용자 브라우저에서 실행될 수 있었다(bug-suspects.md 참고). option을 DOM
+  // 요소로 직접 만들고 .textContent로만 채워 브라우저가 자동으로 이스케이프하게 한다.
+  select.innerHTML = '';
+  models.forEach(m => {
+    const option = document.createElement('option');
+    option.value = m.modelKey;
+    option.textContent = m.displayName;
+    select.appendChild(option);
+  });
 
   const stillExists = models.some(m => m.modelKey === previousValue);
   select.value = stillExists ? previousValue : models[0].modelKey;

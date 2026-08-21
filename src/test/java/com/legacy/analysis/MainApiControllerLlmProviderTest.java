@@ -210,4 +210,26 @@ class MainApiControllerLlmProviderTest {
 
     assertEquals(0, result.size());
   }
+
+  @Test
+  void llm_모델_조회_엔드포인트는_displayName을_이스케이프_없이_원문_그대로_반환한다() throws Exception {
+    // 저장형 XSS 버그 수정(2026-08-21, bug-suspects.md)의 회귀 방지 테스트.
+    // 서버(API)는 displayName을 가공/이스케이프하지 않고 원문 그대로 전달하는 것이 이 프로젝트의 기존
+    // 관례(UserController.updateProfile 등의 displayName 필드도 동일하게 trim만 하고 별도 sanitize 없음)와
+    // 일치한다 — 실제 XSS 방어는 dashboard.js의 populateModelSelectOptions()가 innerHTML 대신
+    // textContent로 DOM에 삽입하는 프런트엔드 계층에서 담당한다(브라우저 자동 이스케이프).
+    // 즉 이 테스트는 "서버가 악의적 문자열을 왜곡 없이 그대로 반환하는지"만 확인하고, DOM 삽입
+    // 안전성 자체는 코드 리뷰로 갈음한다(이 프로젝트에 JS 단위테스트 프레임워크가 없음).
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    String maliciousDisplayName = "<script>alert('xss')</script>";
+    LlmModelOption malicious = new LlmModelOption("claude-sonnet-4-6", maliciousDisplayName, LlmProvider.ANTHROPIC, 0);
+    when(llmModelOptionService.listActive()).thenReturn(List.of(malicious));
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-4-6"), "anthropic",
+        llmModelOptionService);
+
+    List<Map<String, Object>> result = getLlmModelOptions(controller);
+
+    assertEquals(maliciousDisplayName, result.get(0).get("displayName"),
+        "서버는 sanitize 없이 원문을 그대로 반환해야 하며, XSS 방어 책임은 프런트엔드(textContent)에 있다");
+  }
 }

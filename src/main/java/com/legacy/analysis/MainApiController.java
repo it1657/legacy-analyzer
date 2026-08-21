@@ -320,9 +320,14 @@ public class MainApiController {
   }
 
   /**
-   * 세션 제어 API(pause/resume/cancel/failover confirm)의 소유자 또는 ADMIN 여부를 확인한다.
-   * 로그인만 하면 sessionId를 아는 임의 사용자가 남의 세션을 제어(pause/resume/cancel/failover 전환)할 수
-   * 있던 인가 우회 버그(2026-08-21, analyzer-plan bug-suspects.md)를 막기 위해 추가했다.
+   * 세션 관련 API(제어: pause/resume/cancel/failover confirm, 조회/정리: 파일목록/미리보기/업로드
+   * manifest·원문·cleanup)의 소유자 또는 ADMIN 여부를 확인한다.
+   * 로그인만 하면 sessionId를 아는 임의 사용자가 남의 세션을 제어하거나(2026-08-21 최초 수정,
+   * analyzer-plan bug-suspects.md) 남의 세션 파일/업로드 원문을 조회·삭제할 수 있던(같은 날 추가 확인,
+   * bug-suspects.md 두 번째 항목) 인가 우회 버그를 막기 위해 추가했다. 업로드 세션(getUploadManifest 등
+   * /api/upload-session/**)도 별도 엔티티가 아니라 sourcePath가 업로드 샌드박스 하위인 동일한
+   * SessionState이므로(getValidatedUploadRoot 참고) 소유자 필드(username)와 조회 방식이 완전히 같아
+   * 이 헬퍼를 그대로 재사용한다.
    * com.legacy.api.monitoring.MonitoringController#isOwnerOrAdmin과 동일한 패턴(세션 소유자 or ADMIN
    * 허용, user.getUserId() ↔ session.getUsername() 비교)을 그대로 재사용한다 — 이 프로젝트에 이미 확립된
    * "세션 소유자 검증" 컨벤션.
@@ -452,6 +457,10 @@ public class MainApiController {
       result.put("error", "업로드 분석 세션이 아니거나 찾을 수 없습니다.");
       return result;
     }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      result.put("error", "이 세션에 접근할 권한이 없습니다.");
+      return result;
+    }
 
     try (Stream<Path> stream = Files.walk(uploadRoot)) {
       List<String> relativePaths = stream.filter(Files::isRegularFile)
@@ -475,6 +484,9 @@ public class MainApiController {
     Path uploadRoot = getValidatedUploadRoot(session);
     if (uploadRoot == null) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
     }
     try {
       Path filePath = resolveWithinRoot(uploadRoot, path);
@@ -503,6 +515,10 @@ public class MainApiController {
     SessionState session = sessionManager.getSession(sessionId);
     if (getValidatedUploadRoot(session) == null) {
       result.put("error", "업로드 분석 세션이 아니거나 찾을 수 없습니다.");
+      return result;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      result.put("error", "이 세션에 접근할 권한이 없습니다.");
       return result;
     }
     // sourcePath는 {sessionId}/{projectName} 하위 폴더이므로, 정리할 때는
@@ -602,6 +618,10 @@ public class MainApiController {
       result.put("error", "세션을 찾을 수 없습니다.");
       return result;
     }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      result.put("error", "이 세션에 접근할 권한이 없습니다.");
+      return result;
+    }
 
     String sourcePath = session.getSourcePath();
     String outputPath = session.getOutputPath();
@@ -648,6 +668,10 @@ public class MainApiController {
     if (session == null) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND)
           .body(Map.of("error", "세션을 찾을 수 없습니다. 이번 분석 세션 동안만 확인할 수 있습니다."));
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN)
+          .body(Map.of("error", "이 세션에 접근할 권한이 없습니다."));
     }
     SessionState.PreviewEntry entry = session.getPreviewEntry(path);
     if (entry == null) {

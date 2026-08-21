@@ -677,3 +677,110 @@ QA가 `analyzer-plan/docs/pipeline/bug-suspects.md`에 등록한 인가 우회 �
 
 **남은 것**: 위 "리스크/제안"의 나머지 세션 API 소유자 검증 미비 건, 그리고 여전히 Phase 5(failover
 컨펌 프론트) ~ Phase 7(통합/회귀 검증).
+
+## 보안 버그 수정 — 저장형 XSS(모델 드롭다운) + 세션 파일/업로드 5개 API 소유자 검증 누락 (31차, 2026-08-21)
+
+analyzer-plan `docs/pipeline/bug-suspects.md`에 등록된 버그 2건을 사람이 즉시 수정 승인해 같은
+세션(브랜치 `feature/2026-08-21-llm-model-db-failover`, 30차 커밋 `adb93bc` 다음)에서 이어서 고쳤다.
+
+### 버그 1 — 저장형 XSS 가능성 (Phase 3, 커밋 `a7b2166`)
+- **증상**: 관리자가 `/api/admin/llm-models` CRUD(`LlmModelAdminController`)에서 `displayName`에
+  `<script>`/`onerror=` 같은 HTML을 넣으면, `GET /api/config/llm-models` 응답을 거쳐
+  `dashboard.js`의 `populateModelSelectOptions()`가 이 값을 이스케이프 없이
+  `select.innerHTML = models.map(m => \`<option value="...">${m.displayName}</option>\`)...`로
+  직접 조립해 넣고 있었다. 이 API는 Phase 3(2026-08-21)부터 **인증된 전체 사용자**가 호출하는
+  일반 드롭다운이라, 관리자 전용 화면(`admin/dashboard.html`)에 있던 기존의 유사 패턴과 달리
+  노출 범위가 전체 사용자로 넓어진 지점이었다.
+- **프런트엔드 수정** (`src/main/resources/static/js/dashboard.js`
+  `populateModelSelectOptions`): 문자열 템플릿 조립을 버리고 `document.createElement('option')` +
+  `.value`/`.textContent`로 옵션을 만들도록 변경. `textContent`는 브라우저가 자동으로
+  HTML 특수문자를 이스케이프하므로 `<script>` 등을 넣어도 그대로 텍스트로만 표시되고 실행되지
+  않는다. dashboard.js 안에 이미 이런 안전한 `createElement` 패턴이 있는지 먼저 grep했으나
+  없었고(기존 `innerHTML` 문자열 조립이 지배적 관행), 표준적인 `createElement`+`textContent`
+  방식으로 새로 적용했다.
+- **범위 확인**: 같은 파일(`dashboard.js`)에서 `innerHTML`을 쓰는 다른 곳(로컬 provider 단일
+  옵션 표시(608행 근처, `config.model`이 출처 — 이건 관리자 CRUD `displayName`이 아니라
+  `application.properties`의 서버 설정값이라 위험도가 다르고 Phase 3~4 변경 범위 밖), 알림 목록
+  `renderNotifications`(1827행, `notif.title`/`notif.message` 미이스케이프), 그리드
+  플레이스홀더 등)까지 grep으로 확인했으나, 이번 사이클(Phase 3~4)에서 새로 도입되거나 노출
+  범위가 넓어진 지점은 `populateModelSelectOptions` 하나였다. 나머지는 기존부터 있던 별개
+  패턴(관리자 전용 화면이거나, 이번 사이클 변경분이 아님)이라 범위 확대 없이 손대지 않았다 —
+  후속 조치가 필요하면 별도 버그로 등록해야 한다는 제안만 남긴다.
+- **서버측 sanitize는 추가하지 않기로 판단**: `LlmModelAdminController.createModel`/`updateModel`이
+  호출하는 `LlmModelOptionService.create`/`update`를 확인한 결과 `displayName`에 대해
+  null/blank 체크와 `trim()`만 하고 별도 이스케이프/길이제한/특수문자 제한이 없었다. 동일하게
+  `UserController`(`com.legacy.admin`)의 사용자 프로필 `displayName`(`updateProfile` 등)도
+  null/blank 체크 + trim만 하고 sanitize가 전혀 없는 것을 확인했다 — 즉 이 코드베이스에서
+  "displayName류 필드는 trim만 하고 서버가 가공하지 않는다"가 기존에 이미 확립된 일관된 관례다.
+  `LlmModelAdminController`는 `@PreAuthorize("hasRole('ADMIN')")`로 관리자만 호출 가능하고, 이
+  프로젝트는 "관리자는 신뢰된 주체"라는 전제를 여러 곳(서버 경로 직접 지정 기능 등)에서 이미 갖고
+  있다. 이 전제 위에서, XSS의 실제 방어 지점은 "신뢰되지 않는 값을 표시하는 시점"(브라우저
+  DOM 삽입)이지 "신뢰된 관리자가 입력하는 시점"이 아니라고 판단해 **서버측 sanitize는 추가하지
+  않고 프런트엔드 이스케이프만으로 대응했다**(과설계 방지). 다만 이 판단은 "관리자 신뢰" 전제가
+  이 프로젝트에 여전히 유효하다는 전제 위에 있으므로, 그 전제가 바뀌면(예: 관리자 계정 다수 위임
+  등) 재검토가 필요하다는 점을 남겨둔다.
+- **테스트**: 이 프로젝트에 JS 단위테스트 프레임워크(package.json/jest 등)가 없어 새로 도입하지
+  않았다(지시대로 과도한 테스트 인프라 도입 금지). 대신 Java 쪽에서
+  `MainApiControllerLlmProviderTest`에 회귀 테스트 1건을 추가해, `GET /api/config/llm-models`가
+  `<script>alert('xss')</script>` 같은 `displayName`을 가공 없이 원문 그대로 반환하는지(서버
+  계약)만 확인했다 — 실제 DOM 삽입 안전성(textContent 사용)은 코드 리뷰로 갈음했다.
+
+### 버그 2 — 세션 파일/업로드 API 5개 소유자 검증 부재
+- **증상**: 30차에서 `pause`/`resume`/`cancel`/`confirmFailover` 4개(세션 "제어" API)에만
+  `isSessionOwnerOrAdmin` 소유자 검증을 추가했는데, 같은 파일(`MainApiController`)의 세션 "조회/정리"
+  API 5개 — `getSessionFileList`(`/api/session/{sessionId}/files`),
+  `getFilePreview`(`/api/session/{sessionId}/preview`),
+  `getUploadManifest`(`/api/upload-session/{sessionId}/manifest`),
+  `getUploadedFileContent`(`/api/upload-session/{sessionId}/file`),
+  `cleanupUploadSession`(`/api/upload-session/{sessionId}/cleanup`) — 은 그대로 남아 있었다.
+  `sessionId`만 알면 로그인한 임의 사용자가 남의 세션의 파일 목록/미리보기(diff)/업로드 원문을
+  조회하거나, 남의 업로드 임시 원본을 삭제(`cleanupUploadSession`, 쓰기성 동작이라 더 위험)할 수
+  있었다.
+- **"업로드 세션"이 별개 엔티티인지 먼저 확인**: `getUploadManifest`/`getUploadedFileContent`/
+  `cleanupUploadSession`이 다루는 "업로드 세션"은 별도 엔티티가 아니라, `sourcePath`가 업로드
+  샌드박스(`uploadStoragePath`) 하위인 **동일한 `SessionState`**였다(기존
+  `getValidatedUploadRoot(SessionState)` 헬퍼가 바로 이 검증을 함). 즉 소유자 필드는 다른 세션
+  API와 동일하게 `session.getUsername()`이라, 새 헬퍼를 만들 필요 없이 30차에서 신설한
+  `isSessionOwnerOrAdmin(SessionState, Authentication)`을 그대로 재사용했다.
+- **구현**: 5개 메서드 전부, 기존 "세션을 찾을 수 없습니다"(404 또는 그에 준하는 에러 처리) 단계
+  **바로 다음**에 소유자 검증을 삽입했다(정보노출 방지 순서 유지 — 세션 존재 여부를 소유자
+  검증보다 먼저 판단). 응답 스키마는 각 메서드의 기존 컨벤션을 그대로 따름 —
+  `getSessionFileList`/`getUploadManifest`/`cleanupUploadSession`은 `Map<String,Object>`에
+  `error` 필드만 채워 200으로 반환(기존 not-found 처리와 동일 스키마), `getFilePreview`/
+  `getUploadedFileContent`는 `ResponseEntity`라 `403 FORBIDDEN`으로 응답(기존
+  `SecurityException` catch 블록이 이미 403을 쓰던 것과 일관).
+  `isSessionOwnerOrAdmin`의 Javadoc도 "세션 제어 4개"뿐 아니라 이번에 추가된 조회/정리 5개까지
+  포함하도록 갱신했다.
+- **테스트**: `MainApiControllerSessionFileAndUploadOwnershipTest`(신규, 13건) — 5개 메서드 각각
+  (a) 소유자 본인 성공, (b) 타인 거부(파일 목록/원본 텍스트/업로드 원문이 노출되지 않고,
+  `cleanupUploadSession`은 실제로 파일이 삭제되지 않는지까지 확인), 그 중 제어 가능한 2개는
+  ADMIN 예외/세션 not-found 시 소유자 검증보다 먼저 404가 나는지도 함께 확인. 업로드 3종은
+  `@TempDir`로 실제 파일시스템에 임시 업로드 디렉터리를 만들고 `uploadStoragePath`
+  (`@Value` 필드, 스프링 컨텍스트 없이 테스트하므로 리플렉션으로 세팅)를 그 경로로 지정해 실제
+  I/O까지 검증했다.
+- **SecurityConfig는 이번에도 건드리지 않음**: 30차와 동일하게, 전역 `/api/**`.authenticated()
+  규칙 위에 컨트롤러 레벨 소유자 검증만 추가한 것.
+
+### 공통
+- `./gradlew clean test` — **341건 전부 통과, 실패/에러 0건**(기존 327건 + 신규: LlmProviderTest
+  XSS 회귀 +1건, SessionFileAndUploadOwnershipTest 13건).
+- 수정 파일: `src/main/resources/static/js/dashboard.js`(populateModelSelectOptions),
+  `src/main/java/com/legacy/analysis/MainApiController.java`(5개 메서드 + `isSessionOwnerOrAdmin`
+  Javadoc), `src/test/java/com/legacy/analysis/MainApiControllerLlmProviderTest.java`(XSS 회귀
+  테스트 1건 추가).
+- 신규 파일: `src/test/java/com/legacy/analysis/MainApiControllerSessionFileAndUploadOwnershipTest.java`.
+- `analyzer-plan/docs/pipeline/bug-suspects.md`는 지시대로 건드리지 않았다 — QA 재검증 대상으로
+  남겨둠.
+
+### 리스크/제안
+- 관리자 전용 화면(`admin/dashboard.html`)에도 사용자 `displayName`/LLM 모델 `displayName`을
+  `innerHTML`로 미이스케이프 삽입하는 동일 패턴이 여러 곳(1021/1102/1154/1764행 등) 남아있다.
+  "관리자는 신뢰된 주체" 전제로 이번 범위에서는 의도적으로 손대지 않았으나, 그 전제가 흔들리면
+  (관리자 계정 다수 위임 등) 함께 재검토가 필요하다.
+- `renderNotifications`(dashboard.js 1827행)도 `notif.title`/`notif.message`를 `innerHTML`로
+  미이스케이프 삽입한다 — 이번 사이클(Phase 3~4) 변경 범위 밖이라 손대지 않았으나 별도 버그로
+  등록할 가치가 있어 보인다.
+
+**QA 검증 필요**: 위 두 버그 수정 모두 analyzer-plan `docs/pipeline/bug-suspects.md`의 해당 항목에
+대한 재검증이 필요하다(이 프로젝트에는 QA 서브에이전트 호출 도구가 연결돼 있지 않아 이 handOff.md
+기록으로 검증 요청을 갈음한다).
