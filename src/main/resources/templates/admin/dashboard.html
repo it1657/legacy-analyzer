@@ -428,6 +428,10 @@
                 <span class="nav-icon">👥</span>
                 <span>사용자 관리</span>
             </div>
+            <div class="nav-item" onclick="switchSection('llm-models', this)">
+                <span class="nav-icon">🤖</span>
+                <span>LLM 모델 관리</span>
+            </div>
             <div class="nav-item" onclick="switchSection('history', this)">
                 <span class="nav-icon">📜</span>
                 <span>분석 이력</span>
@@ -500,6 +504,40 @@
                         <tbody id="usersList">
                             <tr>
                                 <td colspan="7" class="no-data">사용자 정보를 로드 중입니다...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- LLM 모델 관리 섹션 (모델 목록 DB화, 2026-08-21) -->
+            <div id="llm-models" class="content-section">
+                <div class="page-header">
+                    <h1 class="page-title">LLM 모델 관리</h1>
+                    <button class="btn-primary" onclick="openAddLlmModelModal()">+ 새 모델 추가</button>
+                </div>
+                <div id="llmModelsAlert" class="alert"></div>
+                <p style="color:#888; font-size:13px; margin:-0.5rem 0 1rem;">
+                    사용자 분석 화면의 AI 모델 드롭다운에 노출되는 목록입니다. 활성 모델은 최소 1개 이상
+                    유지되어야 하며(전부 비활성화/삭제 불가), failover 대상은 크레딧 소진 시 컨펌 후
+                    전환할 로컬(자체 호스팅) 모델 정확히 1개만 지정할 수 있습니다.
+                </p>
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>표시명</th>
+                                <th>모델 키</th>
+                                <th>provider</th>
+                                <th>노출순서</th>
+                                <th>상태</th>
+                                <th>failover 대상</th>
+                                <th>작업</th>
+                            </tr>
+                        </thead>
+                        <tbody id="llmModelsList">
+                            <tr>
+                                <td colspan="7" class="no-data">모델 목록을 로드 중입니다...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -848,6 +886,40 @@
         </div>
     </div>
 
+    <!-- LLM 모델 추가/수정 모달 (모델 목록 DB화, 2026-08-21 — 사용자 관리 모달 패턴 재사용) -->
+    <div id="llmModelModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header" id="llmModelModalHeader">새 모델 추가</div>
+            <div id="llmModelModalAlert" class="alert"></div>
+            <input type="hidden" id="editingLlmModelId" value="">
+            <form id="llmModelForm" onsubmit="saveLlmModel(event)">
+                <div class="form-group">
+                    <label for="llmModelDisplayName">표시명 <span style="color:#999;font-size:12px;">(사용자 드롭다운에 노출)</span></label>
+                    <input type="text" id="llmModelDisplayName" required placeholder="예: Claude Sonnet (권장 · $3/$15 per 1M)">
+                </div>
+                <div class="form-group">
+                    <label for="llmModelKey">모델 키 <span style="color:#999;font-size:12px;">(실제 LLM 호출 시 전달되는 식별자, 등록 후 변경 불가)</span></label>
+                    <input type="text" id="llmModelKey" required placeholder="예: claude-sonnet-4-6, qwen3-32b">
+                </div>
+                <div class="form-group">
+                    <label for="llmModelProvider">provider</label>
+                    <select id="llmModelProvider" required>
+                        <option value="ANTHROPIC">ANTHROPIC (Claude API)</option>
+                        <option value="LOCAL">LOCAL (자체 호스팅)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="llmModelDisplayOrder">노출 순서 <span style="color:#999;font-size:12px;">(작을수록 먼저 노출)</span></label>
+                    <input type="number" id="llmModelDisplayOrder" value="0" required>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-cancel" onclick="closeLlmModelModal()">취소</button>
+                    <button type="submit" class="btn-submit" id="llmModelModalSubmitBtn">저장</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         // 토큰 및 사용자 정보
         let token = localStorage.getItem('token');
@@ -882,6 +954,8 @@
             // 섹션별 데이터 로드
             if (sectionId === 'users') {
                 loadUsers();
+            } else if (sectionId === 'llm-models') {
+                loadLlmModels();
             } else if (sectionId === 'history') {
                 loadAnalysisHistory();
             } else if (sectionId === 'api-usage') {
@@ -1655,6 +1729,210 @@
             } catch (error) {
                 console.error('[삭제 오류]', error);
                 showAlert('usersAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // ===================================================================
+        // LLM 모델 관리 (모델 목록 DB화, 2026-08-21)
+        // ===================================================================
+
+        // 모델 목록 로드 (활성/비활성 무관 전체)
+        async function loadLlmModels() {
+            try {
+                const response = await fetch('/api/admin/llm-models', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!response.ok) throw new Error('모델 목록 로드 실패');
+                const models = await response.json();
+                renderLlmModels(models);
+            } catch (error) {
+                console.error('[LLM 모델 로드 오류]', error);
+                showAlert('llmModelsAlert', '모델 목록을 로드할 수 없습니다.', 'error');
+            }
+        }
+
+        function renderLlmModels(models) {
+            const tbody = document.getElementById('llmModelsList');
+
+            if (models.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="no-data">등록된 모델이 없습니다.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = models.map(m => `
+                <tr>
+                    <td><strong>${m.displayName}</strong></td>
+                    <td style="color:#888; font-size:12px;">${m.modelKey}</td>
+                    <td>${m.provider}</td>
+                    <td>${m.displayOrder}</td>
+                    <td>
+                        <span class="badge ${m.active ? 'badge-active' : 'badge-inactive'}">
+                            ${m.active ? '활성' : '비활성'}
+                        </span>
+                    </td>
+                    <td>
+                        ${m.failoverTarget ? '<span class="badge badge-active">failover 대상</span>' : '-'}
+                    </td>
+                    <td>
+                        <button class="btn-sm btn-edit" onclick="openEditLlmModelModal(${m.id}, '${m.modelKey.replace(/'/g,"\\'")}', '${m.displayName.replace(/'/g,"\\'")}', '${m.provider}', ${m.displayOrder})">수정</button>
+                        <button class="btn-sm" style="background:#6c757d;color:white;" onclick="toggleLlmModelActive(${m.id}, ${!m.active})">
+                            ${m.active ? '비활성화' : '활성화'}
+                        </button>
+                        ${m.provider === 'LOCAL' ? `<button class="btn-sm" style="background:${m.failoverTarget ? '#e67e22' : '#2980b9'};color:white;" onclick="setLlmModelFailoverTarget(${m.id}, ${!m.failoverTarget})">${m.failoverTarget ? 'failover 해제' : 'failover 지정'}</button>` : ''}
+                        <button class="btn-sm" style="background:#e74c3c;color:white;" onclick="deleteLlmModel(${m.id})">삭제</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // 모델 추가 모달 열기
+        function openAddLlmModelModal() {
+            document.getElementById('llmModelForm').reset();
+            document.getElementById('editingLlmModelId').value = '';
+            document.getElementById('llmModelModalHeader').textContent = '새 모델 추가';
+            document.getElementById('llmModelKey').disabled = false;
+            document.getElementById('llmModelDisplayOrder').value = 0;
+            document.getElementById('llmModelModalSubmitBtn').textContent = '추가';
+            document.getElementById('llmModelModal').classList.add('active');
+        }
+
+        // 모델 수정 모달 열기 (모델 키는 등록 후 불변 — 입력란 비활성화)
+        function openEditLlmModelModal(id, modelKey, displayName, provider, displayOrder) {
+            document.getElementById('llmModelForm').reset();
+            document.getElementById('editingLlmModelId').value = id;
+            document.getElementById('llmModelModalHeader').textContent = '모델 정보 수정';
+            document.getElementById('llmModelKey').value = modelKey;
+            document.getElementById('llmModelKey').disabled = true;
+            document.getElementById('llmModelDisplayName').value = displayName;
+            document.getElementById('llmModelProvider').value = provider;
+            document.getElementById('llmModelProvider').disabled = true; // provider도 생성 후 불변(LlmModelOptionService.update 참고)
+            document.getElementById('llmModelDisplayOrder').value = displayOrder;
+            document.getElementById('llmModelModalSubmitBtn').textContent = '수정';
+            document.getElementById('llmModelModal').classList.add('active');
+        }
+
+        function closeLlmModelModal() {
+            document.getElementById('llmModelModal').classList.remove('active');
+            document.getElementById('llmModelModalAlert').className = 'alert';
+            document.getElementById('llmModelKey').disabled = false;
+            document.getElementById('llmModelProvider').disabled = false;
+        }
+
+        // 모델 저장 (추가 또는 수정)
+        async function saveLlmModel(e) {
+            e.preventDefault();
+
+            const editingId = document.getElementById('editingLlmModelId').value;
+            const displayName = document.getElementById('llmModelDisplayName').value;
+            const modelKey = document.getElementById('llmModelKey').value;
+            const provider = document.getElementById('llmModelProvider').value;
+            const displayOrder = parseInt(document.getElementById('llmModelDisplayOrder').value, 10) || 0;
+            const isEdit = editingId !== '';
+
+            try {
+                let response;
+                if (isEdit) {
+                    // 수정 모드: modelKey/provider는 서버가 무시하고 표시명/노출순서만 반영한다.
+                    response = await fetch(`/api/admin/llm-models/${editingId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                        body: JSON.stringify({ displayName, displayOrder })
+                    });
+                } else {
+                    response = await fetch('/api/admin/llm-models', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                        body: JSON.stringify({ modelKey, displayName, provider, displayOrder })
+                    });
+                }
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showAlert('llmModelModalAlert', isEdit ? '모델 정보가 수정되었습니다.' : '모델이 추가되었습니다.', 'success');
+                    setTimeout(() => {
+                        closeLlmModelModal();
+                        loadLlmModels();
+                    }, 1000);
+                } else {
+                    showAlert('llmModelModalAlert', data.message || (isEdit ? '수정 실패' : '추가 실패'), 'error');
+                }
+            } catch (error) {
+                console.error('[LLM 모델 저장 오류]', error);
+                showAlert('llmModelModalAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // 모델 활성화/비활성화 — 비활성화 요청이 "활성 모델 0개"를 만들면 서버가 400으로 거부한다
+        // (LlmModelOptionService.MIN_ACTIVE_GUARD_MESSAGE, 최소 1개 활성 모델 강제).
+        async function toggleLlmModelActive(id, active) {
+            if (!confirm(`이 모델을 ${active ? '활성화' : '비활성화'}하시겠습니까?`)) return;
+
+            try {
+                const response = await fetch(`/api/admin/llm-models/${id}/active`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify({ active })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    loadLlmModels();
+                    showAlert('llmModelsAlert', `모델이 ${active ? '활성화' : '비활성화'}되었습니다.`, 'success');
+                } else {
+                    showAlert('llmModelsAlert', data.message || '상태 변경 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[LLM 모델 상태 변경 오류]', error);
+                showAlert('llmModelsAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // failover 대상 지정/해제 — 지정 시 기존에 지정돼 있던 다른 모델은 서버가 자동으로 해제한다
+        // (정확히 0개 또는 1개만 유지, LlmModelOptionService.setFailoverTarget 참고).
+        async function setLlmModelFailoverTarget(id, failoverTarget) {
+            const message = failoverTarget
+                ? '이 모델을 크레딧소진 failover 대상으로 지정하시겠습니까? (기존에 지정된 대상이 있으면 자동 해제됩니다)'
+                : 'failover 대상 지정을 해제하시겠습니까?';
+            if (!confirm(message)) return;
+
+            try {
+                const response = await fetch(`/api/admin/llm-models/${id}/failover-target`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify({ failoverTarget })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    loadLlmModels();
+                    showAlert('llmModelsAlert', 'failover 대상이 변경되었습니다.', 'success');
+                } else {
+                    showAlert('llmModelsAlert', data.message || 'failover 대상 변경 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[LLM 모델 failover 대상 변경 오류]', error);
+                showAlert('llmModelsAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // 모델 삭제 — 유일한 활성 모델이면 서버가 400으로 거부한다(최소 1개 활성 모델 강제).
+        async function deleteLlmModel(id) {
+            if (!confirm('정말로 이 모델을 삭제하시겠습니까?')) return;
+
+            try {
+                const response = await fetch(`/api/admin/llm-models/${id}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    loadLlmModels();
+                    showAlert('llmModelsAlert', '모델이 삭제되었습니다.', 'success');
+                } else {
+                    showAlert('llmModelsAlert', data.message || '삭제 실패', 'error');
+                }
+            } catch (error) {
+                console.error('[LLM 모델 삭제 오류]', error);
+                showAlert('llmModelsAlert', '서버 연결 실패', 'error');
             }
         }
 
