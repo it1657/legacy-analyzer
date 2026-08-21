@@ -421,3 +421,16 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 
 **남은 것**: Phase 2(관리자 화면)부터 Phase 7(통합/회귀 검증)까지 계속 진행 예정. 이 세션 안에서
 이어서 진행한다.
+
+### Phase 2 — 관리자 화면 (T9~T10) 완료
+`admin/dashboard.html`에 "LLM 모델 관리" 섹션 신설(기존 사용자 관리 모달/테이블 패턴 재사용,
+이 파일은 index.html/dashboard.js와 달리 HTML+JS가 한 파일에 있어 T9/T10을 한 번에 반영):
+사이드바 nav-item, 목록 테이블(표시명/모델키/provider/노출순서/상태/failover 대상/작업),
+추가·수정 모달(모델 키·provider는 등록 후 불변이라 수정 모드에서 input disabled), Phase 1의
+관리자 CRUD API 6종에 연동하는 JS 8개 함수. 서버가 400으로 거부하는 케이스(최소 1개 활성 모델
+유지, failover 대상은 활성 LOCAL 모델만 등)는 응답 `message`를 그대로 alert에 노출.
+커밋: Java 컴파일 대상이 아닌 템플릿 변경이라 `./gradlew compileJava`로는 검증되지 않음 — 브라우저
+수동 확인은 Phase 7(통합 검증)에서 함께 진행 예정.
+
+**다음 단계**: Phase 3(사용자 드롭다운 DB화, `GET /api/config/llm-models` API 신설 +
+index.html/dashboard.js 하드코딩 제거) 착수 예정.
