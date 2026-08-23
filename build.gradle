@@ -56,7 +56,14 @@ dependencies {
 }
 
 test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        // @Tag("manual") 테스트(실제 Docker 컨테이너가 떠 있어야 하는 로컬 RAG 스모크 테스트 등)는
+        // 기본 스위트/CI에서 제외한다 — 이 프로젝트에 @Tag 선례가 없어 2026-08-24 신규 도입
+        // (근거: analyzer-plan/docs/chat/etc/2026-08-20-local-rag-verification-design-and-vectorstore-decoupling.md).
+        // 클래스/메서드 네이밍 규칙만으로는 배제를 보장할 수 없어(누가 실수로 일반 이름의
+        // 테스트를 추가하면 CI에 섞여 들어감) @Tag 명시를 유일하게 신뢰 가능한 배제 수단으로 쓴다.
+        excludeTags 'manual'
+    }
     // 터미널에서 테스트 하나하나의 PASSED/FAILED를 실시간으로 색깔로 보여줌
     // (기본값은 마지막에 BUILD SUCCESSFUL/FAILED 한 줄만 나와서 어떤 테스트가 어떻게 됐는지 안 보임)
     testLogging {
@@ -66,4 +73,23 @@ test {
     }
     // 실행 후 build/reports/tests/test/index.html 을 브라우저로 열면
     // 초록/빨강 막대와 클래스별·메서드별 통과 여부를 시각적으로 볼 수 있음
+}
+
+// 로컬 RAG 검증 전용 태스크 — 실제 Ollama+Chroma 컨테이너가 떠 있는 환경(docker-compose.yml +
+// docker-compose.local-smoke.override.yml 조합, README/주석 참고)에서만 수동 실행한다.
+// `./gradlew localSmokeTest`로 실행하며, 기본 `test` 태스크(CI 포함)에는 절대 섞이지 않는다.
+tasks.register('localSmokeTest', Test) {
+    description = '실제 Ollama+Chroma 컨테이너를 대상으로 RAG 파이프라인을 검증하는 수동 테스트(@Tag("manual"))'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'manual'
+    }
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+        showStandardStreams = true
+    }
+    // 기본 test 태스크와 결과 리포트가 섞이지 않게 별도 디렉터리에 남긴다.
+    reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/localSmokeTest')
+    reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/localSmokeTest')
 }

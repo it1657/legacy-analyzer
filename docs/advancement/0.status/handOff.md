@@ -358,3 +358,44 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 자세한 논의 경위는 `analyzer-plan` 프로젝트의 `docs/chat/etc/2026-08-19-scenario-1-2-hold-scenario-3-active-decision.md`, `docs/chat/etc/2026-08-19-pgx-qwen3-rag-langchain4j-exploration-plan.md` 참고.
 
 **남은 것**: (1) PGX 계정 sudo/Docker 권한 확인(사용자가 직접), (2) 확인 결과에 맞는 설치 스텝 확정, (3) 설치 방식 확정 후 PM/PL에 방향 전환(독립 샌드박스, RAG 동시 구축) 재확인 검토, (4) scenario_1의 실행 검증 미착수 항목들(총파일 카운터 버그 등)은 보류 상태 그대로 유지 — CoP 리뷰 취합 시점까지 보류.
+
+## VectorStoreClient 인터페이스 추출 + 로컬 RAG 검증 4단계 구현 (32차, 2026-08-24)
+
+**번호 안내**: 이 handOff.md의 `master` 브랜치 최신본은 아직 26차까지만 있다(27~31차는 `feature/2026-08-21-llm-model-db-failover` 브랜치에 있고 아직 `master`에 병합되지 않음). 이번 작업은 그 이니셔티브와 **무관한 별도 트랙**이라 사용자 지시대로 새 브랜치(`feature/2026-08-24-vectorstore-client-local-rag-verification`, `master`에서 분기)에서 진행했고, 인계받은 번호(32차)를 그대로 쓴다 — 두 브랜치가 나중에 `master`로 합쳐질 때 27~31차와의 순서/번호 정리가 별도로 필요함을 남겨둔다.
+
+근거: `analyzer-plan/docs/chat/etc/2026-08-20-local-rag-verification-design-and-vectorstore-decoupling.md`(PM/PL 설계 확정 전문, §2 결합도 해소·§3 로컬 RAG 검증 4단계 설계).
+
+### 0단계 — `VectorStoreClient` 인터페이스 추출(결합도 해소) — 완료
+- `com.legacy.rag.VectorStoreClient` 인터페이스 신규 — `createOrGetCollection`/`upsert`/`query`/`deleteCollection` 4개 메서드, `EmbeddingClient`와 동일한 문서화 스타일. `deleteCollection`은 22차에서 확정한 대로 파라미터가 id가 아니라 **이름**인 시그니처 그대로 인터페이스화.
+- `ChromaClient implements VectorStoreClient`로 전환(4개 메서드에 `@Override` 추가). `ProjectStructureRagService` 생성자 파라미터 타입을 `ChromaClient` 구체클래스에서 `VectorStoreClient` 인터페이스로 변경 — 구현체가 하나뿐이라 `@Qualifier` 불필요, Spring이 자동 주입. 내부 필드명도 `chromaClient` → `vectorStoreClient`로 함께 정리(사용처 4곳).
+- `ProjectStructureRagServiceTest.newService()`도 지역 변수 타입을 `VectorStoreClient`로 바꿔 결합도 해소가 테스트 시점에도 드러나게 갱신. `ChromaClientTest`는 `ChromaClient`를 직접 생성해 자기 자신의 계약을 검증하는 테스트라 그대로 유지(인터페이스 목킹 불필요 — 이 클래스가 유일한 구현체이자 검증 대상이므로).
+- 앞으로 Chroma/Ollama가 아닌 다른 벡터스토어(pgvector 등)로 바꾸기로 결정해도 `VectorStoreClient` 구현체 하나만 추가하면 되고 `ProjectStructureRagService`는 무수정 — 설계 문서 §2 목표 그대로 달성.
+
+### 1~4단계 — 로컬 RAG 검증(코드/설정/테스트 작성 완료, **실행 검증은 이 세션에서 못 함** — 아래 "실행 환경 제약" 참고)
+- **1단계**: `docker-compose.local-smoke.override.yml` 신규 생성 — 기존 `docker-compose.yml`은 무수정, ollama(`11434:11434`)/chroma(`18000:8000`) `ports:` 매핑만 추가하는 오버레이. 파일 안 주석에 `LLM_LOCAL_MODEL=nomic-embed-text` 인라인 환경변수 오버라이드 실행법(bash/PowerShell 둘 다), Chroma heartbeat 확인법(`curl http://localhost:18000/api/v2/heartbeat`), 새 볼륨에서 최소 1회 검증하라는 안내를 그대로 남겼다. `.env` 영구 변경은 하지 않음.
+- **2단계**: `ProjectStructureRagServiceLocalSmokeTest`(신규, `com.legacy.rag`) — `ProjectStructureRagServiceTest.newService()` 패턴을 그대로 재사용하되 실제 Ollama/Chroma 엔드포인트(`-DragSmoke.ollamaUrl`/`-DragSmoke.chromaUrl`로 오버라이드 가능, 기본값은 오버레이 매핑과 일치)에 연결. 목업 데이터는 2026-08-24 기준 실제 `com.legacy` 패키지 구조를 직접 스캔해 그대로 반영(`find com/legacy -name "*.java" | sed ...` 로 leaf 패키지별 개수 확인) — `admin` 3, `analysis` 26, `analysis.llm` 4, `api.monitoring` 2, `api.usage` 4, `audit` 4, `auth` 12, `core` 8, `notification` 4, `rag` 5(이번에 `VectorStoreClient.java` 추가로 4→5), `statistics` 3, 총 11개 leaf 패키지. 설계 문서 작성 시점(2026-08-20)의 스냅샷과 패키지 목록·개수가 소폭 다름(코드가 그 사이 계속 변경됐기 때문) — 이 세션 스캔값이 최신.
+  - **주의 남김**: 운영 기본값 `rag.top-k-per-package=30`은 지금 legacy-analyzer의 어떤 leaf 패키지도 안 넘어서(최대 `analysis` 26개) 이 값 그대로 스모크 테스트에 쓰면 압축이 한 건도 안 일어난다. 그래서 이 테스트는 설계 문서가 예시로 들었던 `topK=5`를 테스트 전용 파라미터로 그대로 사용해 `analysis`(26→5)/`auth`(12→5)/`core`(8→5) 3개 패키지가 실제로 압축 경로를 타도록 했다(운영 설정값 자체를 바꾼 건 아님).
+- **3단계**: `@Tag("manual")` 신규 도입(이 프로젝트 최초 `@Tag` 선례) — `build.gradle`의 `test { useJUnitPlatform { excludeTags 'manual' } } `로 기본 스위트에서 제외, `localSmokeTest`(`includeTags 'manual'`, group=verification, 리포트를 `build/reports/tests/localSmokeTest`로 별도 분리) 태스크 신규 등록.
+- **4단계 — 검증 체크리스트**(설계 문서 §3 그대로, 전부 `ProjectStructureRagServiceLocalSmokeTest` 안 한 메서드에 순서대로 배치):
+  1. 새 볼륨 tenant/database 자동생성 가정 — 별도 API 호출 없이, `compactPackageGroups()`가 첫 호출부터 예외 없이 끝까지 성공한다는 사실 자체로 실증(생성 API를 명시적으로 호출하지 않으므로).
+  2. **배치 임베딩(`/api/embed`) 응답 개수 일치**(설계 문서가 "이번 검증의 최대 값어치"로 명시) — 직접 API를 찌르는 대신, "결과가 원본과 달라야(=실제 압축이 성공했어야) 한다"를 단언하는 간접 방식 채택. `OpenAiCompatibleEmbeddingClient.embedBatch()`는 개수 불일치 시 예외를 던지고 `compactPackageGroups()`가 그 예외를 삼켜 원본 그대로 fallback하므로, 이 단언이 실패하면 곧 배치 임베딩 개수 불일치(또는 다른 RAG 파이프라인 실패)를 의미하게 설계.
+  3. topK(5) 초과 패키지만 정확히 5개로 압축되고, 그 파일명이 전부 원본에 실재하는지, topK 이하 패키지는 원본과 완전히 동일하게 유지되는지 전체 패키지 순회 검증.
+  4. create→add→query→delete 순서 및 name 기반 delete 유효성 — `compactPackageGroups()`가 내부적으로 이 순서를 따르는 건 기존 `ProjectStructureRagServiceTest`가 이미 MockWebServer로 검증했고, 이 스모크 테스트는 실서버 대상으로 같은 계약이 실제로 성립하는지를 추가 확인.
+  5. cleanup 후 컬렉션 미잔존 — `compactPackageGroups()`의 finally가 이미 `cleanup(sessionId)`를 호출(캐시 포함 제거)했으므로, 같은 이름으로 다시 `createOrGetCollection()`을 호출하면 캐시가 아니라 실제 네트워크 호출(`get_or_create=true`)이 나가 완전히 새 빈 컬렉션이 만들어진다는 점을 이용 — 그 직후 쿼리했을 때 문서가 하나도 없어야 cleanup이 실제로 반영된 것으로 판정. 검증 후 이 재생성 컬렉션도 스스로 정리(`deleteCollection`)해 테스트가 흔적을 안 남기게 함.
+  6. 전체 소요시간(`compactPackageGroups()` 호출 1회 기준) — 하드 어서션 없이 `log.info`로만 남김(설계 문서 "성능 상한 안 걺, 로깅만" 원칙).
+
+### 실행 검증 — 이 세션은 Docker Desktop 미기동으로 **미검증**
+- `docker ps`/`docker compose version` 확인 결과 Docker Desktop 자체는 설치돼 있고 `docker compose` CLI(v2.30.3-desktop.1)도 인식되지만, 데몬 서비스(`com.docker.service`)가 STOPPED 상태였고 이 sandbox 권한으로는 `net start com.docker.service`가 `시스템 오류 5(액세스 거부)`로 기동 불가 — 이전 세션들(20~23차)도 세션마다 Docker 유무가 달랐다는 기록과 같은 패턴, 이번 세션은 "없음" 케이스.
+- 그래서 **1~4단계는 실제 컨테이너로 실행 검증하지 못했다.** 대신 아래로 배선 자체는 검증:
+  - `./gradlew localSmokeTest`를 Docker 없이 그대로 실행 → `ProjectStructureRagServiceLocalSmokeTest`가 정상적으로 선택돼 돌아갔고, `Connection refused: localhost/127.0.0.1:18000`로 `compactPackageGroups()`가 예상대로 안전하게 원본 fallback했으며, 그 결과 "결과가 원본과 달라야 한다"는 체크리스트 (2)번 단언이 **의도대로** 실패함(AssertionFailedError) — 테스트 자체의 판별 로직이 살아있음을 역설적으로 확인.
+  - `./gradlew test --tests "*LocalSmoke*"` → `No tests found for given includes`로 확인 — 기본 `test` 태스크가 `@Tag("manual")`을 정확히 배제하는 것을 검증.
+  - `./gradlew compileJava compileTestJava` 통과, `./gradlew clean test`(태그 제외된 일반 스위트) **전체 GREEN**(기존 `ChromaClientTest`/`OpenAiCompatibleEmbeddingClientTest`/`ProjectStructureRagServiceTest` 포함 전 스위트 회귀 없음 확인).
+- **사용자가 Docker Desktop이 켜진 환경에서 직접 재확인 필요**: `docker-compose.local-smoke.override.yml` 안내대로 ollama/chroma를 띄운 뒤 `./gradlew localSmokeTest`를 실행해 4단계 체크리스트(특히 (2) 배치 임베딩 응답 개수 일치)가 실제로 통과하는지 실측 확인.
+
+### 산출물 정리
+- 신규: `src/main/java/com/legacy/rag/VectorStoreClient.java`, `docker-compose.local-smoke.override.yml`, `src/test/java/com/legacy/rag/ProjectStructureRagServiceLocalSmokeTest.java`.
+- 수정: `src/main/java/com/legacy/rag/ChromaClient.java`(`implements VectorStoreClient`), `src/main/java/com/legacy/rag/ProjectStructureRagService.java`(생성자·필드 인터페이스화), `src/test/java/com/legacy/rag/ProjectStructureRagServiceTest.java`(지역 변수 타입), `build.gradle`(`excludeTags 'manual'` + `localSmokeTest` 태스크).
+- 검증 기록: `docs/advancement/4.tested/rag_vectorstore_local_smoke_test.md`(신규 — 기존 `scenario_N_test.md`는 시나리오 단위 문서라 이번 건(RAG 결합도 해소 + 로컬 검증 인프라 자체)은 특정 scenario에 속하지 않아 새 파일로 분리. 4단계 문서 전이 규칙에서 "완전히 새 범주"로 판단).
+- **RAG "B안"(코드 내용 청킹, 2026-08-21 설계)은 이번 범위에 포함하지 않음** — 이 작업(0단계 결합도 해소 + 로컬 검증 인프라)이 끝나야 시작 가능한 후속 작업으로 남겨둠.
+
+**남은 것**: (1) 사용자가 Docker Desktop 켜진 환경에서 `localSmokeTest` 실측 재확인(특히 배치 임베딩 개수 일치), (2) 이 브랜치(`feature/2026-08-24-vectorstore-client-local-rag-verification`)와 `feature/2026-08-21-llm-model-db-failover`(27~31차)가 각각 `master`에 병합될 때 handOff.md 번호 순서 정리, (3) RAG "B안"(코드 내용 청킹) 착수 — 이 작업 완료가 선행조건.

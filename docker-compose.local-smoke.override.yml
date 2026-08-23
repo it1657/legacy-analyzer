@@ -1,0 +1,46 @@
+# docker-compose.local-smoke.override.yml
+#
+# 로컬 노트북에서 RAG(Chroma/Ollama) 파이프라인을 실컨테이너로 검증(localSmokeTest,
+# ProjectStructureRagServiceLocalSmokeTest)할 때만 쓰는 오버레이. 기존 docker-compose.yml은
+# 절대 건드리지 않는다 — ollama/chroma가 `expose:`만 쓰고 있어(회사 서버 등에서 불필요한
+# 포트 노출을 막기 위한 의도적 설계) 호스트(테스트를 실행하는 JVM)에서 접근할 수 없는 문제만
+# 이 오버레이로 보완한다(포트 매핑 추가 외 다른 변경 없음).
+#
+# 사용법(PowerShell/bash 공통, docker compose CLI 문법):
+#   docker compose --profile llm-rag \
+#     -f docker-compose.yml -f docker-compose.local-smoke.override.yml \
+#     up -d ollama chroma
+#
+# 채팅 모델(qwen2.5-coder:7b, 4.7GB) 다운로드를 피하려면 LLM_LOCAL_MODEL을 임베딩 모델로
+# 인라인 오버라이드해서 띄운다(.env 영구 변경 금지 — 나중에 app까지 같이 띄웠을 때 채팅
+# 요청이 이 작은 임베딩 모델로 가는 사고를 막기 위함). docker-compose.yml의 ollama 서비스는
+# `OLLAMA_MODEL: ${LLM_LOCAL_MODEL:-qwen2.5-coder:7b}`이므로 아래처럼 인라인으로 넘기면
+# healthcheck/entrypoint가 보는 "채팅 모델"도 nomic-embed-text가 되어 이것만 pull된다
+# (RAG_EMBEDDING_MODEL은 docker-compose.yml에서 이미 기본값이 nomic-embed-text라 결과적으로
+# 같은 모델 1개만 받으면 됨):
+#
+#   # bash
+#   LLM_LOCAL_MODEL=nomic-embed-text docker compose --profile llm-rag \
+#     -f docker-compose.yml -f docker-compose.local-smoke.override.yml \
+#     up -d ollama chroma
+#
+#   # PowerShell
+#   $env:LLM_LOCAL_MODEL = "nomic-embed-text"
+#   docker compose --profile llm-rag `
+#     -f docker-compose.yml -f docker-compose.local-smoke.override.yml `
+#     up -d ollama chroma
+#
+# 최소 1회는 새 볼륨(`docker volume rm legacy-analyzer_chroma_data`, 컨테이너/볼륨 이름은
+# `docker compose ps`/`docker volume ls`로 실제 값 확인)에서 띄워 Chroma의
+# default_tenant/default_database 자동생성 가정을 검증할 것(설계 문서 §3 1단계 체크리스트).
+#
+# Chroma는 healthcheck가 없으므로(1.5.9 이미지 자체 미지원) 아래로 직접 확인:
+#   curl http://localhost:18000/api/v2/heartbeat
+services:
+  ollama:
+    ports:
+      - "11434:11434"
+
+  chroma:
+    ports:
+      - "18000:8000"
