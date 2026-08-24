@@ -399,3 +399,116 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 - **RAG "B안"(코드 내용 청킹, 2026-08-21 설계)은 이번 범위에 포함하지 않음** — 이 작업(0단계 결합도 해소 + 로컬 검증 인프라)이 끝나야 시작 가능한 후속 작업으로 남겨둠.
 
 **남은 것**: (1) 사용자가 Docker Desktop 켜진 환경에서 `localSmokeTest` 실측 재확인(특히 배치 임베딩 개수 일치), (2) 이 브랜치(`feature/2026-08-24-vectorstore-client-local-rag-verification`)와 `feature/2026-08-21-llm-model-db-failover`(27~31차)가 각각 `master`에 병합될 때 handOff.md 번호 순서 정리, (3) RAG "B안"(코드 내용 청킹) 착수 — 이 작업 완료가 선행조건.
+
+## RAG "B안" 코드 내용 청킹 — TASK-001~005(청커 4종 + 라우터) 구현 (33차, 2026-08-24)
+
+**번호 안내**: 32차(`feature/2026-08-24-vectorstore-client-local-rag-verification`)에서 인계받은 번호를 이어
+쓴다. 이번 작업은 그 브랜치가 만든 `VectorStoreClient` 인터페이스가 선행 조건이라 사용자 지시대로
+`master`가 아니라 `feature/2026-08-24-vectorstore-client-local-rag-verification`에서 분기한 새 브랜치
+(`feature/2026-08-24-rag-content-chunking`)에서 진행했다. `master`에는 26차까지, `feature/2026-08-21-*`
+라인에는 27~31차가 아직 있어 세 브랜치가 `master`로 합쳐질 때 handOff.md 번호 순서 정리가 또 한 번
+필요함을 남겨둔다.
+
+근거: `analyzer-plan/docs/chat/etc/2026-08-21-rag-code-content-indexing-formal-req-and-design.md`
+(PM 정식 REQ-1~9 + PL 기술설계 전문). 이번 세션 범위는 B안 Task 10개 중 TASK-001~005(청커
+4종+라우터)까지만 — TASK-006(`CodeContentRagService` 골격) 이후는 다음 세션 범위로 남겨두고
+손대지 않았다(아직 실제 서비스와 연결하지 않음, 단위 테스트로 청커 자체 정확성만 검증).
+
+### 신규 의존성
+- `build.gradle`에 `com.github.javaparser:javaparser-core:3.25.10` 추가(symbol-solver 불필요,
+  청킹은 구문 구조만 필요). Maven Central 접근이 이번 세션에서는 정상 동작해(`curl` 200 확인)
+  실제로 다운로드·컴파일·테스트 실행까지 전부 이 세션에서 검증했다(과거 세션 기록처럼 접근 불가
+  상황이 아니었음 — 명확히 구분해 남겨둔다).
+
+### TASK-001 — `JavaAstChunker`(신규, `com.legacy.rag`)
+- `javaparser-core`(`ParserConfiguration.LanguageLevel.JAVA_17`)로 파싱, 클래스별 skeleton 청크
+  (필드+메서드/생성자 시그니처만, 본문은 `MethodDeclaration.setBody(null)`로 제거해 세미콜론
+  시그니처로 출력, 생성자는 본문 필수라 빈 블록으로 대체, 중첩 타입 멤버는 자기 자신이 별도
+  skeleton 청크로 처리되므로 부모 skeleton에서는 제거해 중복/비대화 방지) + 메서드/생성자별
+  전체 본문 청크(원본 소스 그대로, 포맷/주석 보존)를 만든다.
+- 파싱 실패(문법 오류) 시 예외를 던지지 않고 `null` 반환 — 호출부(`ChunkerRouter`)가 이를
+  신호로 자동 폴백. 클래스도 메서드도 하나도 못 뽑은 경우(파싱은 성공했지만 skeleton 대상이
+  없는 경우)도 안전하게 `null`로 넘겨 폴백을 태우게 했다.
+- REQ-1 하드캡 초과 시 `ChunkSplitter`(신규 공통 유틸)로 2차 재분할, 같은 `symbolName`에
+  `#1`/`#2`... 순번을 붙인다.
+
+### TASK-002 — `HtmlChunker`(신규)
+- 새 무거운 의존성(jsoup 등) 추가 없이 정규식+태그 밸런스 카운팅으로 직접 구현 — jsoup 같은
+  관용적(lenient) 파서는 깨진 마크업도 스스로 보정해버려 REQ-3(파싱 실패를 명시적으로 감지해
+  폴백 전환)과 오히려 안 맞는다고 판단(이번 세션 판단, 설계 문서는 "검토해도 됨" 정도로만 열어둠).
+- `th:fragment` 속성이 있는 요소를 최상위 기준으로 우선 추출, 없으면 최상위 `<div id="...">`
+  블록을 경계로 사용. `<script>`/`<style>`/HTML 주석 내부는 스캔 전용 마스킹본(길이·줄바꿈은
+  보존, 내용만 공백 처리)에서 blank 처리해 그 안의 가짜 태그가 경계 판정을 오염시키지 않게 했다
+  (실제 청크 내용은 항상 원본에서 그대로 슬라이스).
+- 짝이 맞는 닫는 태그를 못 찾으면(태그 불균형) `HtmlChunkingException`(신규, unchecked)을 던짐 —
+  th:fragment도 id-div도 아예 없는 경우(경계 자체가 없음, 에러 아님)는 `null` 반환으로 구분했다.
+
+### TASK-003 — `JsChunker`(신규)
+- 최상위 `function name(...) { ... }` 정규식 매칭 + 중괄호 상태머신. 문자열('/"/`)·line/block
+  comment 내부를 상태머신으로 스캔 전용 마스킹(길이 보존)한 뒤 그 마스킹본에서만 정규식 매칭과
+  중괄호 뎁스 카운팅을 수행해 오탐을 방지했다. "최상위"는 매치 지점까지의 순수 중괄호 증감을
+  누적해 depth==0일 때만 채택하는 방식으로 판별(중첩 함수는 건너뜀).
+- 매치 0건이거나 중괄호 불균형(닫는 괄호를 못 찾음) 감지 시 `null` 반환 → 폴백.
+- `.jsx`/`.ts`/`.tsx`/`.vue`는 이 청커 자체는 확장자를 신경 쓰지 않으므로(라우터가 판단)
+  그대로 재사용 시도됨. `.vue`는 설계 문서가 이미 예상한 대로 methods 객체의 축약 메서드 문법
+  (`greet() {...}`)이 `function` 키워드 패턴과 안 맞아 실측으로도 매치 0건 → 폴백 상시 경유를
+  테스트로 재확인했다(테스트: `vue_스타일_콘텐츠는_대체로_매치가_없어_null을_반환한다`).
+
+### TASK-004 — `FallbackChunker`(신규)
+- 고정 라인 윈도우(기본 150줄)+오버랩(기본 30줄) 슬라이딩. 빈 파일/`null` 소스도 최소 1개
+  청크(빈 문자열)를 만들어 커버리지 0을 방지. 파싱 개념이 없어 항상 성공하는 게 계약 — REQ-1
+  하드캡도 동일하게 적용해(단일 초장문 라인 등 극단적 케이스 방어) 4개 청커 모두 하드캡을
+  예외 없이 보장하도록 통일했다(설계 문서가 TASK-004에 하드캡을 명시하진 않았지만, REQ-1이
+  "공통 원칙"으로 기술돼 있어 폴백에도 동일 적용하는 게 안전하다고 판단 — 리스크 아님, 보강).
+
+### TASK-005 — `ChunkerRouter`(신규)
+- 전용 파서가 있는 3개 카테고리만 확장자 기준 라우팅: `.java`→Java, `.html`→HTML,
+  `.js`/`.jsx`/`.ts`/`.tsx`/`.vue`→JS. **그 외 모든 확장자는 처음부터 폴백 직행**(예외 목록
+  하드코딩 없음 — REQ-9 핵심). 확장자 분류는 기존 `MainApiController.isSupportedFile()`의
+  확장자 집합 관례를 참고했다(그 메서드를 직접 재사용하진 않음 — 그건 파일 스캔 필터링용이라
+  용도가 다르고, 이 클래스가 알아야 할 건 "어느 카테고리로 라우팅할지"뿐이라 라우팅 전용의
+  더 작은 Set 3개만 새로 선언).
+- 전용 청커가 `null`을 반환하거나 예외(`HtmlChunkingException` 등)를 던지면 `catch`로 잡아
+  폴백으로 자동 전환 — 테스트로 "확장자는 java인데 문법 오류", "확장자는 html인데 태그 불균형",
+  "확장자는 js인데 중괄호 불균형" 3가지 통합 시나리오를 모두 확인했다. 또한 ".py 확장자에
+  완전히 유효한 Java 문법을 넣어도 Java 청커가 시도되지 않는다"는 테스트로 "확장자 기준
+  라우팅이지 내용 스니핑이 아니다"를 명시적으로 증명해뒀다(REQ-9 취지 실증).
+
+### 공통 — `CodeChunk`/`ChunkSizeLimits`/`ChunkSplitter`(신규)
+- `CodeChunk`: `filePath`/`startLine`/`endLine`(공통) + `symbolName`/`symbolType`(파서 기반
+  청크만, 폴백은 둘 다 null) record — REQ-4 그대로.
+- `ChunkSizeLimits.MAX_CHUNK_CHARS`(12,288자) = nomic-embed-text 참고 토큰한도 8,192의 50%
+  (REQ-1) × 보수적 문자/토큰 추정치 3자(설계 문서 "1토큰≈3~4자" 중 더 낮은 값 채택, 리스크 6번
+  인지 — 토크나이저 미실측이라는 잔여 위험은 그대로 남아있음, 이번 범위에서 해소하지 않음).
+- `ChunkSplitter.enforceHardCap()`: 4개 청커가 공통으로 거치는 2차 재분할 유틸. 줄 단위로
+  자르되 한 줄 자체가 하드캡을 넘는 예외 상황(미니파이된 JS 등)은 문자 단위 추가 분할, 조각마다
+  `symbolName#순번`을 붙인다.
+- 실제 대형 메서드 실측치(`runAnalysisResume` 10,667자, `looksLikeClaudeMd` 9,264자, 설계 문서
+  기준)는 이 하드캡(12,288자) 바로 아래라 재분할 트리거 테스트용으로는 크기가 부족했다 — 테스트는
+  동일 계열(대형 절차형 메서드)이되 확실히 캡을 넘는 합성 픽스처(1000줄 반복 본문)를 사용했음을
+  명시해뒀다(테스트 코드 주석에도 이 근거를 남김).
+
+### 테스트 — 신규 5개 클래스, 34개 테스트 케이스
+`JavaAstChunkerTest`/`HtmlChunkerTest`/`JsChunkerTest`/`FallbackChunkerTest`/`ChunkerRouterTest`
+(전부 `com.legacy.rag`, 패키지 접근 제한자 그대로 테스트하려고 같은 패키지에 배치). 각 청커마다
+정상 파싱 성공/파싱 실패→폴백 전환/하드캡 초과 시 재분할/빈 파일 케이스를 다뤘고, 라우터는 3개
+카테고리 라우팅+그 외 확장자 폴백 직행+전용 파서 실패 시 폴백 전환 통합 시나리오를 다뤘다.
+`./gradlew clean test`(태그 제외 기본 스위트) **전체 GREEN 확인**(303개 테스트, 기존
+`com.legacy.rag` 스위트 포함 회귀 없음).
+
+### 산출물 정리
+- 신규: `src/main/java/com/legacy/rag/{CodeChunk,ChunkSizeLimits,ChunkSplitter,JavaAstChunker,
+  HtmlChunker,HtmlChunkingException,JsChunker,FallbackChunker,ChunkerRouter}.java`,
+  `src/test/java/com/legacy/rag/{JavaAstChunkerTest,HtmlChunkerTest,JsChunkerTest,
+  FallbackChunkerTest,ChunkerRouterTest}.java`.
+- 수정: `build.gradle`(`javaparser-core` 의존성 추가).
+- 신규 클래스는 전부 패키지 접근 제한자(디폴트, `public` 아님) — 아직 Spring 빈으로 등록하지
+  않았다(다음 세션 TASK-006에서 `CodeContentRagService`가 실제로 이들을 조립할 때 필요에 따라
+  `@Component` 여부를 결정하는 게 자연스럽다고 판단, 이번 세션 범위 밖이라 임의로 앞서가지
+  않음).
+
+**남은 것(다음 세션 범위)**: TASK-006(`CodeContentRagService` 골격, `ObjectProvider` no-op 패턴
++ 컬렉션명 sanitize(SHA-256) + REQ-8 반응형 차원 방어) → TASK-007/008(통합) → TASK-009(검증,
+Chroma `where` `$ne` 연산자 실동작 확인 포함) → TASK-010(정리). 설계 문서 리스크 2번(REQ-8 완전
+사전차단을 원하면 `VectorStoreClient`에 차원 파라미터 추가가 필요 — 이번 세션 범위 밖, 선행
+사이클 담당자에게 별도 전달 필요하다는 메모는 여전히 유효).

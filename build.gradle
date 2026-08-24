@@ -53,6 +53,12 @@ dependencies {
 
     // 8. 완료 파일 미리보기/Diff 기능 — 서버 사이드 unified diff 생성
     implementation 'io.github.java-diff-utils:java-diff-utils:4.12'
+
+    // 9. RAG "B안"(코드 내용 청킹) — Java AST 기반 클래스 skeleton/메서드 청크 추출용.
+    // symbol-solver(타입 해석)는 불필요(청킹은 구문 구조만 필요) — javaparser-core만 추가.
+    // 3.25.x대 중 최신 패치(3.25.10)로 고정, Java 17 소스 파싱 대상
+    // (근거: analyzer-plan/docs/chat/etc/2026-08-21-rag-code-content-indexing-formal-req-and-design.md TASK-001).
+    implementation 'com.github.javaparser:javaparser-core:3.25.10'
 }
 
 test {
