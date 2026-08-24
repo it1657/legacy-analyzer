@@ -41,12 +41,12 @@ class ProjectStructureRagServiceTest {
 
     private ProjectStructureRagService newService(long triggerThresholdChars, int topKPerPackage) {
         EmbeddingClient embeddingClient = new OpenAiCompatibleEmbeddingClient(
-                "http://localhost:" + embeddingServer.getPort(), "", 300, "nomic-embed-text");
+                "http://localhost:" + embeddingServer.getPort(), "", 300, "nomic-embed-text", 10485760);
         // VectorStoreClient 인터페이스 타입으로 받아 ProjectStructureRagService가 구체 클래스
         // (ChromaClient)에 결합되지 않음을 이 테스트 시점에도 그대로 드러낸다(2026-08-20 설계,
         // VectorStoreClient 인터페이스 추출).
         VectorStoreClient vectorStoreClient = new ChromaClient(
-                "http://localhost:" + chromaServer.getPort(), "default_tenant", "default_database");
+                "http://localhost:" + chromaServer.getPort(), "default_tenant", "default_database", 10485760);
         return new ProjectStructureRagService(vectorStoreClient, embeddingClient, triggerThresholdChars, topKPerPackage);
     }
 

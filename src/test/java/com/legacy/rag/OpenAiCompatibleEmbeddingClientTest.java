@@ -39,7 +39,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void 요청_경로와_바디가_Ollama_임베딩_규격대로_전송된다() throws Exception {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -57,7 +57,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void api_key가_있으면_Authorization_헤더가_포함된다() throws Exception {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "secret", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "secret", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -72,7 +72,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedding_배열을_double_리스트로_파싱한다() throws Exception {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -86,7 +86,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void 오류_응답이면_예외를_던진다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(500)
@@ -98,7 +98,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedding_필드가_없으면_예외를_던진다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -110,7 +110,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedBatch_요청_경로와_바디가_배치_규격대로_전송된다() throws Exception {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -129,7 +129,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedBatch_embeddings_배열을_입력_순서대로_파싱한다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -143,7 +143,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedBatch_빈_목록이면_호출_없이_빈_리스트를_반환한다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         List<List<Double>> result = client.embedBatch(List.of());
 
@@ -153,7 +153,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedBatch_오류_응답이면_예외를_던진다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(500)
@@ -165,7 +165,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedBatch_embeddings_필드가_없으면_예외를_던진다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -177,7 +177,7 @@ class OpenAiCompatibleEmbeddingClientTest {
 
     @Test
     void embedBatch_응답_개수가_요청_개수와_다르면_예외를_던진다() {
-        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text");
+        OpenAiCompatibleEmbeddingClient client = new OpenAiCompatibleEmbeddingClient(baseUrl(), "", 300, "nomic-embed-text", 10485760);
 
         server.enqueue(new MockResponse()
                 .setResponseCode(200)

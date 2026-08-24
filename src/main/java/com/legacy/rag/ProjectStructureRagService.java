@@ -105,7 +105,7 @@ public class ProjectStructureRagService {
                     sessionId, packageGroups.size(), estimatedChars, triggerThresholdChars);
             return compacted;
         } catch (Exception e) {
-            log.warn("[RAG 압축 실패, 원본 그대로 사용] sessionId={} {}", sessionId, e.getMessage());
+            log.warn("[RAG 압축 실패, 원본 그대로 사용] sessionId={} {}", sessionId, e.getMessage(), e);
             return packageGroups;
         } finally {
             // index() 도중(임베딩 호출 등) 예외가 나면 이 메서드의 collectionId 대입이 끝까지

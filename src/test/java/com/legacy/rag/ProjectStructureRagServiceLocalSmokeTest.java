@@ -61,10 +61,10 @@ class ProjectStructureRagServiceLocalSmokeTest {
         String chromaUrl = System.getProperty("ragSmoke.chromaUrl", "http://localhost:18000");
 
         EmbeddingClient embeddingClient = new OpenAiCompatibleEmbeddingClient(
-                ollamaUrl, "", 300, "nomic-embed-text");
+                ollamaUrl, "", 300, "nomic-embed-text", 10485760);
         // VectorStoreClient 인터페이스로 받아 ProjectStructureRagService가 구체 클래스에
         // 결합되지 않았음을 이 스모크 테스트에서도 그대로 드러낸다.
-        VectorStoreClient vectorStoreClient = new ChromaClient(chromaUrl, "default_tenant", "default_database");
+        VectorStoreClient vectorStoreClient = new ChromaClient(chromaUrl, "default_tenant", "default_database", 10485760);
         ProjectStructureRagService service = new ProjectStructureRagService(
                 vectorStoreClient, embeddingClient, /* triggerThresholdChars */ 1, TOP_K_PER_PACKAGE);
 

@@ -7,6 +7,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
@@ -41,11 +42,19 @@ public class ChromaClient implements VectorStoreClient {
     public ChromaClient(
             @Value("${rag.chroma.url}") String baseUrl,
             @Value("${rag.chroma.tenant:default_tenant}") String tenant,
-            @Value("${rag.chroma.database:default_database}") String database) {
+            @Value("${rag.chroma.database:default_database}") String database,
+            @Value("${rag.http.max-in-memory-bytes:10485760}") int maxInMemoryBytes) {
         this.tenant = tenant;
         this.database = database;
+        // OpenAiCompatibleEmbeddingClient와 같은 이유(Spring WebClient 기본 응답 버퍼 한도
+        // 256KB 초과 방지) — query()/upsert() 응답에도 임베딩 값이 실려 돌아올 수 있어 동일하게
+        // 상향한다. 지금 당장 이 클라이언트에서 재현된 장애는 아니지만 같은 근본 원인이라 함께 적용.
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(maxInMemoryBytes))
+                .build();
         this.webClient = WebClient.builder()
                 .baseUrl(baseUrl)
+                .exchangeStrategies(strategies)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
     }

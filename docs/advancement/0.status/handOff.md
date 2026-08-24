@@ -580,4 +580,71 @@ Chroma `where` `$ne` 연산자 실동작 확인 포함) → TASK-010(정리). �
   헬퍼 + `REGEX_CONTEXT_KEYWORDS` 상수), `src/test/java/com/legacy/rag/JsChunkerTest.java`(회귀
   테스트 4개 추가).
 - `analyzer-plan/docs/pipeline/bug-suspects.md`는 지시대로 손대지 않았다(QA가 상태 갱신 예정).
-- QA 검증 요청함(다음 단계).
+- QA 검증 요청함(다음 단계) → **재-QA Pass 완료**(`analyzer-plan/docs/chat/qa/2026-08-24-jschunker-regex-literal-bugfix-verification.md`, 307개 테스트 GREEN 재확인, bug-suspects.md 해당 항목 "수정 완료"로 갱신됨).
+
+## `localSmokeTest` 실측 중 발견 — WebClient 응답 버퍼 한도 초과로 RAG 압축이 상시 fallback되던 버그 수정 (35차, 2026-08-24)
+
+같은 브랜치(`feature/2026-08-24-rag-content-chunking`) 이어서 작업. 사용자가 Docker Desktop을 켜고
+`localSmokeTest`를 직접 실행/디버깅하던 중(다른 세션 경유로 발견 경위 인계) 두 가지를 확인했다.
+
+### 환경 문제(코드와 무관, 참고용)
+로컬 Windows에 네이티브 Ollama(`qwen3:4b` 등 보유)가 `127.0.0.1:11434`를 이미 점유해 Docker의
+ollama와 포트 충돌 — Java(Reactor Netty)가 IPv4 우선 시도로 잘못된 서버에 붙어 "model not found"
+404가 났던 것으로, 사용자 승인 받아 네이티브 프로세스를 종료해 해결(코드 변경 없음). 이후로도
+`compactPackageGroups()`가 fallback되는 현상이 재현돼 아래 진짜 버그로 이어짐.
+
+### 버그 원인 — 진단
+`ProjectStructureRagService.compactPackageGroups()`의 catch 블록이 `e.getMessage()`만 로깅해
+원인 추적이 막혀 있어, 이번에 `log.warn(..., e)`로 스택트레이스까지 남기도록 임시 변경 후
+`localSmokeTest`를 재실행해 원인을 특정했다:
+- 로그에 찍히던 `"200 OK from POST http://localhost:11434/api/embed"`는 커스텀 `onStatus` 에러
+  핸들러가 만든 메시지가 아니라(그 포맷은 `"배치 임베딩 API %d 오류: ..."`), Spring WebClient가
+  응답을 `.bodyToMono(Map.class)`로 디코딩하다 자체 실패했을 때 붙이는 진단용 메시지였다.
+- 실제 원인(Caused by)은 `org.springframework.core.io.buffer.DataBufferLimitException: Exceeded
+  limit on max bytes to buffer : 262144` — WebClient 기본 응답 버퍼 한도(256KB)를 초과한 것.
+  `embedBatch()`가 46개 문서(legacy-analyzer 자기자신의 `analysis`/`auth`/`core` 패키지, topK=5
+  초과분)의 임베딩(768차원 float 배열)을 한 번에 응답받는데, 그 JSON 크기가 256KB를 가볍게 넘겼다.
+  Ollama `/api/embed` 자체는 curl/python 직접 호출로 200 OK + 요청 개수와 정확히 일치하는 46개
+  임베딩을 정상 반환함을 별도로 확인 — "배치 임베딩 응답 개수 불일치"라는 최초 가설은 기각.
+- `compactPackageGroups()`의 넓은 `catch (Exception e)`가 이 디코딩 실패까지 "RAG 실패, 원본
+  fallback"으로 삼켜버려 겉으로는 정상 동작(README 생성은 막히지 않음)처럼 보였다 — 32차에서
+  실행 검증을 못 해(Docker 미기동) 이번에 처음 실측으로 드러난 결함.
+
+### 수정 내용
+- `application.properties`에 `rag.http.max-in-memory-bytes`(기본 10MB, `RAG_HTTP_MAX_IN_MEMORY_BYTES`)
+  신규 추가 — RAG "B안"(코드 내용 청킹)이 오면 문서 수·길이가 더 커질 것을 감안해 여유 있게 설정.
+- `OpenAiCompatibleEmbeddingClient`/`ChromaClient` 둘 다 `WebClient.Builder`에
+  `ExchangeStrategies.builder().codecs(c -> c.defaultCodecs().maxInMemorySize(...))`를 적용.
+  `ChromaClient`는 지금 이 세션에서 실제로 재현된 장애는 아니지만(topK가 5~30으로 작아 응답이
+  작음) 같은 근본 원인이라 방어적으로 함께 적용(query 응답에도 임베딩류 데이터가 실려 돌아올 수
+  있음, 2026-08-20 결합도 해소로 두 클라이언트가 나란히 존재하는 김에 일관되게 처리).
+- `ProjectStructureRagService.compactPackageGroups()`의 로그를 `log.warn(msg, e)`(Throwable
+  포함)로 영구 변경 — 앞으로 같은 종류의 "겉보기엔 정상 fallback인데 원인 불명" 상황을 다음에는
+  스택트레이스로 바로 진단할 수 있게 함(이번 진단에 실제로 결정적이었음).
+- 신규 생성자 파라미터 추가에 따라 테스트 호출부 전체(`ChromaClientTest`/
+  `OpenAiCompatibleEmbeddingClientTest`/`ProjectStructureRagServiceTest`/
+  `ProjectStructureRagServiceLocalSmokeTest`)에 `10485760` 인자 반영.
+
+### 검증
+- `./gradlew clean test` — 307개 전부 GREEN(기존 스위트 회귀 없음).
+- **`./gradlew localSmokeTest`를 실제 Docker 컨테이너(Ollama+Chroma) 대상으로 재실행 — PASS.**
+  로그로 실제 압축 성공을 확인: `[RAG 압축 완료] sessionId=..., 패키지 수=11, 응답 크기=3133자
+  (임계값 1자 초과)`, topK 초과로 실제 압축된 패키지 `[com.legacy.analysis, com.legacy.auth,
+  com.legacy.core]`, cleanup 후 컬렉션 미잔존까지 4단계 체크리스트 전부 통과. 32차에서 Docker
+  미기동으로 못 했던 "배치 임베딩 응답 개수 일치" 실측(체크리스트 2번, 설계 문서가 "이번 검증의
+  최대 값어치"로 꼽은 항목)이 이번에 처음으로 실제 통과했다.
+
+### 산출물 정리
+- 수정: `src/main/java/com/legacy/rag/{OpenAiCompatibleEmbeddingClient,ChromaClient,
+  ProjectStructureRagService}.java`, `src/main/resources/application.properties`,
+  테스트 4개 파일(생성자 인자 반영).
+- **로컬 스모크 인프라(32차) 자체는 배선 문제 없음이 이번 실측으로 확인됨** — `docker-compose.
+  local-smoke.override.yml`/`build.gradle`(`@Tag("manual")`/`localSmokeTest`)은 무수정.
+
+**남은 것**: (1) 이 브랜치가 이제 TASK-006(`CodeContentRagService` 골격) 착수 가능한 상태 —
+문서 수/길이가 더 커질 B안에서도 이번에 올린 10MB 버퍼 한도가 충분한지는 실측이 쌓이면서 계속
+확인 필요. (2) `docker-compose.local-smoke.override.yml`의 `11434:11434` 호스트 포트 하드코딩이
+네이티브 Ollama를 설치한 개발자와 충돌할 수 있음 — 포트를 바꾸려면 `localSmokeTest` Gradle
+태스크가 `-DragSmoke.*` 시스템 프로퍼티를 포크된 테스트 JVM으로 forwarding하지 않는 문제도 같이
+고쳐야 함(`build.gradle`에 `systemProperties = System.properties` 계열 설정 없음, 발견만 하고
+이번 범위에서는 수정하지 않음 — 우선순위 낮음, 기본 포트로도 이번 실측은 성공했으므로).
