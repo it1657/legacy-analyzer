@@ -33,7 +33,7 @@ class ClaudeServiceImplAnalyzeCodeSystemPromptTest {
 
   private ClaudeServiceImpl newService(CapturingLlmClient llmClient) throws Exception {
     ClaudeServiceImpl service = new ClaudeServiceImpl(
-        new com.legacy.core.ApiErrorHandler(), null, new SessionConfig(), null, llmClient);
+        new com.legacy.core.ApiErrorHandler(), null, new SessionConfig(), null, llmClient, null);
     setField(service, "llmProvider", "local");
     setField(service, "llmLocalModel", "qwen2.5-coder:7b");
     setField(service, "apiModel", "claude-sonnet-5");

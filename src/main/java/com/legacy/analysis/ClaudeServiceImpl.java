@@ -109,15 +109,22 @@ public class ClaudeServiceImpl implements ClaudeService {
     private final SessionConfig sessionConfig;
     private final ProjectTypeDetector projectTypeDetector;
     private final LlmClient llmClient;
+    // RAG "B안"(코드 내용 청킹/인덱싱) — 없을 수도 있는(구버전 테스트가 null로 생성) 협력자라
+    // analyzeCodeWithClaude()에서 사용 전 반드시 null 체크한다. 서비스 자체는 내부에서
+    // rag.content.enabled/인프라 유무를 스스로 판단해 no-op하므로(REQ-5) 여기서는 필드가
+    // null이 아닌 한 항상 그대로 호출한다.
+    private final com.legacy.rag.CodeContentRagService codeContentRagService;
 
     @Autowired
     public ClaudeServiceImpl(ApiErrorHandler apiErrorHandler, FileIoErrorHandler fileIoErrorHandler,
-        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector, LlmClient llmClient) {
+        SessionConfig sessionConfig, ProjectTypeDetector projectTypeDetector, LlmClient llmClient,
+        com.legacy.rag.CodeContentRagService codeContentRagService) {
       this.apiErrorHandler = apiErrorHandler;
       this.fileIoErrorHandler = fileIoErrorHandler;
       this.sessionConfig = sessionConfig;
       this.projectTypeDetector = projectTypeDetector;
       this.llmClient = llmClient;
+      this.codeContentRagService = codeContentRagService;
     }
 
     /**
@@ -627,7 +634,14 @@ public class ClaudeServiceImpl implements ClaudeService {
                 .replace("${fileName}", fileName)
                 .replace("${extension}", extension);
 
+        // RAG "B안" 최소 실사용 시나리오(2026-08-21 PM/PL 설계): 현재 분석 대상 코드와 유사한
+        // 기존 코드를 세션 내부에서 검색해 참고 컨텍스트로 덧붙인다. codeContentRagService가 없거나
+        // (구버전 테스트 등) 내부적으로 no-op이면(rag.content.enabled=false, 인프라 없음, 아직
+        // 색인 안 됨 등) 빈 문자열이라 기존 동작과 100% 동일하게 유지된다.
+        String similarCodeContext = buildSimilarCodeContext(fileName, sourceCode, sourceFolderPath);
+
         String userContent = "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
+                similarCodeContext +
                 "\n\n⚠️ 절대 중요: 다음 JSON 배열 형식으로만 응답하세요. 마크다운(```), 설명, 쉼표 오류 금지:\n" +
                 "[{\"lineNumber\": 숫자, \"comment\": \"내용\"}, {\"lineNumber\": 숫자, \"comment\": \"내용\"}]\n" +
                 "- 각 객체는 { }로 완전히 감싸기\n" +
@@ -706,6 +720,39 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         throw new AnalysisException(ApiErrorHandler.ErrorType.UNKNOWN_ERROR,
             new RuntimeException("알 수 없는 런타임 오류: 재시도 루프 이탈"));
+    }
+
+    /**
+     * RAG "B안" 최소 실사용 시나리오 — 현재 분석 중인 파일의 소스코드를 쿼리로 세션 내부의 유사
+     * 기존 코드를 검색해, {@code userContent}에 덧붙일 참고 섹션 텍스트를 만든다. top-K
+     * {@code rag.content.query-top-k}(기본 3)건, 스니펫당 {@code rag.content.snippet-max-chars}
+     * (기본 500자) 캡은 {@link com.legacy.rag.CodeContentRagService} 내부에서 이미 적용된 채로
+     * 돌아온다. 검색 결과가 없으면(색인 안 됨/no-op/실패 등) 빈 문자열을 반환해 기존 프롬프트와
+     * 100% 동일하게 유지한다.
+     */
+    private String buildSimilarCodeContext(String fileName, String sourceCode, String sourceFolderPath) {
+        if (codeContentRagService == null || sourceFolderPath == null || sourceFolderPath.isBlank()) {
+            return "";
+        }
+        List<String> similarSnippets;
+        try {
+            similarSnippets = codeContentRagService.querySimilar(sourceFolderPath, sourceCode, 3, fileName);
+        } catch (Exception e) {
+            // querySimilar() 자체가 예외를 삼키는 게 계약이지만, 프롬프트 조립을 절대 막으면 안 되므로
+            // 방어적으로 한 번 더 감싼다.
+            log.debug("[유사 코드 검색 실패, 컨텍스트 생략] fileName={} {}", fileName, e.getMessage());
+            return "";
+        }
+        if (similarSnippets == null || similarSnippets.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder sb = new StringBuilder("\n\n[참고: 같은 프로젝트의 유사한 기존 코드 패턴]\n");
+        int i = 1;
+        for (String snippet : similarSnippets) {
+            sb.append("--- 참고 코드 ").append(i++).append(" ---\n").append(snippet).append('\n');
+        }
+        return sb.toString();
     }
 
     /**

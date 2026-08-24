@@ -39,7 +39,7 @@ class ClaudeServiceImplGenerateClaudeMdTest {
   }
 
   private ClaudeServiceImpl newService(RecordingLlmClient llmClient, String llmProvider) throws Exception {
-    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, llmClient);
+    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, llmClient, null);
     setField(service, "llmProvider", llmProvider);
     setField(service, "llmLocalModel", "qwen2.5-coder:7b");
     setField(service, "apiModel", "claude-sonnet-5");

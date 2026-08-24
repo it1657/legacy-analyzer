@@ -648,3 +648,152 @@ ollama와 포트 충돌 — Java(Reactor Netty)가 IPv4 우선 시도로 잘못�
 태스크가 `-DragSmoke.*` 시스템 프로퍼티를 포크된 테스트 JVM으로 forwarding하지 않는 문제도 같이
 고쳐야 함(`build.gradle`에 `systemProperties = System.properties` 계열 설정 없음, 발견만 하고
 이번 범위에서는 수정하지 않음 — 우선순위 낮음, 기본 포트로도 이번 실측은 성공했으므로).
+
+## RAG "B안" 코드 내용 청킹 — TASK-006~010(`CodeContentRagService` 골격+통합+검증+정리, B안 완성) (36차, 2026-08-24)
+
+**번호 안내**: 35차(같은 브랜치, WebClient 버퍼 한도 버그 수정) 직후 이어서 진행. 35차 세션과 이번
+세션 사이에 워킹트리를 공유하는 별도 세션이 동시에 존재했을 가능성이 있어(사용자 안내), 착수 전
+`git status`/`git diff`로 최신 상태를 먼저 확인했고 35차의 변경분(모두 커밋 전 상태)을 그대로 둔 채
+이어서 작업했다 — 겹치는 파일 수정은 없었음(35차는 `ChromaClient`/`OpenAiCompatibleEmbeddingClient`/
+`ProjectStructureRagService`만 건드렸고, 이번 작업은 신규 `CodeContentRagService` 및 그 호출부만
+건드림).
+
+근거: `analyzer-plan/docs/chat/etc/2026-08-21-rag-code-content-indexing-formal-req-and-design.md`
+(PM 정식 REQ-1~9 + PL 기술설계 전문). TASK-001~005(청커 4종+라우터)는 33차, JsChunker 버그수정은
+34차에서 이미 완료 — 이번 세션에서 TASK-006(`CodeContentRagService` 골격)부터 TASK-010(정리)까지
+전부 진행해 **B안 Task 10개가 모두 완성**됐다.
+
+### TASK-006 — `CodeContentRagService`(신규, `com.legacy.rag`)
+- 공개 메서드 3개: `indexProject(sourceFolderPath, List<Path> files)` / `querySimilar(sourceFolderPath,
+  queryText, topK)` / `cleanup(sourceFolderPath)`. `collectionKey=sourceFolderPath` — A안
+  (`ProjectStructureRagService`)의 세션 키 관례를 그대로 재사용.
+- **REQ-5 no-op**: A안은 `@ConditionalOnProperty`로 빈 자체가 없어지는 방식이지만, 이 서비스는
+  세션 시작/종료 훅과 파일별 분석 프롬프트 조립부 등 호출부가 여러 곳이라 항상 빈으로 등록해두고,
+  내부에서 `ObjectProvider<VectorStoreClient>`/`ObjectProvider<EmbeddingClient>`를
+  `getIfAvailable()`로 선택 주입해 없으면(=`rag.enabled=false`로 그 두 빈 자체가 없음) 모든 공개
+  메서드가 조용히 no-op하도록 설계했다 — 호출부는 이 서비스의 존재 여부를 매번 확인할 필요가 없다.
+  `rag.content.enabled`(기본 false)는 A안의 `rag.enabled`와 별개인 독립 토글.
+- **컬렉션명 sanitize(리스크 §5-1, 신규 발견 이슈 해소)**: `sourceFolderPath`(Windows 경로)를
+  JDK 표준 `MessageDigest`(SHA-256)로 해시한 뒤 앞 16자만 잘라 `"code-" + hash16`로 컬렉션명을
+  만든다 — 신규 의존성 추가 없이 해결(SHA-256은 JDK 표준이라 별도 라이브러리 불필요, 설계 문서
+  예상대로).
+- **`max-index-files` 서킷브레이커**: 색인 대상 파일 수가 이 값(기본 500)을 넘으면 색인 자체를
+  스킵하고 로그만 남긴다.
+- **`query-top-k`/`snippet-max-chars`**: `querySimilar()` 결과 개수(기본 3)·스니펫 길이(기본 500자)
+  상한 — 호출부가 더 큰 값을 요청해도 이 설정값으로 캡해 프롬프트 증가량을 통제한다.
+- **배치 임베딩**: 프로젝트 전체 파일의 청크를 먼저 다 모은 뒤 `EmbeddingClient.embedBatch()`
+  **한 번**으로 임베딩한다(23차 세션 교훈 재사용 — 파일 수만큼 왕복하지 않음). 저장(upsert)은
+  파일 단위로 나눠 호출해 한 파일의 실패가 다른 파일까지 막지 않게 했다.
+- **REQ-8 반응형 차원방어**: `VectorStoreClient`에 차원 지정 기능이 없어(08-20 합의 4메서드뿐)
+  완전한 사전차단은 불가 — 같은 `indexProject()` 호출 안에서 **첫 upsert 실패**를 감지하면
+  해당 컬렉션을 `deleteCollection()` 후 `createOrGetCollection()`으로 재생성해 **같은 파일의
+  upsert를 1회만 재시도**한다. 재시도도 실패하면 예외를 삼키고 로그만 남긴 뒤 그 파일만 스킵(다음
+  파일은 계속 색인) — purge 시도 자체는 한 번의 `indexProject()` 호출에서 최초 1회만 하도록
+  플래그로 제한(반복 실패 시 매번 purge하면 오히려 낭비이고, 차원 문제가 아닌 다른 근본 원인일
+  가능성이 높다고 판단).
+- **querySimilar 4-파라미터 오버로드(신규, `public`)**: `querySimilar(sourceFolderPath, queryText,
+  topK, excludeFilePath)` — `excludeFilePath`가 주어지면 Chroma `where` 절에
+  `{"filePath": {"$ne": excludeFilePath}}`를 실어 자기 자신의 코드를 "유사한 기존 코드"로
+  되돌려주는 무의미한 결과를 줄인다. 설계 문서가 명시한 3-파라미터 공개 시그니처는 그대로 유지하고
+  (내부적으로 이 오버로드를 `excludeFilePath=null`로 위임), TASK-007/008 통합 지점에서만
+  4-파라미터 버전을 직접 사용한다.
+- **재색인 가드**: 같은 `sourceFolderPath`로 이미 색인이 끝나 있으면(재개 분석 등으로 중복 호출)
+  다시 색인하지 않는다.
+
+### TASK-007/008 — 통합(병렬 가능 지시대로 두 지점 함께 진행)
+- **세션 라이프사이클 훅 재사용**: 완전히 새 엔드포인트/스레드를 만들지 않고 `MainApiController`의
+  기존 지점을 그대로 재사용했다.
+  - `runAnalysis()`: `collectFileList()` 직후(파일 목록이 확정된 시점)에
+    `codeContentRagService.indexProject(sourceRootPath.toString(), fileList)` 호출 추가.
+    `sourceRootPath.toString()`은 이후 `analyzeFile()`이 `analyzeCodeWithClaude()`에 넘기는
+    `sourceFolderPath`와 항상 동일한 값(카피 모드 여부와 무관 — 기존 코드 확인 결과 A안의
+    `setModel`/`sessionSystemPrompts`와 같은 세션 키 관례)이라 `querySimilar()`가 같은 컬렉션을
+    정확히 찾는다.
+  - `runAnalysis()`의 기존 `finally` 블록(`clearSessionSystemPrompt`를 호출하던 지점, FAILED·
+    COMPLETED에서만 실행되고 PAUSED는 재개 시 재사용하려고 건너뛰는 기존 패턴)에
+    `codeContentRagService.cleanup(...)` 호출을 나란히 추가 — 완전히 새 정리 지점을 만들지
+    않고 CLAUDE.md 세션 프롬프트 정리와 동일한 시점·조건을 그대로 재사용했다.
+  - `runAnalysisResume()`(PAUSED 세션 재개)에도 대칭으로 `indexProject`/`cleanup` 호출을
+    추가했다 — 정상 재개(같은 JVM)라면 `CodeContentRagService`의 재색인 가드 덕에 사실상
+    no-op이고, 앱 재시작으로 메모리 상태가 사라진 경우에만 재개 시점의 파일 목록만큼이라도
+    다시 색인해 완전한 커버리지 손실을 피한다(재개 파일 목록이 최초 전체 목록보다 적을 수 있는
+    한계는 인지하고 있음 — 리스크로 아래에 남김).
+  - `MainApiController` 생성자에 `CodeContentRagService`를 일반 필수 의존성으로 추가했다
+    (A안의 `ragServiceProvider`와 달리 `ObjectProvider` 불필요 — 서비스 자체가 항상 빈으로
+    등록되고 내부에서 no-op을 스스로 판단하기 때문).
+- **최소 실사용 시나리오(사람이 확정한 범위)**: `ClaudeServiceImpl.analyzeCodeWithClaude()`에
+  `codeContentRagService` 협력자를 생성자 주입으로 추가하고, `userContent` 조립부(JSON 응답 포맷
+  지시문 앞)에 `buildSimilarCodeContext()` 헬퍼로 만든 참고 섹션을 덧붙였다. 현재 분석 중인
+  파일의 소스코드를 쿼리로 `querySimilar(sourceFolderPath, sourceCode, 3, fileName)`(자기 자신
+  제외)을 호출해, top-3·500자 캡이 이미 적용된 스니펫을 "[참고: 같은 프로젝트의 유사한 기존 코드
+  패턴]" 섹션으로 추가한다. `codeContentRagService`가 null이거나(구버전 테스트 등) 예외를
+  던지거나 빈 리스트를 반환하면 빈 문자열이라 `userContent`가 기존과 100% 동일 — 기존 재시도/
+  에러분류 등 `analyzeCodeWithClaude()`의 나머지 로직은 무수정.
+- **하위 호환 테스트 갱신**: `ClaudeServiceImpl`/`MainApiController` 생성자 시그니처가 각각
+  1개 파라미터씩 늘어나 기존 테스트 7개(`ClaudeServiceImpl*Test` 5개, `MainApiController*Test`
+  2개)의 `new ClaudeServiceImpl(...)`/`new MainApiController(...)` 호출부에 `null` 인자를
+  추가했다 — 두 서비스 모두 `null`이 들어와도(구버전 테스트가 이 신규 협력자를 모른 채 호출)
+  사용 지점에서 null 체크로 안전하게 동작함을 이번에 추가한 신규 테스트로 별도 확인했다.
+
+### TASK-009 — 검증
+- `CodeContentRagServiceTest`(신규, `com.legacy.rag`, 14개 테스트) — 실제 `ChunkerRouter`(청킹
+  로직은 목킹하지 않음, 정확성은 TASK-001~005 테스트가 이미 검증)와 Mockito로 만든
+  `VectorStoreClient`/`EmbeddingClient`/`ObjectProvider` 목으로 검증: REQ-5 no-op(토글 꺼짐/
+  인프라 없음 2가지 경로), `max-index-files` 초과 스킵, 정상 색인→쿼리 흐름, 미색인 세션의 안전한
+  빈 결과, `query-top-k` 캡핑, `snippet-max-chars` 캡핑, **REQ-8 반응형 복구**(첫 upsert 실패→
+  purge→재시도 성공 / 재시도도 실패 시 해당 파일만 스킵하고 다른 파일은 계속 색인), 재색인 가드,
+  cleanup 흐름 2종.
+- **리스크 §5-3(Chroma `where` `$ne` 연산자)**: 실서버 동작이 이 프로젝트에서 검증된 적 없다는
+  점을 테스트 코드 주석에 명시하고, `VectorStoreClient.query()`에 실제로 전달되는 `where` 절이
+  `{"filePath": {"$ne": excludeFilePath}}` 형태로 구성되는지만 Mockito 목킹 레벨로 고정했다
+  (`excludeFilePath가_주어지면_ne_연산자로_where절을_구성한다_실서버_동작은_미검증`). **실서버
+  검증은 이번 세션에서 하지 못했다 — 명시적으로 미검증으로 남긴다**(Docker 없는 환경 제약은
+  32차와 동일하게 적용됨 가능성이 있으나, 이번 세션은 Docker 상태를 별도로 확인하지 않고 시간
+  budget상 유닛 테스트 수준에서 마무리했다).
+- `ClaudeServiceImplSimilarCodeContextTest`(신규, `com.legacy.analysis`, 5개 테스트) —
+  `analyzeCodeWithClaude()` 통합 지점: 검색결과 있음(섹션 추가+스니펫 반영)/없음(기존과 동일)/
+  협력자 null(예외 없음)/`querySimilar` 예외(예외 없음)/`sourceFolderPath` 없음(호출 자체 생략,
+  `verifyNoInteractions`) 5가지 경로.
+- `./gradlew clean test` — **326개 전부 GREEN**(35차까지의 기존 스위트 307개 + 이번 세션 신규
+  19개, 회귀 없음).
+
+### TASK-010 — 정리
+- `application.properties`에 `rag.content.enabled`/`max-index-files`/`query-top-k`/
+  `snippet-max-chars` 4개 신규 프로퍼티를 A안의 `rag.*` 배선 스타일 그대로 추가(환경변수
+  `RAG_CONTENT_*`, 기본값은 REQ 설계 문서 예시 그대로).
+- `docker-compose.yml`의 `app` 서비스 `environment` 블록에 위 4개 환경변수를 `RAG_ENABLED` 등과
+  같은 스타일로 추가.
+- `.env.lite.example`은 8-19차 이후 scenario_1 hold 상태 소관이라 애매하다고 판단해 **건드리지
+  않았다** — 필요해지면 scenario_1 담당 세션이 다른 `RAG_CONTENT_*` 값들과 함께 일괄 반영하는
+  게 안전하다고 보고 후속 과제로 남긴다.
+
+### 산출물 정리
+- 신규: `src/main/java/com/legacy/rag/CodeContentRagService.java`,
+  `src/test/java/com/legacy/rag/CodeContentRagServiceTest.java`,
+  `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextTest.java`,
+  `docs/advancement/4.tested/rag_content_chunking_b_test.md`.
+- 수정: `src/main/java/com/legacy/analysis/{MainApiController,ClaudeServiceImpl}.java`(생성자에
+  `CodeContentRagService` 추가 + 훅 배선), `src/main/resources/application.properties`,
+  `docker-compose.yml`, 기존 테스트 7개(생성자 인자 `null` 추가).
+
+### 리스크/후속 과제(설계 문서 §5 대비 이번 세션 결론)
+1. §5-1(컬렉션명 sanitize) — **해소**(SHA-256 슬러그).
+2. §5-2(REQ-8 사전차단 불가) — **반응형 복구로 구현 완료**. 완전한 사전차단을 원하면
+   `VectorStoreClient` 인터페이스에 차원 파라미터 추가가 필요하다는 기존 제안은 여전히 유효
+   (이번 범위 밖).
+3. §5-3(Chroma `$ne` 실동작) — 유닛 목킹 레벨로만 고정, **실서버 미검증**으로 남음. 다음에 Docker
+   가용한 세션이 있으면 `querySimilar(..., excludeFilePath)`가 실제로 자기 파일을 제외하는지
+   실측 필요.
+4. §5-4(`.vue` 폴백 상시 경유) — 33차에서 이미 알려진 리스크, 이번 범위에서 미변경.
+5. §5-5(대형 프로젝트 `indexProject` 동기 실행 지연) — `max-index-files`로 최악만 방어, 진짜
+   해결(비동기화)은 여전히 별도 최적화 라운드 필요.
+6. §5-6(청크 크기 캡이 토크나이저 실측 아닌 문자수 추정) — 33차와 동일하게 미해소.
+7. §5-7(세션 비정상 종료 시 컬렉션 누수) — A안과 동일한 기존 구조적 한계, 새로 생기지 않음.
+   다만 `runAnalysisResume()`이 재개 시 파일 목록이 최초보다 적을 수 있어 재색인 커버리지가
+   완전하지 않을 가능성은 이번에 새로 생긴 미세 리스크로 추가 기록.
+8. §5-8(세션 내부 검색으로 범위 한정) — 설계대로, 변경 없음.
+9. **신규 제안**: `rag.http.max-in-memory-bytes`(35차 도입, 기본 10MB)가 B안의 더 큰 문서
+   페이로드에서도 충분한지 실측 필요 — 35차 handOff에도 동일하게 남겨진 항목.
+
+**RAG "B안"(코드 내용 청킹, TASK-001~010)이 이번 세션으로 전부 완성됐다.** QA 검증 요청함(다음
+단계) — 이 세션은 서브에이전트 호출 도구가 없어 검증 자체는 다음 세션/사람이 진행해야 한다.
