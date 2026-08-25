@@ -1321,19 +1321,22 @@ Pass 확인. 4-인자(전체경로) 경로는 자기제외 성공, 3-인자(파�
 전 구간 QA Pass로 완료됐다.** 상세 검증 현황은 `docs/advancement/4.tested/rag_content_chunking_b_test.md`
 참고(이 세션에서 함께 현행화함).
 
-### 브랜치 현황 정리 (2026-08-25, 문서 현행화)
+### 브랜치 현황 정리 (2026-08-25 작성 → 같은 날 병합 완료로 갱신, 문서 현행화)
 이 시점 기준 `master`(26차)에서 갈라져 나간 3개 작업 브랜치의 관계와 완료 상태:
 
 | 브랜치 | 분기 기준 | handOff 차수 | 상태 |
 |---|---|---|---|
-| `feature/2026-08-21-llm-model-db-failover` | master 26차 | 27~31차 | Phase 0~4 + 보안버그 2건 QA Pass. Phase 5~7(컨펌 모달 프론트/시드데이터/통합검증) 남음 |
-| `feature/2026-08-24-vectorstore-client-local-rag-verification` | master 26차 | 32차 | QA Pass, 완료 |
-| `feature/2026-08-24-rag-content-chunking` | 위 vectorstore-client 브랜치 | 33~37차 | QA Pass, 완료(RAG "B안" 전체) |
+| `feature/2026-08-21-llm-model-db-failover` | master 26차 | 27~31차 | Phase 0~4 + 보안버그 2건 QA Pass. **`master`에 병합 완료**(38차). Phase 5~7(컨펌 모달 프론트/시드데이터/통합검증)은 병합 후 `master` 기준으로 남음 |
+| `feature/2026-08-24-vectorstore-client-local-rag-verification` | master 26차 | 32차 | QA Pass, 완료. **`master`에 병합 완료**(38차, RAG 브랜치 경유) |
+| `feature/2026-08-24-rag-content-chunking` | 위 vectorstore-client 브랜치 | 33~37차 | QA Pass, 완료(RAG "B안" 전체). **`master`에 병합 완료**(38차) |
 
-세 브랜치 모두 아직 `master`에 병합되지 않았다 — `master`의 `handOff.md`는 26차에서 멈춰 있고
-각 브랜치가 그 이후 독립적으로 번호를 이어간 것이라, 지금 이 표가 실제 브랜치 상태를 알 수 있는
-유일한 소스다(병합 시점에 `master` 기준으로 handOff 차수를 다시 정리할 필요가 있음 — 병합 여부/
-순서는 사용자 결정 사항, 이 세션에서 임의로 진행하지 않음).
+~~세 브랜치 모두 아직 `master`에 병합되지 않았다~~ — **38차(같은 날, 2026-08-25)에서 사용자 승인
+순서대로 전부 병합 완료**(RAG 두 트랙 → failover 순, 충돌 8개 파일 수동 해결, 회귀 403건 GREEN,
+QA 재검증 Pass). 이 handOff.md 파일 자체도 병합 과정에서 27~31차(failover)가 26차 바로 다음에,
+32차 이후(RAG)가 그 뒤에 이어지도록 재배치됐다(번호 겹침 없어 renumbering 불필요, 삭제된 내용
+없음 — QA가 원본 브랜치 대비 diff로 확인). **지금부터는 이 표가 아니라 `master`의 handOff.md
+누적 차수(1~38차)가 유일한 최신 소스다** — 3개 로컬 feature 브랜치는 병합 완료 후에도 삭제하지
+않고 남겨뒀다(과거 이력 추적용, 이후 신규 작업은 `master`에서 새로 분기).
 
 ## `feature/2026-08-21-llm-model-db-failover` + RAG 두 트랙 `master` 병합 완료 (38차, 2026-08-25)
 
@@ -1410,6 +1413,13 @@ Pass 확인. 4-인자(전체경로) 경로는 자기제외 성공, 3-인자(파�
   `llmModelOptionService` → `codeContentRagService`)만 임의로 정했는데, 이는 기능에 영향 없는
   단순 나열 순서라 별도 확인이 필요하지 않다고 판단했다.
 
-**QA 검증 필요**: 이 병합 자체(두 트랙 기능이 실제로 함께 동작하는지, 특히
-`resolveLlmClient()`로 선택된 클라이언트와 무관하게 `buildSimilarCodeContext()`가 정상 동작하는지)
-에 대한 검증 요청.
+**QA 검증 완료 (같은 날, 2026-08-25)**: 병합 구조(`044fca3`→`d646a84`→`c82cdeb`)·
+`ClaudeServiceImpl`/`MainApiController` 두 트랙 기능 공존·충돌 해결 파일 표본(`application.
+properties`/`docker-compose.yml`/`build.gradle` 양쪽 설정 보존)·handOff.md 재배치(append-only
+준수)·회귀 테스트(403건 GREEN)·파일 유실 여부(`com.legacy.rag`/`LlmModelAdminController` 등) 전부
+QA가 독립적으로 재확인해 **Pass**. 병합 충돌 마커 잔존 여부도 전수 검색해 0건 확인.
+
+**이로써 모델 목록 DB화(관리자 CRUD)+크레딧소진 컨펌 기반 failover(Phase 0~4+보안버그 2건)와
+RAG "B안"(코드 내용 청킹, TASK-001~010)이 `master`에 완전히 통합됐다.** 남은 것은 failover의
+Phase 5~7(컨펌 모달 프론트/시드데이터/통합·회귀검증)뿐이며, 이제 이 `master` 브랜치를 기준으로
+새로 분기해서 진행하면 된다.
