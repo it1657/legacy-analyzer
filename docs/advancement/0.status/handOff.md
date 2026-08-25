@@ -1561,3 +1561,31 @@ handOff.md 기록으로 검증 요청을 갈음한다).
 
 **이로써 모델 목록 DB화 + 크레딧소진 컨펌 기반 failover 이니셔티브(Phase 0~7, 총 17개 task)가
 전부 완성됐다.**
+
+## Phase 5~7 QA Pass + `master` 최종 병합 완료 (40차, 2026-08-25)
+
+**QA 검증 완료**: Phase 5(컨펌 프론트)의 `AWAITING_FAILOVER_CONFIRM` phase 판정이 `completed`
+체크보다 먼저 오는지, 모달 중복 방지 가드, "예"/"아니오" 분기 둘 다 코드로 재확인. Phase 6
+시드 데이터의 modelKey/displayName이 기존 하드코딩 값과 완전 일치함을 `git show`로 직접 대조.
+Phase 7의 `MainApiControllerCreditExhaustedResumeRegressionTest`가 `session.cancel()` 버그의
+근본 원인(`isCancelled` 영구화)을 정확히 겨냥한 결정적 테스트임을 확인 — 대표성 충분 판단.
+`./gradlew clean test` 408건 재확인. diff 스코프 Phase 5~7에만 국한, 버그 의심 없음. 근거:
+`analyzer-plan/docs/chat/qa/`(QA 세션 기록).
+
+**`master` 병합**: `feature/2026-08-25-llm-model-db-failover-phase5-7`이 이번 세션 시작 시점의
+`master` 최신 커밋(`7bd4cc4`)에서 갈라진 직후 커밋이라 **fast-forward 가능한 클린 병합**이었다
+(충돌 0건, `--no-ff`로 병합 이력은 남김). 병합 후 `./gradlew clean test` 재실행 — 408건 전부
+GREEN 재확인.
+
+### 최종 상태
+**모델 목록 DB화+failover(Phase 0~7)와 RAG "B안"(TASK-001~010) 두 이니셔티브가 전부 `master`에
+통합·검증 완료됐다.** 이 세션에서 다룬 작업 범위(2026-08-21~25)가 여기서 마무리된다 —
+`master`는 원격보다 다수 커밋 앞선 로컬 전용 상태이며, 원격 push는 여전히 사람의 별도 승인
+시점에만 진행한다는 원칙을 유지한다.
+
+**남은 후속 과제** (급하지 않음, 이번 이니셔티브 핵심 기능과 무관):
+- RAG B안: 대형 프로젝트 규모에서 `indexProject` 소요시간/`rag.http.max-in-memory-bytes`(10MB)
+  여유(4.tested 문서 참고), REQ-8 실서버 차원방어 검증, `.vue` 폴백 상시 경유.
+- failover: 다중 탭 동시 세션에서 `failoverModalShown` 미대응(가드가 모듈 전역).
+- scenario_1/2 여전히 hold, scenario_3(PGX)는 사용자의 sudo/Docker 권한 확인 대기 중(26차부터
+  이어지는 별개 트랙).
