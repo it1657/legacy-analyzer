@@ -883,4 +883,27 @@ QA 지시 원칙대로 색인 로직(`indexProject`)은 건드리지 않고(기�
   수정과 무관하게 그대로 두었다 — 자기제외 식별자(`fullFilePath`)만 별도로 분리해 넘기므로
   표시용 문자열 형식은 영향받지 않는다.
 
-**QA 검증 필요** — 이 세션은 서브에이전트 호출 도구가 없어 다음 QA 세션이 이어서 검증해야 한다.
+**QA 검증 완료 (같은 날, 2026-08-25)** — Mockito 회귀 테스트 3건 + 신규 실컨테이너 테스트
+(`ClaudeServiceImplSimilarCodeContextLocalSmokeTest`, `@Tag("manual")`)를 QA가 직접 재실행해
+Pass 확인. 4-인자(전체경로) 경로는 자기제외 성공, 3-인자(파일명만) 하위호환 경로는 의도대로
+여전히 자기 포함 — 두 경로 모두 예상대로 동작. `./gradlew clean test` 41개 클래스 전부 GREEN
+재확인. `analyzer-plan/docs/pipeline/bug-suspects.md`의 해당 항목도 "수정 완료"로 갱신됨. 근거:
+`analyzer-plan/docs/chat/qa/2026-08-25-rag-content-chunking-self-exclusion-fix-verification.md`.
+
+**이로써 RAG "B안"(TASK-001~010, 33~37차)이 청킹 계층부터 실컨테이너 자기제외 버그 수정까지
+전 구간 QA Pass로 완료됐다.** 상세 검증 현황은 `docs/advancement/4.tested/rag_content_chunking_b_test.md`
+참고(이 세션에서 함께 현행화함).
+
+### 브랜치 현황 정리 (2026-08-25, 문서 현행화)
+이 시점 기준 `master`(26차)에서 갈라져 나간 3개 작업 브랜치의 관계와 완료 상태:
+
+| 브랜치 | 분기 기준 | handOff 차수 | 상태 |
+|---|---|---|---|
+| `feature/2026-08-21-llm-model-db-failover` | master 26차 | 27~31차 | Phase 0~4 + 보안버그 2건 QA Pass. Phase 5~7(컨펌 모달 프론트/시드데이터/통합검증) 남음 |
+| `feature/2026-08-24-vectorstore-client-local-rag-verification` | master 26차 | 32차 | QA Pass, 완료 |
+| `feature/2026-08-24-rag-content-chunking` | 위 vectorstore-client 브랜치 | 33~37차 | QA Pass, 완료(RAG "B안" 전체) |
+
+세 브랜치 모두 아직 `master`에 병합되지 않았다 — `master`의 `handOff.md`는 26차에서 멈춰 있고
+각 브랜치가 그 이후 독립적으로 번호를 이어간 것이라, 지금 이 표가 실제 브랜치 상태를 알 수 있는
+유일한 소스다(병합 시점에 `master` 기준으로 handOff 차수를 다시 정리할 필요가 있음 — 병합 여부/
+순서는 사용자 결정 사항, 이 세션에서 임의로 진행하지 않음).

@@ -47,7 +47,7 @@
 | `MainApiController.runAnalysisResume()` — 동일 훅 대칭 배선 | 배선 완료 | 정상 재개 시 재색인 가드로 사실상 no-op |
 | `ClaudeServiceImpl.analyzeCodeWithClaude()` — 유사 코드 컨텍스트 주입 | **실행 검증 완료** | `ClaudeServiceImplSimilarCodeContextTest` 5개 케이스 |
 | 협력자 null/예외 시 기존 동작과 100% 동일 | **실행 검증 완료** | 위 테스트의 3개 케이스(null/빈 결과/예외) |
-| 실 서버(Docker Ollama+Chroma) 대상 end-to-end 통합 실측 | **미검증** | 아래 "실행 환경 제약" 참고 |
+| 실 서버(Docker Ollama+Chroma) 대상 end-to-end 통합 실측 | **완료** | 2026-08-25 QA 세션(아래) — `indexProject` 실색인·`querySimilar` 자기제외 실측 완료, 37차에서 버그 수정 후 재검증 Pass |
 
 ## TASK-009 — 검증 (36차)
 
@@ -55,7 +55,7 @@
 |---|---|---|
 | `CodeContentRagServiceTest`(14개 케이스) | **실행 검증 완료** | Mockito 목(`VectorStoreClient`/`EmbeddingClient`/`ObjectProvider`) + 실제 `ChunkerRouter` |
 | `ClaudeServiceImplSimilarCodeContextTest`(5개 케이스) | **실행 검증 완료** | userContent 조립 검증 |
-| 리스크 §5-3: Chroma `where` `$ne` 연산자 | **목킹 레벨만 고정, 실서버 미검증** | `VectorStoreClient.query()`에 전달되는 where 절 형태(`{"filePath": {"$ne": ...}}`)만 확인 — 실제 Chroma 서버가 이 연산자를 기대대로 처리하는지는 확인 못 함 |
+| 리스크 §5-3: Chroma `where` `$ne` 연산자 | **실서버 검증 완료** | 2026-08-25 QA 실측 — `$ne` 연산자 자체는 정상 동작. 단 production 호출 경로가 색인 메타데이터(전체경로)와 다른 형식(파일명만)을 넘겨 자기제외가 무력화되는 별도 버그를 발견, 37차(2026-08-25)에서 수정 완료 후 QA 재검증 Pass(실컨테이너 end-to-end 포함) |
 | `./gradlew clean test` 전체 회귀 | **실행 검증 완료** | 326개 전부 GREEN(기존 307개 + 신규 19개) |
 
 ## TASK-010 — 정리 (36차)
@@ -168,3 +168,25 @@ Ollama(`nomic-embed-text`)+Chroma(1.5.9) 컨테이너 대상 **PASS**. QA 판단
   500개 파일이면 수십 분 이상 소요될 수 있어 동기 실행 방식의 UX 영향 재확인 필요, §5-5 기존
   리스크와 동일 맥락) — 이번 세션 범위 밖.
 - REQ-8 실서버 검증(차원이 다른 임베딩 모델로 전환해 재현) — 여전히 미검증.
+
+## 2026-08-25 자기제외 버그 수정 + QA 재검증 — 완료 (37차 후속)
+
+위 "버그 확인(2번)"이 같은 날 바로 수정됐다(사용자 즉시 승인). 상세 원인·수정 내용은
+`handOff.md` 37차 항목 참고, 요약:
+
+- **채택된 방향**: 후보 (a) — `MainApiController.analyzeFile()`/`analyzeFileInChunks()`가 이미
+  갖고 있던 전체 경로(`filePath.toString()`)를 `ClaudeService`의 신규 4-인자 오버로드
+  (`fullFilePath`)로 명시 전달. 색인 로직(`indexProject`)은 무변경, 기존 3-인자 호출부(README
+  생성)는 하위호환으로 그대로 유지(그 경로는 애초에 자기제외 로직을 안 타서 영향 없음).
+- **QA 재검증 Pass**: Mockito 회귀 테스트 3건(`excludeFilePath` 인자 캡처) + 신규 실컨테이너
+  테스트(`ClaudeServiceImplSimilarCodeContextLocalSmokeTest`, `@Tag("manual")`) 둘 다 QA가
+  직접 재실행해 확인. 4-인자(전체경로) 경로는 자기제외 성공, 3-인자(파일명만, 하위호환) 경로는
+  의도대로 여전히 자기 포함 — 두 경로 모두 예상대로 동작. `./gradlew clean test` 41개 클래스
+  전부 GREEN(회귀 없음). 근거: `analyzer-plan/docs/chat/qa/2026-08-25-rag-content-chunking-self-exclusion-fix-verification.md`.
+- `analyzer-plan/docs/pipeline/bug-suspects.md`의 해당 항목도 QA가 "수정 완료"로 갱신 완료.
+
+**결론: RAG "B안"(TASK-001~010)이 청킹 계층부터 실컨테이너 자기제외 버그 수정까지 전 구간
+QA Pass로 완료됐다.** 남은 항목은 이번 이니셔티브의 핵심 기능과 무관한 후속 과제뿐이다 —
+대형 프로젝트 규모 성능/버퍼한도 여유(위 4번 참고), REQ-8 실제 차원불일치 재현(스킵),
+`.vue` 폴백 상시 경유(§5-4, 기존에 이미 알려진 리스크). 이 문서를 다시 열어야 할 다음
+시점은 위 후속 과제 중 하나를 실제로 다룰 때다.
