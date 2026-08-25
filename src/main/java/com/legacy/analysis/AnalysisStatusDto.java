@@ -18,6 +18,10 @@ public class AnalysisStatusDto {
   private boolean completed;
   private String errorMessage;
 
+  // AWAITING_FAILOVER_CONFIRM(Phase 4) 상태일 때만 채워지는 failover 대상 모델 키.
+  // Phase 5(프런트 컨펌 모달)가 "자체 LLM({modelKey})으로 진행하시겠습니까?" 문구를 만드는 데 사용한다.
+  private String failoverModelKey;
+
   // 완료 시 추가 정보
   private String avgTimePerFile;
   private String finalSummary;
@@ -55,6 +59,9 @@ public class AnalysisStatusDto {
 
   public String getErrorMessage() { return errorMessage; }
   public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+  public String getFailoverModelKey() { return failoverModelKey; }
+  public void setFailoverModelKey(String failoverModelKey) { this.failoverModelKey = failoverModelKey; }
 
   public String getAvgTimePerFile() { return avgTimePerFile; }
   public void setAvgTimePerFile(String avgTimePerFile) { this.avgTimePerFile = avgTimePerFile; }

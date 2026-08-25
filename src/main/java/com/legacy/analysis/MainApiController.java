@@ -584,7 +584,8 @@ public class MainApiController {
     // 프런트(dashboard.js)의 폴링 로직은 completed=true를 받으면 phase가 'PAUSED'/'CANCELLED'가
     // 아닌 한 무조건 handleAnalysisCompletion()(정상 완료 처리, write-back까지 트리거)으로 빠지므로,
     // 여기서 completed=true를 반환하면 컨펌 대기 상태를 "분석 완료"로 오인하는 회귀가 생긴다.
-    // 프런트 컨펌 모달(Phase 5)이 이 phase를 인식하는 분기를 추가하는 시점에 함께 반영한다.
+    // 대신 Phase 5(dashboard.js startPolling())가 completed 여부와 무관하게 phase 값 자체를
+    // 직접 확인해 컨펌 모달을 띄우고 폴링을 멈춘다.
     boolean isDone = "COMPLETED".equals(phase) || "FAILED".equals(phase)
         || "CANCELLED".equals(phase) || "PAUSED".equals(phase);
     dto.setCompleted(isDone);
@@ -594,6 +595,12 @@ public class MainApiController {
       if (!errors.isEmpty()) {
         dto.setErrorMessage(errors.get(errors.size() - 1));
       }
+    }
+
+    // 컨펌 모달이 "자체 LLM({modelKey})으로 진행하시겠습니까?"처럼 대상 모델명을 보여줄 수 있도록
+    // AWAITING_FAILOVER_CONFIRM 상태일 때만 failoverModelKey를 함께 내려준다.
+    if (SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(phase)) {
+      dto.setFailoverModelKey(session.getFailoverModelKey());
     }
 
     if ("COMPLETED".equals(phase)) {
