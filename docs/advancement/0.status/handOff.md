@@ -797,3 +797,90 @@ ollama와 포트 충돌 — Java(Reactor Netty)가 IPv4 우선 시도로 잘못�
 
 **RAG "B안"(코드 내용 청킹, TASK-001~010)이 이번 세션으로 전부 완성됐다.** QA 검증 요청함(다음
 단계) — 이 세션은 서브에이전트 호출 도구가 없어 검증 자체는 다음 세션/사람이 진행해야 한다.
+
+## RAG "B안" 자기제외(`$ne` where절) 경로 형식 불일치 버그 수정 (37차, 2026-08-25)
+
+**배경**: 36차 직후 QA 세션(2026-08-25)이 실컨테이너(Ollama+Chroma) 대상 실측 검증을 진행하며
+`analyzer-plan/docs/pipeline/bug-suspects.md`에 신규 버그를 등록했다(상세 근거:
+`analyzer-plan/docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md`).
+사용자가 즉시 수정을 승인해 이 세션에서 바로 처리했다.
+
+### 버그 원인 — 조사 결과
+- `CodeContentRagService.indexProject()` → `collectFileChunks()`가 각 청크 메타데이터
+  `filePath`에 항상 `file.toString()`(호출부가 넘긴 `Path`의 원본 문자열 표현, 사실상 전체
+  경로)을 저장한다.
+- 반면 `ClaudeServiceImpl.buildSimilarCodeContext()`(舊 3-인자 `analyzeCodeWithClaude` 내부에서만
+  호출됨)는 `excludeFilePath`로 `fileName`(파일명만)을 그대로 넘겼다. 이 `fileName`은
+  `MainApiController.analyzeFile()` 1944행 근처의 `filePath.getFileName().toString()`에서 온
+  값 — **정작 그 시점에 `analyzeFile()`은 전체 경로를 가진 `filePath`(Path) 자체를 이미 들고
+  있었다**(같은 `fileList`를 `indexProject()`에도 그대로 넘긴 것과 동일 객체). 즉 전체 경로
+  정보 자체가 없어서가 아니라, 있는데도 안 넘기고 있었다.
+- 두 값의 형식(전체 경로 vs 파일명만)이 항상 달라 Chroma `$ne` where절이 결코 매칭되지 않았다
+  (`$ne` 연산자 자체는 QA 실측으로 정상 동작 확인됨 — 순수 형식 불일치 버그).
+
+### 수정 방향 — 호출부가 이미 가진 전체 경로를 그대로 넘기도록 변경(색인 형식은 무변경)
+QA 지시 원칙대로 색인 로직(`indexProject`)은 건드리지 않고(기존 색인된 컬렉션과의 정합성 유지),
+호출부가 이미 갖고 있던 전체 경로 정보를 새 매개변수로 명시적으로 전달하는 방향으로 수정했다.
+
+- `ClaudeService` 인터페이스에 4-인자 오버로드 신설:
+  `analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath, String fullFilePath)`.
+  `fullFilePath`가 색인 시 저장된 것과 동일한 형식(전체 경로)이어야 자기제외가 실제로 동작한다.
+  하위호환을 위해 **default 메서드**로 선언해(3-인자로 위임) 이 메서드를 재정의하지 않는 다른
+  구현체(테스트의 익명 클래스 등)를 깨지 않게 했다.
+- `ClaudeServiceImpl`: 기존 3-인자 `analyzeCodeWithClaude`는 내부적으로 4-인자 버전에
+  `fullFilePath=fileName`(기존과 동일한, 형식 불일치가 있는 값)을 넘기도록 위임 — **README
+  생성·기존 테스트 호출부의 동작은 100% 그대로 유지**(회귀 없음, 의도적으로 버그를 남겨둔
+  하위호환 경로). 4-인자 버전이 실제 로직을 담당하며 `buildSimilarCodeContext(fullFilePath, ...)`
+  를 호출해 `excludeFilePath`로 `fullFilePath`를 그대로 전달한다.
+- `MainApiController.analyzeFile()`: 청크 미분할 직접호출(舊 1964행)과 `analyzeFileInChunks()`
+  경유 호출(舊 1914행, 청크 단위 `chunkDesc`는 표시용으로 그대로 두고 자기제외 식별자만
+  별도로 `fullFilePath` 매개변수 추가) 두 지점 모두 `filePath.toString()`(전체 경로, `indexProject`에
+  넘긴 것과 동일 `Path` 객체이므로 문자열이 정확히 일치)을 4-인자 오버로드의 `fullFilePath`로
+  넘기도록 수정. README 생성 호출(舊 1683행)은 `analyzeCodeWithClaude`가 README 분기에서
+  `buildSimilarCodeContext` 호출 자체를 타지 않아(파일명이 README.md/README_AI_SUMMARY.md면
+  조기 반환) 애초에 자기제외와 무관 — 수정하지 않음.
+
+### 테스트
+- `ClaudeServiceImplSimilarCodeContextTest`(Mockito, 기존 5개 + 신규 3개 = 8개 전부 통과):
+  4-인자 오버로드가 `fullFilePath`를 `excludeFilePath`로 그대로 `querySimilar`에 전달하는지,
+  3-인자 오버로드는 기존처럼 `fileName`을 대신 쓰는 하위호환이 유지되는지, `fullFilePath=null`이면
+  `excludeFilePath` 없이 호출되는지 3가지를 각각 고정.
+- **실컨테이너 검증(Docker 가용 확인 후 진행, `docker ps`로 ollama/chroma/app/db 4개 컨테이너
+  healthy 상태 확인)**: 신규
+  `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextLocalSmokeTest.java`
+  (`@Tag("manual")`, `./gradlew localSmokeTest`로만 실행)를 작성해 `com.legacy.rag` 패키지
+  실파일(`CodeChunk.java`)을 실제 색인한 뒤, production과 동일한 호출 형태(4-인자,
+  `filePath.toString()`)로 `ClaudeServiceImpl.analyzeCodeWithClaude()`를 호출해 LLM에 실제로
+  전달될 `userContent`의 참고 섹션에서 자기 자신이 제외되는지 end-to-end로 확인 — **PASS**
+  (기존 3-인자 경로는 여전히 자기 포함=true로 남아 하위호환 특성화도 함께 확인). 자기 자신 청크의
+  ground truth는 `ChunkerRouter`가 `com.legacy.rag` package-private이라 이 테스트 패키지
+  (`com.legacy.analysis`)에서 재현할 수 없어, Chroma REST `/get`을
+  `where={"filePath": 전체경로}`로 직접 호출해(`VectorStoreClient` 추상화 우회, 기존
+  `CodeContentRagServiceLocalSmokeTest` 패턴 재사용) 정확히 얻었다 — 첫 시도에서
+  `userContent` 전체(쿼리 원문이 그대로 들어가는 "[소스 코드]:" 섹션 포함)를 기준으로 비교해
+  오탐(자기 자신의 원문이 쿼리 자체에도 있으니 항상 true)이 났던 걸 발견해, "[참고: 같은
+  프로젝트의 유사한 기존 코드 패턴]" 헤딩 이후 구간만 비교하도록 고쳐 실제 통과를 확인했다.
+- `./gradlew clean test` 전체 재실행 — 41개 테스트 클래스 전부 GREEN(0 실패, 0 에러), 신규
+  smoke 테스트는 `@Tag("manual")`로 기본 `test`에서 정상 제외됨을 재확인.
+
+### 산출물 정리
+- 수정: `src/main/java/com/legacy/analysis/ClaudeService.java`(4-인자 default 메서드 신설),
+  `src/main/java/com/legacy/analysis/ClaudeServiceImpl.java`(4-인자 실구현 + 3-인자 위임),
+  `src/main/java/com/legacy/analysis/MainApiController.java`(`analyzeFile`/`analyzeFileInChunks`
+  두 호출 지점에 `fullFilePath` 전달).
+- 신규: `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextLocalSmokeTest.java`.
+- 수정(테스트): `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextTest.java`
+  (신규 3개 케이스 추가, 기존 5개는 무변경).
+- `analyzer-plan/docs/pipeline/bug-suspects.md`는 이 세션에서 건드리지 않음(QA 소관, 지시대로
+  손대지 않음) — QA 검증 요청 필요.
+
+### 리스크/후속 과제
+- 3-인자 `analyzeCodeWithClaude`(README 생성 등)는 여전히 자기제외가 형식 불일치로 동작하지
+  않는 하위호환 경로로 **의도적으로 남겨뒀다** — README 생성은 애초에 이 로직을 타지 않아
+  실질 영향 없음. 향후 3-인자 호출부가 새로 생기고 그 지점도 자기제외가 필요해지면 4-인자
+  오버로드로 전환해야 한다는 점을 기록해둔다.
+- `analyzeFileInChunks()`의 청크별 `chunkDesc`(프롬프트 표시용, "파일명 (청크 N/M)")는 이번
+  수정과 무관하게 그대로 두었다 — 자기제외 식별자(`fullFilePath`)만 별도로 분리해 넘기므로
+  표시용 문자열 형식은 영향받지 않는다.
+
+**QA 검증 필요** — 이 세션은 서브에이전트 호출 도구가 없어 다음 QA 세션이 이어서 검증해야 한다.

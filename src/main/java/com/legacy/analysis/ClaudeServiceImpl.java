@@ -599,6 +599,18 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Override
     public String analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath) {
+        // 2026-08-25 버그수정: 이 3-인자 오버로드는 호출부가 전체 경로를 별도로 갖고 있지 않은
+        // 경우(README 생성, 예전 테스트 등)를 위한 하위호환 경로다 — 기존 동작 그대로 fileName을
+        // RAG 자기제외 식별자로 대신 쓴다(색인 시 저장되는 전체 경로 형식과 다르므로 자기제외는
+        // 실질적으로 동작하지 않을 수 있음 — 알려진 제약, ClaudeService#analyzeCodeWithClaude(4-인자)
+        // 참고). 전체 경로를 알고 있는 호출부(MainApiController.analyzeFile 등)는 반드시 4-인자
+        // 오버로드로 fullFilePath를 넘겨야 한다.
+        return analyzeCodeWithClaude(sourceCode, fileName, sourceFolderPath, fileName);
+    }
+
+    @Override
+    public String analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath,
+            String fullFilePath) {
         String extension = "";
         int i = fileName.lastIndexOf('.');
         if (i > 0) {
@@ -638,7 +650,7 @@ public class ClaudeServiceImpl implements ClaudeService {
         // 기존 코드를 세션 내부에서 검색해 참고 컨텍스트로 덧붙인다. codeContentRagService가 없거나
         // (구버전 테스트 등) 내부적으로 no-op이면(rag.content.enabled=false, 인프라 없음, 아직
         // 색인 안 됨 등) 빈 문자열이라 기존 동작과 100% 동일하게 유지된다.
-        String similarCodeContext = buildSimilarCodeContext(fileName, sourceCode, sourceFolderPath);
+        String similarCodeContext = buildSimilarCodeContext(fullFilePath, sourceCode, sourceFolderPath);
 
         String userContent = "파일명: " + fileName + "\n\n[소스 코드]:\n" + sourceCode +
                 similarCodeContext +
@@ -729,18 +741,24 @@ public class ClaudeServiceImpl implements ClaudeService {
      * (기본 500자) 캡은 {@link com.legacy.rag.CodeContentRagService} 내부에서 이미 적용된 채로
      * 돌아온다. 검색 결과가 없으면(색인 안 됨/no-op/실패 등) 빈 문자열을 반환해 기존 프롬프트와
      * 100% 동일하게 유지한다.
+     *
+     * @param excludeFilePath 자기제외용 식별자. {@code indexProject()}가 청크 메타데이터
+     *                        {@code filePath}에 저장하는 형식(전체 경로)과 동일해야 실제로
+     *                        자기제외가 동작한다(2026-08-25 버그수정) — 형식이 다르면(예: 파일명만)
+     *                        Chroma {@code $ne} where절이 결코 매칭되지 않아 자기 자신이 결과에
+     *                        그대로 남는다.
      */
-    private String buildSimilarCodeContext(String fileName, String sourceCode, String sourceFolderPath) {
+    private String buildSimilarCodeContext(String excludeFilePath, String sourceCode, String sourceFolderPath) {
         if (codeContentRagService == null || sourceFolderPath == null || sourceFolderPath.isBlank()) {
             return "";
         }
         List<String> similarSnippets;
         try {
-            similarSnippets = codeContentRagService.querySimilar(sourceFolderPath, sourceCode, 3, fileName);
+            similarSnippets = codeContentRagService.querySimilar(sourceFolderPath, sourceCode, 3, excludeFilePath);
         } catch (Exception e) {
             // querySimilar() 자체가 예외를 삼키는 게 계약이지만, 프롬프트 조립을 절대 막으면 안 되므로
             // 방어적으로 한 번 더 감싼다.
-            log.debug("[유사 코드 검색 실패, 컨텍스트 생략] fileName={} {}", fileName, e.getMessage());
+            log.debug("[유사 코드 검색 실패, 컨텍스트 생략] excludeFilePath={} {}", excludeFilePath, e.getMessage());
             return "";
         }
         if (similarSnippets == null || similarSnippets.isEmpty()) {

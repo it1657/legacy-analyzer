@@ -1893,7 +1893,7 @@ public class MainApiController {
   }
 
   private String analyzeFileInChunks(String originalCode, String fileName,
-      String sourceRootPath) throws Exception {
+      String sourceRootPath, String fullFilePath) throws Exception {
     String[] lines = originalCode.split("\n", -1);
     StringBuilder finalResult = new StringBuilder();
 
@@ -1911,8 +1911,11 @@ public class MainApiController {
 
       String chunkDesc = String.format("%s (청크 %d/%d)", fileName,
           (chunkIndex / chunkSizeLines) + 1, (lines.length + chunkSizeLines - 1) / chunkSizeLines);
+      // 2026-08-25 버그수정: RAG "B안" 자기제외가 실제로 동작하려면 색인 시 저장한 것과 동일한
+      // 형식(전체 경로)을 넘겨야 한다 — chunkDesc(파일명+청크 표기)는 프롬프트 표시용일 뿐,
+      // 자기제외 식별자로는 fullFilePath(원본 파일 전체 경로)를 그대로 넘긴다.
       String analyzedChunk = claudeService.analyzeCodeWithClaude(
-          chunkContent.toString(), chunkDesc, sourceRootPath);
+          chunkContent.toString(), chunkDesc, sourceRootPath, fullFilePath);
 
       String[] analyzedLines = analyzedChunk.split("\n", -1);
       int skipLines = contextStart < chunkIndex ? (chunkIndex - contextStart + 2) : 0;
@@ -1957,11 +1960,16 @@ public class MainApiController {
       String commentedCode;
       if (fileSize > chunkingThresholdBytes) {
         commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
-            () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString()));
+            () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString(), filePath.toString()));
         log.info("[자동 청크 분할] {} ({}bytes)", filePath.getFileName(), fileSize);
       } else {
+        // 2026-08-25 버그수정: filePath.toString()(전체 경로)를 RAG "B안" 자기제외 식별자로
+        // 함께 넘긴다 — indexProject()가 이 fileList의 동일 Path 객체 기준으로 청크 메타데이터
+        // filePath를 저장하므로(file.toString()), 여기서도 같은 filePath.toString()을 넘겨야
+        // 형식이 정확히 일치해 자기제외가 실제로 동작한다(analyzer-plan
+        // docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md 참고).
         commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
-            () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString()));
+            () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString(), filePath.toString()));
       }
 
       retryHandler.executeWithRetry(sessionId, filePath.toString(), () -> {

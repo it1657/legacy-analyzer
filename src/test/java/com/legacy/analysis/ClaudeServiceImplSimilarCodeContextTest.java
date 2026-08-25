@@ -118,4 +118,60 @@ class ClaudeServiceImplSimilarCodeContextTest {
         verifyNoInteractions(ragService);
         assertFalse(llmClient.lastUserContent.contains(CONTEXT_HEADING));
     }
+
+    // ===================================================================
+    // 2026-08-25 버그수정 — excludeFilePath 형식 불일치(경로 vs 파일명) 회귀 테스트
+    // (analyzer-plan docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md)
+    // ===================================================================
+
+    @Test
+    void 인자4개_오버로드는_fullFilePath를_excludeFilePath로_그대로_querySimilar에_전달한다() throws Exception {
+        CodeContentRagService ragService = mock(CodeContentRagService.class);
+        when(ragService.querySimilar(eq("/session/path"), anyString(), eq(3),
+                eq("C:\\proj\\src\\main\\java\\com\\legacy\\analysis\\Foo.java")))
+                .thenReturn(List.of("public class Bar { void baz() {} }"));
+
+        CapturingLlmClient llmClient = new CapturingLlmClient();
+        ClaudeServiceImpl service = newService(llmClient, ragService);
+
+        // indexProject()가 청크 메타데이터에 저장하는 형식(전체 경로)과 동일한 값을 fullFilePath로
+        // 넘겨야 실제로 자기제외가 동작한다 — fileName(파일명만)과는 다른 값임을 이 테스트로 고정한다.
+        service.analyzeCodeWithClaude("public class Foo {}", "Foo.java", "/session/path",
+                "C:\\proj\\src\\main\\java\\com\\legacy\\analysis\\Foo.java");
+
+        assertTrue(llmClient.lastUserContent.contains(CONTEXT_HEADING));
+        verify(ragService).querySimilar(eq("/session/path"), anyString(), eq(3),
+                eq("C:\\proj\\src\\main\\java\\com\\legacy\\analysis\\Foo.java"));
+    }
+
+    @Test
+    void 인자3개_오버로드는_기존과_동일하게_fileName을_excludeFilePath로_대신_사용한다_하위호환_유지() throws Exception {
+        CodeContentRagService ragService = mock(CodeContentRagService.class);
+        when(ragService.querySimilar(eq("/session/path"), anyString(), eq(3), eq("Foo.java")))
+                .thenReturn(List.of("public class Bar { void baz() {} }"));
+
+        CapturingLlmClient llmClient = new CapturingLlmClient();
+        ClaudeServiceImpl service = newService(llmClient, ragService);
+
+        // 3-인자 오버로드(README 생성/구버전 호출부 등 전체 경로를 모르는 호출부용)는 기존처럼
+        // fileName을 excludeFilePath로 대신 쓴다 — 회귀 없이 그대로 유지돼야 한다.
+        service.analyzeCodeWithClaude("public class Foo {}", "Foo.java", "/session/path");
+
+        verify(ragService).querySimilar(eq("/session/path"), anyString(), eq(3), eq("Foo.java"));
+    }
+
+    @Test
+    void fullFilePath가_null이면_excludeFilePath_없이_querySimilar를_호출한다() throws Exception {
+        CodeContentRagService ragService = mock(CodeContentRagService.class);
+        when(ragService.querySimilar(eq("/session/path"), anyString(), eq(3), isNull()))
+                .thenReturn(List.of("public class Bar { void baz() {} }"));
+
+        CapturingLlmClient llmClient = new CapturingLlmClient();
+        ClaudeServiceImpl service = newService(llmClient, ragService);
+
+        service.analyzeCodeWithClaude("public class Foo {}", "Foo.java", "/session/path", null);
+
+        assertTrue(llmClient.lastUserContent.contains(CONTEXT_HEADING));
+        verify(ragService).querySimilar(eq("/session/path"), anyString(), eq(3), isNull());
+    }
 }
