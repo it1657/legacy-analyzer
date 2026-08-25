@@ -1334,3 +1334,82 @@ Pass 확인. 4-인자(전체경로) 경로는 자기제외 성공, 3-인자(파�
 각 브랜치가 그 이후 독립적으로 번호를 이어간 것이라, 지금 이 표가 실제 브랜치 상태를 알 수 있는
 유일한 소스다(병합 시점에 `master` 기준으로 handOff 차수를 다시 정리할 필요가 있음 — 병합 여부/
 순서는 사용자 결정 사항, 이 세션에서 임의로 진행하지 않음).
+
+## `feature/2026-08-21-llm-model-db-failover` + RAG 두 트랙 `master` 병합 완료 (38차, 2026-08-25)
+
+바로 위 "브랜치 현황 정리" 표에서 "아직 `master`에 병합되지 않았다"고 남겼던 3개 브랜치를 이
+세션에서 사용자 승인 순서대로 전부 `master`에 병합했다. 병합 자체(Phase 5~7 등 신규 기능 작업은
+포함하지 않음)에만 집중한 세션.
+
+### 병합 순서
+1. `master`(26차) ← `feature/2026-08-24-rag-content-chunking` (`--no-ff`) — 이 브랜치가
+   `feature/2026-08-24-vectorstore-client-local-rag-verification`의 커밋을 이미 전부 포함하므로
+   한 번의 병합으로 두 RAG 트랙(32~37차) 모두 반영됨. `master`와 이 갈래는 26차 이후 서로 겹치는
+   파일 변경이 없어 **충돌 없이 클린 병합**됐다(직접 diff로 확인).
+   → `./gradlew clean test` 전 항목 GREEN 확인 후 다음 단계로 진행.
+2. `master` ← `feature/2026-08-21-llm-model-db-failover` (`--no-ff`) — **충돌 발생**, 아래 상세.
+
+### 2단계 충돌 파일과 해결 내역
+- **`src/main/java/com/legacy/analysis/ClaudeServiceImpl.java`**: 생성자/필드 선언부에서 실충돌.
+  failover가 도입한 `LlmClientResolver`/`LlmModelOptionService`(단일 `llmClient` 필드 제거,
+  `resolveLlmClient(modelKey)`로 provider 동적 선택)와 RAG가 도입한
+  `CodeContentRagService`(`buildSimilarCodeContext()`로 유사 코드 컨텍스트를 `userContent`에 주입,
+  4-인자 `analyzeCodeWithClaude` 오버로드) 둘 다 살리는 형태로 수동 병합 — 필드 3개
+  (`llmClientResolver`/`llmModelOptionService`/`codeContentRagService`) 전부 유지, 생성자
+  파라미터 7개로 통합. 병합 후 `analyzeCodeWithClaude()`/`generateSessionClaudeMd()`/
+  `generateProjectReadmeWithClaude()` 전부 `resolveLlmClient(modelToUse).call(...)` 형태로
+  호출되고, `analyzeCodeWithClaude(4-인자)`에서 `buildSimilarCodeContext()` 결과가
+  `userContent`에 그대로 이어붙는 것을 메서드 전체를 다시 읽어 직접 확인했다 — 두 기능은 서로
+  다른 관심사(어떤 LLM을 부를지 / 프롬프트에 뭘 추가할지)라 실제로 자연스럽게 공존한다(유사 코드
+  검색 결과 주입은 어떤 LLM 클라이언트가 최종 선택되든 무관하게 동작).
+- **`src/main/java/com/legacy/analysis/MainApiController.java`**: 생성자 파라미터 목록만 충돌
+  (failover의 `llmModelOptionService`, RAG의 `codeContentRagService`를 각각 마지막 파라미터로
+  추가했었음) — 둘 다 파라미터로 남기고 필드 대입도 둘 다 유지. 병합 후 `isSessionOwnerOrAdmin`
+  (failover 2건 보안수정: 세션 제어 4종 + 세션 파일/업로드 5종 소유자 검증, 총 10곳에서 사용)과
+  `codeContentRagService.indexProject`/`.cleanup`(RAG 훅, `runAnalysis`/`runAnalysisResume`/세션
+  정리 경로) 둘 다 코드에 그대로 남아있음을 확인. `analyzeFile`/`analyzeFileInChunks`의 4-인자
+  호출부(RAG 자기제외용 `fullFilePath` 전달)도 그대로 보존됨.
+- **테스트 파일**: `ClaudeServiceImpl*`/`MainApiController*` 생성자 호출부가 생성자 시그니처
+  변경의 영향을 받아, git이 실제로 conflict marker를 남긴 6개 파일 외에도 **conflict로 안 잡혔던
+  파일 8개**(`ClaudeServiceImplNormalizeCommentTest`,
+  `ClaudeServiceImplSimilarCodeContextTest`/`...LocalSmokeTest`,
+  `MainApiControllerDetectExtensionsTest`/`FailoverConfirmTest`/
+  `SessionFileAndUploadOwnershipTest`/`SessionOwnershipTest`)에서 `./gradlew clean test` 1차
+  실행 시 컴파일 오류로 드러나 함께 고쳤다 — 병합만으로는 텍스트 충돌이 없었지만 시그니처가
+  바뀌어 인자 개수/타입이 달라진 케이스라, **회귀 테스트를 실제로 돌려보지 않았다면 놓쳤을
+  문제**였다.
+- **`docs/advancement/0.status/handOff.md`**: 예상대로 충돌 — 지시받은 대로 27~31차
+  (failover)를 26차 바로 다음에 넣고, 그 뒤에 32차 이후(RAG)를 이어붙이는 순서로 재배치했다.
+  번호가 겹치지 않고 날짜순으로도 정확히 맞아 renumbering은 하지 않았다. 두 브랜치의 "브랜치 현황
+  정리" 표 등 기존 기록은 전부 그대로 보존(append-only 원칙) — 그 표가 "아직 병합되지 않았다"고
+  적은 부분은 이제 사실과 다르지만, 병합 시점의 스냅샷 기록이므로 고치지 않고 이 38차 항목으로
+  현재 상태를 갱신하는 방식을 택했다.
+- **그 외 파일**(`application.properties`/`build.gradle`/`docker-compose.yml`): failover
+  브랜치가 이 파일들을 건드리지 않아 충돌 자체가 없었다 — `application.properties`에
+  `llm.*`(failover가 26차 이전에 이미 도입) / `rag.content.*`(RAG, 1단계 병합에서 반영) 프로퍼티가
+  모두 그대로 공존함을 확인.
+
+### 회귀 테스트
+- 1단계(RAG만) 병합 직후: `./gradlew clean test` GREEN.
+- 2단계(failover) 충돌 해결 + 테스트 8개 추가 수정 후: `./gradlew clean test` **403건 전부 통과,
+  실패/에러/스킵 0건** (두 트랙의 기존 테스트 전부 포함).
+- 코드상 실제 공존 여부를 커밋 전 직접 재확인: `ClaudeServiceImpl`에 `LlmClientResolver`/
+  `LlmModelOptionService`/`buildSimilarCodeContext` 모두 존재, `MainApiController`에
+  `isSessionOwnerOrAdmin`(10곳)과 `codeContentRagService.indexProject`(2곳) 모두 존재,
+  `com.legacy.rag.CodeContentRagService`/`VectorStoreClient`와
+  `com.legacy.admin.LlmModelAdminController` 등 양쪽 트랙의 신규 파일이 모두 그대로 존재.
+
+### 최종 병합 커밋
+- `d646a84` — `feature/2026-08-21-llm-model-db-failover`를 `master`에 병합(`--no-ff`), 위 충돌
+  해결 내역 전부 이 커밋에 포함.
+- **원격에는 push하지 않음** — 이 프로젝트 관례상 push는 사람이 별도로 승인하는 시점에만 진행.
+
+### 애매했거나 임의 판단이 필요했던 지점
+- 없음 — 두 트랙의 변경이 실제로 서로 다른 메서드/관심사를 건드려 "둘 다 보존" 원칙을 그대로
+  적용하는 데 모호함이 없었다. `ClaudeServiceImpl` 생성자 필드 순서(`llmClientResolver` →
+  `llmModelOptionService` → `codeContentRagService`)만 임의로 정했는데, 이는 기능에 영향 없는
+  단순 나열 순서라 별도 확인이 필요하지 않다고 판단했다.
+
+**QA 검증 필요**: 이 병합 자체(두 트랙 기능이 실제로 함께 동작하는지, 특히
+`resolveLlmClient()`로 선택된 클라이언트와 무관하게 `buildSimilarCodeContext()`가 정상 동작하는지)
+에 대한 검증 요청.
