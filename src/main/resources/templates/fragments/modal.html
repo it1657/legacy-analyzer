@@ -23,3 +23,37 @@
         </div>
     </div>
 </th:block>
+
+<!--
+  크레딧(결제 잔액) 소진 시 "자체 LLM으로 진행하시겠습니까?" 컨펌 모달 (Phase 5, 2026-08-25).
+  위 confirmModal과 동일한 마크업/스타일 패턴을 그대로 재사용한다(새 UI 프레임워크 도입 없음).
+  버튼 id는 dashboard.js의 openFailoverConfirmModal()이 Promise resolve로 그대로 연결한다.
+-->
+<th:block th:fragment="failoverConfirmModal">
+    <div id="failoverConfirmModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center;">
+        <div style="background-color: white; width: 100%; max-width: 480px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); overflow: hidden; font-family: sans-serif;">
+
+            <!-- 헤더 영역 -->
+            <div style="background-color: #f6c23e; color: #333; padding: 15px 20px; font-size: 16px; font-weight: bold;">
+                ⚠️ 크레딧(결제 잔액)이 소진되었습니다
+            </div>
+
+            <!-- 바디 영역 -->
+            <div style="padding: 20px; color: #333; font-size: 14px; line-height: 1.6;">
+                현재 사용 중인 AI 모델의 크레딧(결제 잔액)이 소진되어 분석이 일시 중단되었습니다.<br><br>
+                자체 호스팅 LLM(<strong id="failoverModelKeyLabel">자체 호스팅 LLM</strong>)으로 전환해서
+                남은 파일을 이어서 분석하시겠습니까?<br><br>
+                <span style="color:#858796; font-size:12px;">
+                    "아니오"를 선택하면 지금 상태로 일시정지되며, 분석 이력 화면에서 나중에 다시 컨펌할 수 있습니다.
+                </span>
+            </div>
+
+            <!-- 푸터 버튼 영역 -->
+            <div style="background-color: #f8f9fc; padding: 12px 20px; display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e3e6f0;">
+                <button type="button" id="btnFailoverCancel" style="background-color: #858796; color: white; border: none; padding: 8px 16px; font-size: 13px; border-radius: 4px; cursor: pointer; font-weight: bold;">아니오</button>
+                <button type="button" id="btnFailoverConfirm" style="background-color: #1cc88a; color: white; border: none; padding: 8px 16px; font-size: 13px; border-radius: 4px; cursor: pointer; font-weight: bold;">예, 자체 LLM으로 진행</button>
+            </div>
+
+        </div>
+    </div>
+</th:block>

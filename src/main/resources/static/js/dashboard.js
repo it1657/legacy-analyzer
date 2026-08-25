@@ -31,6 +31,9 @@ let isAnalysisPaused = false;
 let isPausedLocally = false;
 let isAnalysisComplete = false;
 let currentHistoryId = null;    // 완료된 분석의 DB historyId (PPT 다운로드용)
+// 크레딧소진 failover 컨펌 모달(Phase 5, 2026-08-25)이 폴링 tick(2초)마다 중복으로 뜨는 것을 막는 가드.
+// startPolling()이 새로 시작될 때마다 false로 초기화된다.
+let failoverModalShown = false;
 
 // 원격 업로드 분석(File System Access API) 상태
 let uploadSourceHandle = null;      // 분석 대상 폴더 핸들 (write-back 대상 기본값)
@@ -822,6 +825,9 @@ function startPolling() {
 
   if (pollingIntervalId) clearInterval(pollingIntervalId);
   isAnalysisComplete = false;
+  // 새 폴링 세션(신규 분석 시작 또는 이어서 분석/failover 컨펌 성공 후 재개) 시작마다
+  // 컨펌 모달 가드를 초기화한다 — 이전 세션에서 이미 떴었다는 이유로 이번 세션에서 안 뜨면 안 된다.
+  failoverModalShown = false;
 
   let lastLogCount = 0;
   pollingIntervalId = setInterval(async () => {
@@ -836,6 +842,15 @@ function startPolling() {
       const status = await pollResp.json();
       updateUiFromStatus(status, logConsole, progressPanel, lastLogCount);
       if (status.recentLogs) lastLogCount = status.recentLogs.length;
+
+      // 크레딧소진 + failover 대상 지정됨: 컨펌 모달(Phase 5, 2026-08-25).
+      // 백엔드가 이 상태에서 completed=true를 의도적으로 내려주지 않으므로(29차 handOff.md 결정 —
+      // 안 그러면 아래 status.completed 분기가 "분석 완료"로 오인함), completed 판정보다 먼저
+      // phase 값 자체로 인식해서 폴링을 멈추고 사용자 응답을 기다린다.
+      if (status.phase === 'AWAITING_FAILOVER_CONFIRM') {
+        handleAwaitingFailoverConfirm(status);
+        return;
+      }
 
       if (status.completed) {
         isAnalysisComplete = true;
@@ -956,6 +971,79 @@ function handleAnalysisPaused(status) {
   clearSessionFromStorage();
   currentSessionId = null;
   updateSessionControlPanel();
+}
+
+// ===================================================================
+// 크레딧소진 컨펌 모달 (Phase 5, 2026-08-25)
+// AWAITING_FAILOVER_CONFIRM 상태를 인식하면 폴링을 멈추고 "자체 LLM으로 진행하시겠습니까?"
+// 모달을 띄운다(관리자 CRUD 모달 등 기존 이 프로젝트의 confirmModal 패턴을 그대로 재사용,
+// fragments/modal.html의 failoverConfirmModal). "예" -> 컨펌 API 성공 시 같은 세션으로 폴링만
+// 재시작해 정상 진행 화면으로 복귀한다. "아니오"(또는 컨펌 API 실패)는 별도 취소 API가 없으므로
+// 세션을 AWAITING_FAILOVER_CONFIRM 상태 그대로 두고, 기존 PAUSED 화면(handleAnalysisPaused)을
+// 그대로 재사용해 "일시정지됨" 안내만 남긴다.
+// ===================================================================
+function openFailoverConfirmModal(modelKey) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('failoverConfirmModal');
+    const btnConfirm = document.getElementById('btnFailoverConfirm');
+    const btnCancel = document.getElementById('btnFailoverCancel');
+    const modelLabel = document.getElementById('failoverModelKeyLabel');
+    if (modelLabel) modelLabel.textContent = modelKey || '자체 호스팅 LLM';
+    modal.style.display = 'flex';
+    btnConfirm.onclick = function() { modal.style.display = 'none'; resolve(true); };
+    btnCancel.onclick = function() { modal.style.display = 'none'; resolve(false); };
+  });
+}
+
+async function handleAwaitingFailoverConfirm(status) {
+  // 폴링 tick(2초)마다 매번 새로 뜨는 것을 막는 가드 - 이미 사용자 응답을 기다리는 중이면 무시한다.
+  // (사용자가 모달에 응답하기 전까지는 다음 tick들이 여기 계속 재진입할 수 있으므로 필수)
+  if (failoverModalShown) return;
+  failoverModalShown = true;
+
+  // "사용자 응답을 기다려야 하는 상태"이므로 완료 대기 폴링을 계속하면 안 된다 - 완전히 멈춘다.
+  if (pollingIntervalId) { clearInterval(pollingIntervalId); pollingIntervalId = null; }
+  const overlay = document.getElementById('analysisOverlay');
+  if (overlay) overlay.style.display = 'none';
+
+  const proceed = await openFailoverConfirmModal(status.failoverModelKey);
+  const logConsole = document.getElementById('terminalLog');
+
+  if (!proceed) {
+    if (logConsole) {
+      appendTerminalLine(logConsole, 'ℹ️ [failover] 자체 LLM으로 전환하지 않고 일시정지 상태를 유지합니다.');
+    }
+    handleAnalysisPaused(status);
+    return;
+  }
+
+  try {
+    const resp = await fetch('/api/session/failover/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId })
+    });
+    const result = await resp.json();
+    if (result.success) {
+      if (logConsole) {
+        appendTerminalLine(logConsole, `🔁 [failover] ${result.message || '자체 LLM으로 전환해 이어서 분석합니다.'}`);
+      }
+      // 컨펌 성공 - 정상 진행 화면으로 복귀한다. 기존 진행률 표시 로직(startPolling)을 그대로
+      // 재사용하므로 오버레이/진행바 등은 startPolling() 안에서 다시 켜진다.
+      startPolling();
+    } else {
+      alert(result.message || '자체 LLM 전환에 실패했습니다.');
+      if (logConsole) {
+        appendTerminalLine(logConsole, `⚠️ [failover] 전환 실패: ${result.message || '알 수 없는 오류'}`);
+      }
+      // 실패해도 세션 상태는 서버에서 그대로 AWAITING_FAILOVER_CONFIRM으로 남아있으므로("아니오"와
+      // 동일하게 부작용 없음, 29차 handOff.md 확인) 동일하게 일시정지 화면으로 안내한다.
+      handleAnalysisPaused(status);
+    }
+  } catch (err) {
+    alert('failover 전환 요청 중 오류가 발생했습니다: ' + err.message);
+    handleAnalysisPaused(status);
+  }
 }
 
 // ===================================================================

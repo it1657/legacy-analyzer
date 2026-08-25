@@ -1423,3 +1423,141 @@ QA가 독립적으로 재확인해 **Pass**. 병합 충돌 마커 잔존 여부�
 RAG "B안"(코드 내용 청킹, TASK-001~010)이 `master`에 완전히 통합됐다.** 남은 것은 failover의
 Phase 5~7(컨펌 모달 프론트/시드데이터/통합·회귀검증)뿐이며, 이제 이 `master` 브랜치를 기준으로
 새로 분기해서 진행하면 된다.
+
+## 모델 목록 DB화 + 크레딧소진 컨펌 기반 failover — Phase 5~7(컨펌 모달 프론트/시드데이터/통합·회귀검증) 완료, Phase 0~7 전체 완성 (39차, 2026-08-25)
+
+38차가 `master`에 병합해둔 상태(Phase 0~4 + 보안수정 2건)를 기준으로 `master`에서 새 브랜치
+`feature/2026-08-25-llm-model-db-failover-phase5-7`를 분기해 이번 이니셔티브의 마지막 3단계를
+진행했다. 근거 문서: analyzer-plan
+`docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md` §5,
+이 파일 27~31차(Phase 0~4 상세, 특히 29차 "설계 중 발견한 세부사항" — `completed` 플래그가
+`AWAITING_FAILOVER_CONFIRM`을 의도적으로 제외한 이유).
+
+### Phase 5 — failover 컨펌 프론트
+
+배경 확인(29차가 남긴 "Phase 5 착수 시 필수 확인 항목")부터 코드로 재검증: `GET
+/api/analysis/status/{sessionId}`가 `AWAITING_FAILOVER_CONFIRM`일 때 `completed=false`를 그대로
+반환하고 있었고, `dashboard.js`의 `startPolling()`은 이 phase를 인식하는 분기가 전혀 없어 매
+2초 폴링마다 아무 반응 없이 계속 폴링만 하고 있었다(실제 동작 먼저 확인 — 예상대로 "아직 붙어있지
+않음" 상태).
+
+- **백엔드**: `AnalysisStatusDto`에 `failoverModelKey` 필드 신설. `MainApiController.
+  getAnalysisStatus()`가 `phase == AWAITING_FAILOVER_CONFIRM`일 때만 `session.getFailoverModelKey()`를
+  실어 보낸다(그 외 phase에서는 노출 안 함 — 과거 컨펌 대기였다가 전환된 이후의 잔값이 새는 것도
+  차단). `completed` 계산 로직 자체는 29차 결정 그대로 보존(주석만 "Phase 5가 이 phase를 직접
+  인식해서 처리한다"는 취지로 갱신).
+- **프론트 — 폴링 분기**: `dashboard.js`의 `startPolling()` 인터벌 콜백에, `status.completed` 판정
+  **이전에** `status.phase === 'AWAITING_FAILOVER_CONFIRM'`을 먼저 확인하는 분기를 추가했다. 이
+  분기에 걸리면 `handleAwaitingFailoverConfirm(status)`를 호출하고 그 tick을 종료한다(완료 판정
+  로직은 건드리지 않음 — 기존 PAUSED/CANCELLED/COMPLETED 분기 100% 보존).
+- **모달 재사용**: 기존 `fragments/modal.html`의 `confirmModal`(원본 소스 직접수정 경고 모달) 패턴을
+  그대로 복제해 `failoverConfirmModal` 프래그먼트 신설(동일한 마크업/인라인 스타일, 새 UI
+  프레임워크 도입 없음). "예"/"아니오" 버튼 + `<strong id="failoverModelKeyLabel">`로 대상 모델 키를
+  보여준다. `index.html`에 `<div th:replace="~{fragments/modal :: failoverConfirmModal}">` 한 줄만
+  추가.
+- **`handleAwaitingFailoverConfirm(status)`** 신설:
+  1. `failoverModalShown` 모듈 전역 가드로 폴링 tick마다(2초) 중복으로 뜨는 것을 막는다 — 사용자가
+     응답하기 전까지 여러 tick이 이 분기에 재진입할 수 있어 필수. `startPolling()`이 새로 시작될
+     때(신규 분석/이어서 분석/failover 컨펌 성공 후 재개) 이 가드를 초기화한다.
+  2. 폴링을 완전히 멈춘다(`clearInterval`) — "완료 대기 폴링을 계속하면 안 됨"이라는 지시대로,
+     낮은 빈도 전환이 아니라 정지를 택했다: 이 상태에서 서버 쪽 변화는 사용자의 컨펌 응답이 있어야만
+     일어나므로 배경 폴링 자체가 무의미하다고 판단(코드로 확인 — `confirmFailover` 외에 이 상태를
+     자동으로 벗어나게 하는 서버 로직이 없음).
+  3. "예" → `POST /api/session/failover/confirm` 호출 → 성공 시 `startPolling()`을 다시 호출해
+     기존 진행률 표시 로직(오버레이/진행바/터미널 로그)을 그대로 재사용해 정상 진행 화면으로
+     복귀한다. 실패 시(예: 그 사이 pending 파일이 사라진 극단적 케이스)에도 서버 쪽에 부작용이
+     없음을 29차 문서로 재확인했으므로 "아니오"와 동일하게 처리.
+  4. "아니오"(또는 컨펌 API 실패) → 설계 문서 지시대로 별도 취소 API가 없으므로, 기존
+     `handleAnalysisPaused(status)`를 **그대로 재사용**해 "일시정지됨" 화면 안내만 남긴다(세션은
+     서버에서 `AWAITING_FAILOVER_CONFIRM` 상태 그대로 유지 — 나중에 분석 이력 화면의 '이어서 분석'
+     버튼으로 돌아오면 `/api/session/resume`이 다시 크레딧소진에 부딪혀 같은 컨펌 분기로 자연스럽게
+     되돌아온다는 것을 코드로 추적 확인).
+- 기존 PAUSED(failover 대상 없는 배포)로 처리되던 흐름은 무수정 — `AWAITING_FAILOVER_CONFIRM` 분기가
+  `status.completed` 체크보다 먼저 `return`하므로 서로 겹치지 않는다.
+
+### Phase 6 — 시드 데이터
+
+`LlmModelOptionService.seedDefaultsIfEmpty()`가 이미 Phase 1(T5, 27차)에 구현·테스트까지 끝나 있었지만
+**실제로 호출하는 지점이 어디에도 없어 지금까지 한 번도 동작하지 않고 있었음**을 확인(코드 전체
+grep으로 검증). 즉 Phase 6는 새 로직이 아니라 이 기존 메서드의 호출부를 연결하는 작업이었다.
+- `seedDefaultsIfEmpty()`가 넣는 3개 값(`claude-sonnet-4-6`/`claude-opus-4-8`/
+  `claude-haiku-4-5-20251001`, 표시명/가격/순서 포함)을 Phase 3 직전 커밋(`a7b2166^`)의
+  `index.html` 하드코딩 `<option>` 3개와 git show로 직접 대조해 완전히 일치함을 확인 — 별도 수정
+  불필요.
+- `com.legacy.analysis.llm.LlmModelOptionSeedInitializer`(신규, `CommandLineRunner`) 신설 —
+  `com.legacy.auth.DataInitializer`(관리자/테스트 계정 시딩)와 동일한 관례(`CommandLineRunner`,
+  로거, `@Component`)를 따르되, 이 프로젝트가 기능별 패키지 구조라 auth 도메인과 무관한 LLM 모델
+  시딩은 `com.legacy.analysis.llm` 패키지에 별도 클래스로 뒀다(auth → analysis.llm 역방향 의존을
+  만들지 않기 위함 — `LlmModelOptionService`가 이미 admin↔analysis 의존 방향을 지키려고 패키지
+  위치를 고심했던 것과 같은 원칙). `run()`은 `llmModelOptionService.seedDefaultsIfEmpty()` 호출
+  1줄 — 멱등성(테이블이 이미 비어있지 않으면 스킵)은 기존 서비스 메서드가 이미 보장.
+- failover 대상(LOCAL provider) 모델은 지시대로 이번 시드에 포함하지 않음 — 관리자가 나중에 직접
+  등록/지정.
+- 테스트: `LlmModelOptionSeedInitializerTest`(신규 1건) — `run()`이 `seedDefaultsIfEmpty()`를
+  정확히 1회 호출하는지만 검증(멱등성 자체의 "빈 테이블 3개 삽입/이미 있으면 스킵" 전수 검증은
+  기존 `LlmModelOptionServiceTest`가 이미 하고 있어 중복하지 않음).
+
+### Phase 7 — 통합/회귀 검증
+
+- **신규 기능 end-to-end(정적 추적)**: 관리자 CRUD(`LlmModelAdminController`, `/api/admin/llm-models/**`,
+  `admin/dashboard.html`의 fetch 호출 6종 확인) → `LlmModelOptionService`/`LlmModelOptionRepository`
+  (DB) → 기동 시 `LlmModelOptionSeedInitializer`가 빈 테이블을 채움 → `GET /api/config/llm-models`
+  (`MainApiController`) → `dashboard.js`의 `loadAnthropicModelOptions()`/
+  `populateModelSelectOptions()` → 사용자 드롭다운 → (크레딧소진) `handleCreditExhaustedPause` →
+  `AWAITING_FAILOVER_CONFIRM` 전이 + 이번 Phase 5가 추가한 `failoverModelKey` 노출 → `dashboard.js`
+  폴링 분기 → 컨펌 모달 → `POST /api/session/failover/confirm` → `claudeService.setModel(...)` →
+  재개 스레드가 LOCAL provider로 이어서 처리, 이렇게 8단계 연결 지점을 전부 코드로 재확인했다.
+  관리자 화면에서 `provider=LOCAL` 모델만 "failover 지정" 버튼이 노출되는 것도 `admin/dashboard.html`
+  코드로 확인(설계상 Anthropic 모델은 failover 대상이 될 수 없다는 제약이 화면에도 반영돼 있음).
+  **실제 브라우저 클릭 테스트는 수행하지 않음** — Docker 컨테이너(`legacy-analyzer-app` 등 4개)가
+  떠 있는 것은 확인했으나 이미지가 6일 전(이번 Phase 0~7 착수 이전) 빌드본이라 이번 세션의 코드
+  변경이 반영돼 있지 않고, 이 세션에는 브라우저 조작 도구가 연결돼 있지 않아 정적 코드 추적으로
+  갈음했다 — 브라우저 기반 수동 확인이 필요하면 이미지 재빌드 후 별도 세션/QA에서 진행 필요.
+- **기존 "충전 후 이어서 분석" 회귀 확인(설계 문서가 명시적으로 요구)**: 29차가 남긴 대로 이
+  경로(`runAnalysis`/`runAnalysisResume`)를 실제로 스레드까지 띄워 끝까지 실행하는 기존 테스트는
+  없었다 — 스레드풀/파일 I/O/LLM 클라이언트가 얽혀 있어 그렇게 하는 것은 이번에도 무리라고
+  판단했고, 대신 문제의 핵심 원인(`SessionState.isCancelled`가 크레딧소진 분기에서 영구화되던 버그
+  → Phase 4가 `session.cancel()` 호출 제거로 수정)을 실제 프로덕션 코드 경로 그대로 재현하는 좁고
+  결정적인 테스트를 추가했다: `MainApiControllerCreditExhaustedResumeRegressionTest`(신규 1건) —
+  ① `handleCreditExhaustedPause`를 리플렉션으로 직접 호출해 크레딧소진(failover 대상 없음) →
+  `PAUSED` 전이를 재현하고 `session.isCancelled()==false`를 확인, ② `resumePendingFilesInThread`가
+  재개 스레드 기동 **직전**(파일 처리를 시작하기도 전에) 동기적으로 수행하는 것과 정확히 동일한
+  상태 리셋(`setCurrentPhase("ANALYZING")`/`setStatus("IN_PROGRESS")`)을 재현한 뒤,
+  재개 스레드의 매 파일 처리 루프가 실제로 검사하는 바로 그 조건인 `session.shouldStop()`이
+  `false`임을 확인했다 — 이 값이 `true`였다면 재개된 스레드가 모든 파일에서 즉시 건너뛰는 그
+  버그가 재발했다는 뜻이다. 스레드/실제 파일 I/O 없이도 버그의 인과관계(크레딧소진 처리가
+  `isCancelled`를 건드리지 않아야 재개 후 `shouldStop()`이 정확히 계산된다)를 결정적으로 검증한다.
+- **회귀 테스트 전체**: `./gradlew clean test` — **408건 전부 통과, 실패/에러/스킵 0건**
+  (38차 병합 시점 403건 + Phase 5~7 신규 5건: `MainApiControllerAnalysisStatusTest` 3건,
+  `LlmModelOptionSeedInitializerTest` 1건, `MainApiControllerCreditExhaustedResumeRegressionTest`
+  1건).
+
+### 수정/생성 파일
+- 수정: `src/main/java/com/legacy/analysis/AnalysisStatusDto.java`(failoverModelKey 필드),
+  `src/main/java/com/legacy/analysis/MainApiController.java`(getAnalysisStatus에 failoverModelKey
+  노출),
+  `src/main/resources/static/js/dashboard.js`(폴링 분기/컨펌 모달 핸들러 3개 함수),
+  `src/main/resources/templates/fragments/modal.html`(failoverConfirmModal 프래그먼트),
+  `src/main/resources/templates/index.html`(프래그먼트 include 1줄).
+- 신규: `src/main/java/com/legacy/analysis/llm/LlmModelOptionSeedInitializer.java`,
+  `src/test/java/com/legacy/analysis/MainApiControllerAnalysisStatusTest.java`,
+  `src/test/java/com/legacy/analysis/MainApiControllerCreditExhaustedResumeRegressionTest.java`,
+  `src/test/java/com/legacy/analysis/llm/LlmModelOptionSeedInitializerTest.java`.
+
+### 리스크/제안
+- Phase 7에서 열려있던 "관리자가 활성 모델을 전부 비활성화/삭제하면 사용자 드롭다운이 빈 목록이
+  되는 엣지케이스" 관련 사람 결정 보류 건(설계 문서 결론부)은 이미 27차 시점에
+  `LlmModelOptionService`의 "최소 1개 활성 모델 유지" 가드로 해소돼 있음을 재확인 — 이번 세션에서
+  별도 조치 불필요.
+- 브라우저 실기동 확인이 필요하면 `it1657/legacy-analyzer` 이미지를 이번 브랜치 기준으로 재빌드해
+  기존 docker-compose 스택(`legacy-analyzer-app`/`-db`/`-chroma`/`-ollama`)에 올린 뒤 진행 권장.
+- `failoverModalShown` 가드는 모듈 전역 변수라 여러 탭에서 같은 세션을 동시에 여는 극단적 케이스는
+  가드하지 못한다(탭마다 별도 JS 컨텍스트). 기존 프로젝트도 다중 탭 동시분석을 지원 대상으로
+  다루지 않아 이번에도 범위 밖으로 판단.
+
+**커밋은 브랜치 `feature/2026-08-25-llm-model-db-failover-phase5-7`에 로컬로만 남기고 원격에는
+push하지 않았다. QA 검증 필요**(이 세션에는 QA 서브에이전트 호출 도구가 연결돼 있지 않아 이
+handOff.md 기록으로 검증 요청을 갈음한다).
+
+**이로써 모델 목록 DB화 + 크레딧소진 컨펌 기반 failover 이니셔티브(Phase 0~7, 총 17개 task)가
+전부 완성됐다.**
