@@ -7,6 +7,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
@@ -39,15 +40,24 @@ public class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
             @Value("${llm.local.url}") String baseUrl,
             @Value("${llm.local.api-key:}") String apiKey,
             @Value("${llm.local.read-timeout-sec:300}") long readTimeoutSec,
-            @Value("${rag.embedding.model:nomic-embed-text}") String model) {
+            @Value("${rag.embedding.model:nomic-embed-text}") String model,
+            @Value("${rag.http.max-in-memory-bytes:10485760}") int maxInMemoryBytes) {
         this.model = model;
 
         HttpClient httpClient = HttpClient.create()
                 .responseTimeout(Duration.ofSeconds(readTimeoutSec));
 
+        // Spring WebClient 기본 응답 버퍼 한도(256KB)는 embedBatch()의 문서 수가 조금만 늘어도
+        // 초과한다(2026-08-24 실측 버그 수정 — DataBufferLimitException으로 디코딩이 통째로
+        // 실패해 ProjectStructureRagService가 이를 "RAG 압축 실패"로 오인, 원본 fallback되던 문제).
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(maxInMemoryBytes))
+                .build();
+
         WebClient.Builder builder = WebClient.builder()
                 .baseUrl(baseUrl)
                 .clientConnector(new org.springframework.http.client.reactive.ReactorClientHttpConnector(httpClient))
+                .exchangeStrategies(strategies)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE);
 
         if (apiKey != null && !apiKey.isBlank()) {

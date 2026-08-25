@@ -37,7 +37,7 @@ public class ProjectStructureRagService {
 
     private static final Logger log = LoggerFactory.getLogger(ProjectStructureRagService.class);
 
-    private final ChromaClient chromaClient;
+    private final VectorStoreClient vectorStoreClient;
     private final EmbeddingClient embeddingClient;
     private final long triggerThresholdChars;
     private final int topKPerPackage;
@@ -48,11 +48,11 @@ public class ProjectStructureRagService {
     private final Map<String, String> sessionCollections = new ConcurrentHashMap<>();
 
     public ProjectStructureRagService(
-            ChromaClient chromaClient,
+            VectorStoreClient vectorStoreClient,
             EmbeddingClient embeddingClient,
             @Value("${rag.trigger-threshold-chars:20000}") long triggerThresholdChars,
             @Value("${rag.top-k-per-package:30}") int topKPerPackage) {
-        this.chromaClient = chromaClient;
+        this.vectorStoreClient = vectorStoreClient;
         this.embeddingClient = embeddingClient;
         this.triggerThresholdChars = triggerThresholdChars;
         this.topKPerPackage = topKPerPackage;
@@ -105,7 +105,7 @@ public class ProjectStructureRagService {
                     sessionId, packageGroups.size(), estimatedChars, triggerThresholdChars);
             return compacted;
         } catch (Exception e) {
-            log.warn("[RAG 압축 실패, 원본 그대로 사용] sessionId={} {}", sessionId, e.getMessage());
+            log.warn("[RAG 압축 실패, 원본 그대로 사용] sessionId={} {}", sessionId, e.getMessage(), e);
             return packageGroups;
         } finally {
             // index() 도중(임베딩 호출 등) 예외가 나면 이 메서드의 collectionId 대입이 끝까지
@@ -131,7 +131,7 @@ public class ProjectStructureRagService {
     }
 
     private String index(String sessionId, Map<String, List<String>> packageGroups) {
-        String collectionId = chromaClient.createOrGetCollection(sessionId);
+        String collectionId = vectorStoreClient.createOrGetCollection(sessionId);
         sessionCollections.put(sessionId, collectionId);
 
         List<String> ids = new ArrayList<>();
@@ -153,13 +153,13 @@ public class ProjectStructureRagService {
         // 파일마다 embed()를 순차 호출하면 파일 수만큼 네트워크 왕복이 쌓인다 — embedBatch()로
         // 한 번에 보내 왕복을 1번으로 줄인다(속도 개선, 2026-07-23).
         List<List<Double>> embeddings = embeddingClient.embedBatch(documents);
-        chromaClient.upsert(collectionId, ids, embeddings, documents, metadatas);
+        vectorStoreClient.upsert(collectionId, ids, embeddings, documents, metadatas);
         return collectionId;
     }
 
     private List<String> queryRepresentativeFiles(String collectionId, String pkg, List<String> originalFiles) {
         List<Double> queryEmbedding = embeddingClient.embed(pkg + " 패키지의 핵심 대표 클래스");
-        List<String> docs = chromaClient.query(collectionId, queryEmbedding, topKPerPackage, Map.of("package", pkg));
+        List<String> docs = vectorStoreClient.query(collectionId, queryEmbedding, topKPerPackage, Map.of("package", pkg));
 
         List<String> files = docs.stream()
                 .map(this::extractFileName)
@@ -177,15 +177,15 @@ public class ProjectStructureRagService {
         return sep >= 0 ? doc.substring(sep + 4) : null;
     }
 
-    /** 세션의 Chroma 컬렉션을 정리한다. 실패해도 예외를 던지지 않는다(정리 실패가 흐름을 막으면 안 됨). */
+    /** 세션의 벡터스토어 컬렉션을 정리한다. 실패해도 예외를 던지지 않는다(정리 실패가 흐름을 막으면 안 됨). */
     public void cleanup(String sessionId) {
         String collectionId = sessionCollections.remove(sessionId);
         if (collectionId == null) return;
         try {
-            // ChromaClient.deleteCollection()은 id가 아니라 이름을 받는다(실제 서버 확인 결과 —
-            // 자세한 경위는 4.tested/scenario_1_test.md 참고). index()가 createOrGetCollection(sessionId)로
-            // 만든 컬렉션이라 이름은 곧 sessionId다.
-            chromaClient.deleteCollection(sessionId);
+            // VectorStoreClient.deleteCollection()은 id가 아니라 이름을 받는다(Chroma 실제 서버
+            // 확인 결과 — 자세한 경위는 4.tested/scenario_1_test.md 참고). index()가
+            // createOrGetCollection(sessionId)로 만든 컬렉션이라 이름은 곧 sessionId다.
+            vectorStoreClient.deleteCollection(sessionId);
         } catch (Exception e) {
             log.warn("[RAG 컬렉션 정리 실패] sessionId={} collectionId={} {}", sessionId, collectionId, e.getMessage());
         }

@@ -18,6 +18,29 @@ public interface ClaudeService {
      */
     String analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath);
 
+    /**
+     * {@link #analyzeCodeWithClaude(String, String, String)}와 동일하되, RAG "B안" 자기제외
+     * (유사 코드 검색 결과에서 현재 분석 중인 파일 자신을 제외)에 쓰일 {@code fullFilePath}를
+     * 별도로 받는다. {@code indexProject()}가 청크 메타데이터 {@code filePath}에 저장하는 형식과
+     * 반드시 동일해야(전체 경로) 자기제외가 실제로 동작한다(2026-08-25 버그수정,
+     * analyzer-plan docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md
+     * 참고 — 이 값을 넘기지 않고 3-인자 오버로드를 호출하면 이전처럼 {@code fileName}이 대신
+     * 쓰여 자기제외가 사실상 동작하지 않는다).
+     * 기본 구현은 3-인자 오버로드로 위임해(fullFilePath 무시) 이 메서드를 재정의하지 않는
+     * 구현체와의 하위 호환을 유지한다.
+     *
+     * @param sourceCode       원본 소스 코드 문자열
+     * @param fileName         분석 대상 파일명(프롬프트 표기/확장자 판별용, 확장자 포함)
+     * @param sourceFolderPath 분석 대상 폴더의 절대 경로 주소
+     * @param fullFilePath     현재 분석 중인 파일의 전체 경로(색인 시 저장한 형식과 동일해야 함).
+     *                          null이면 자기제외를 시도하지 않는다.
+     * @return 한글 주석이 결합 완료된 소스 코드 문자열
+     */
+    default String analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath,
+            String fullFilePath) {
+        return analyzeCodeWithClaude(sourceCode, fileName, sourceFolderPath);
+    }
+
     // 토큰 사용량 추적 관련 메서드
     /**
      * 현재까지 누적된 토큰 사용량 조회

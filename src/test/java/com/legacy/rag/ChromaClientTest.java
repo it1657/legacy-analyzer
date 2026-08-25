@@ -38,7 +38,7 @@ class ChromaClientTest {
     }
 
     private ChromaClient newClient() {
-        return new ChromaClient(baseUrl(), "default_tenant", "default_database");
+        return new ChromaClient(baseUrl(), "default_tenant", "default_database", 10485760);
     }
 
     @Test

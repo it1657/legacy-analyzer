@@ -358,3 +358,552 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 자세한 논의 경위는 `analyzer-plan` 프로젝트의 `docs/chat/etc/2026-08-19-scenario-1-2-hold-scenario-3-active-decision.md`, `docs/chat/etc/2026-08-19-pgx-qwen3-rag-langchain4j-exploration-plan.md` 참고.
 
 **남은 것**: (1) PGX 계정 sudo/Docker 권한 확인(사용자가 직접), (2) 확인 결과에 맞는 설치 스텝 확정, (3) 설치 방식 확정 후 PM/PL에 방향 전환(독립 샌드박스, RAG 동시 구축) 재확인 검토, (4) scenario_1의 실행 검증 미착수 항목들(총파일 카운터 버그 등)은 보류 상태 그대로 유지 — CoP 리뷰 취합 시점까지 보류.
+
+## VectorStoreClient 인터페이스 추출 + 로컬 RAG 검증 4단계 구현 (32차, 2026-08-24)
+
+**번호 안내**: 이 handOff.md의 `master` 브랜치 최신본은 아직 26차까지만 있다(27~31차는 `feature/2026-08-21-llm-model-db-failover` 브랜치에 있고 아직 `master`에 병합되지 않음). 이번 작업은 그 이니셔티브와 **무관한 별도 트랙**이라 사용자 지시대로 새 브랜치(`feature/2026-08-24-vectorstore-client-local-rag-verification`, `master`에서 분기)에서 진행했고, 인계받은 번호(32차)를 그대로 쓴다 — 두 브랜치가 나중에 `master`로 합쳐질 때 27~31차와의 순서/번호 정리가 별도로 필요함을 남겨둔다.
+
+근거: `analyzer-plan/docs/chat/etc/2026-08-20-local-rag-verification-design-and-vectorstore-decoupling.md`(PM/PL 설계 확정 전문, §2 결합도 해소·§3 로컬 RAG 검증 4단계 설계).
+
+### 0단계 — `VectorStoreClient` 인터페이스 추출(결합도 해소) — 완료
+- `com.legacy.rag.VectorStoreClient` 인터페이스 신규 — `createOrGetCollection`/`upsert`/`query`/`deleteCollection` 4개 메서드, `EmbeddingClient`와 동일한 문서화 스타일. `deleteCollection`은 22차에서 확정한 대로 파라미터가 id가 아니라 **이름**인 시그니처 그대로 인터페이스화.
+- `ChromaClient implements VectorStoreClient`로 전환(4개 메서드에 `@Override` 추가). `ProjectStructureRagService` 생성자 파라미터 타입을 `ChromaClient` 구체클래스에서 `VectorStoreClient` 인터페이스로 변경 — 구현체가 하나뿐이라 `@Qualifier` 불필요, Spring이 자동 주입. 내부 필드명도 `chromaClient` → `vectorStoreClient`로 함께 정리(사용처 4곳).
+- `ProjectStructureRagServiceTest.newService()`도 지역 변수 타입을 `VectorStoreClient`로 바꿔 결합도 해소가 테스트 시점에도 드러나게 갱신. `ChromaClientTest`는 `ChromaClient`를 직접 생성해 자기 자신의 계약을 검증하는 테스트라 그대로 유지(인터페이스 목킹 불필요 — 이 클래스가 유일한 구현체이자 검증 대상이므로).
+- 앞으로 Chroma/Ollama가 아닌 다른 벡터스토어(pgvector 등)로 바꾸기로 결정해도 `VectorStoreClient` 구현체 하나만 추가하면 되고 `ProjectStructureRagService`는 무수정 — 설계 문서 §2 목표 그대로 달성.
+
+### 1~4단계 — 로컬 RAG 검증(코드/설정/테스트 작성 완료, **실행 검증은 이 세션에서 못 함** — 아래 "실행 환경 제약" 참고)
+- **1단계**: `docker-compose.local-smoke.override.yml` 신규 생성 — 기존 `docker-compose.yml`은 무수정, ollama(`11434:11434`)/chroma(`18000:8000`) `ports:` 매핑만 추가하는 오버레이. 파일 안 주석에 `LLM_LOCAL_MODEL=nomic-embed-text` 인라인 환경변수 오버라이드 실행법(bash/PowerShell 둘 다), Chroma heartbeat 확인법(`curl http://localhost:18000/api/v2/heartbeat`), 새 볼륨에서 최소 1회 검증하라는 안내를 그대로 남겼다. `.env` 영구 변경은 하지 않음.
+- **2단계**: `ProjectStructureRagServiceLocalSmokeTest`(신규, `com.legacy.rag`) — `ProjectStructureRagServiceTest.newService()` 패턴을 그대로 재사용하되 실제 Ollama/Chroma 엔드포인트(`-DragSmoke.ollamaUrl`/`-DragSmoke.chromaUrl`로 오버라이드 가능, 기본값은 오버레이 매핑과 일치)에 연결. 목업 데이터는 2026-08-24 기준 실제 `com.legacy` 패키지 구조를 직접 스캔해 그대로 반영(`find com/legacy -name "*.java" | sed ...` 로 leaf 패키지별 개수 확인) — `admin` 3, `analysis` 26, `analysis.llm` 4, `api.monitoring` 2, `api.usage` 4, `audit` 4, `auth` 12, `core` 8, `notification` 4, `rag` 5(이번에 `VectorStoreClient.java` 추가로 4→5), `statistics` 3, 총 11개 leaf 패키지. 설계 문서 작성 시점(2026-08-20)의 스냅샷과 패키지 목록·개수가 소폭 다름(코드가 그 사이 계속 변경됐기 때문) — 이 세션 스캔값이 최신.
+  - **주의 남김**: 운영 기본값 `rag.top-k-per-package=30`은 지금 legacy-analyzer의 어떤 leaf 패키지도 안 넘어서(최대 `analysis` 26개) 이 값 그대로 스모크 테스트에 쓰면 압축이 한 건도 안 일어난다. 그래서 이 테스트는 설계 문서가 예시로 들었던 `topK=5`를 테스트 전용 파라미터로 그대로 사용해 `analysis`(26→5)/`auth`(12→5)/`core`(8→5) 3개 패키지가 실제로 압축 경로를 타도록 했다(운영 설정값 자체를 바꾼 건 아님).
+- **3단계**: `@Tag("manual")` 신규 도입(이 프로젝트 최초 `@Tag` 선례) — `build.gradle`의 `test { useJUnitPlatform { excludeTags 'manual' } } `로 기본 스위트에서 제외, `localSmokeTest`(`includeTags 'manual'`, group=verification, 리포트를 `build/reports/tests/localSmokeTest`로 별도 분리) 태스크 신규 등록.
+- **4단계 — 검증 체크리스트**(설계 문서 §3 그대로, 전부 `ProjectStructureRagServiceLocalSmokeTest` 안 한 메서드에 순서대로 배치):
+  1. 새 볼륨 tenant/database 자동생성 가정 — 별도 API 호출 없이, `compactPackageGroups()`가 첫 호출부터 예외 없이 끝까지 성공한다는 사실 자체로 실증(생성 API를 명시적으로 호출하지 않으므로).
+  2. **배치 임베딩(`/api/embed`) 응답 개수 일치**(설계 문서가 "이번 검증의 최대 값어치"로 명시) — 직접 API를 찌르는 대신, "결과가 원본과 달라야(=실제 압축이 성공했어야) 한다"를 단언하는 간접 방식 채택. `OpenAiCompatibleEmbeddingClient.embedBatch()`는 개수 불일치 시 예외를 던지고 `compactPackageGroups()`가 그 예외를 삼켜 원본 그대로 fallback하므로, 이 단언이 실패하면 곧 배치 임베딩 개수 불일치(또는 다른 RAG 파이프라인 실패)를 의미하게 설계.
+  3. topK(5) 초과 패키지만 정확히 5개로 압축되고, 그 파일명이 전부 원본에 실재하는지, topK 이하 패키지는 원본과 완전히 동일하게 유지되는지 전체 패키지 순회 검증.
+  4. create→add→query→delete 순서 및 name 기반 delete 유효성 — `compactPackageGroups()`가 내부적으로 이 순서를 따르는 건 기존 `ProjectStructureRagServiceTest`가 이미 MockWebServer로 검증했고, 이 스모크 테스트는 실서버 대상으로 같은 계약이 실제로 성립하는지를 추가 확인.
+  5. cleanup 후 컬렉션 미잔존 — `compactPackageGroups()`의 finally가 이미 `cleanup(sessionId)`를 호출(캐시 포함 제거)했으므로, 같은 이름으로 다시 `createOrGetCollection()`을 호출하면 캐시가 아니라 실제 네트워크 호출(`get_or_create=true`)이 나가 완전히 새 빈 컬렉션이 만들어진다는 점을 이용 — 그 직후 쿼리했을 때 문서가 하나도 없어야 cleanup이 실제로 반영된 것으로 판정. 검증 후 이 재생성 컬렉션도 스스로 정리(`deleteCollection`)해 테스트가 흔적을 안 남기게 함.
+  6. 전체 소요시간(`compactPackageGroups()` 호출 1회 기준) — 하드 어서션 없이 `log.info`로만 남김(설계 문서 "성능 상한 안 걺, 로깅만" 원칙).
+
+### 실행 검증 — 이 세션은 Docker Desktop 미기동으로 **미검증**
+- `docker ps`/`docker compose version` 확인 결과 Docker Desktop 자체는 설치돼 있고 `docker compose` CLI(v2.30.3-desktop.1)도 인식되지만, 데몬 서비스(`com.docker.service`)가 STOPPED 상태였고 이 sandbox 권한으로는 `net start com.docker.service`가 `시스템 오류 5(액세스 거부)`로 기동 불가 — 이전 세션들(20~23차)도 세션마다 Docker 유무가 달랐다는 기록과 같은 패턴, 이번 세션은 "없음" 케이스.
+- 그래서 **1~4단계는 실제 컨테이너로 실행 검증하지 못했다.** 대신 아래로 배선 자체는 검증:
+  - `./gradlew localSmokeTest`를 Docker 없이 그대로 실행 → `ProjectStructureRagServiceLocalSmokeTest`가 정상적으로 선택돼 돌아갔고, `Connection refused: localhost/127.0.0.1:18000`로 `compactPackageGroups()`가 예상대로 안전하게 원본 fallback했으며, 그 결과 "결과가 원본과 달라야 한다"는 체크리스트 (2)번 단언이 **의도대로** 실패함(AssertionFailedError) — 테스트 자체의 판별 로직이 살아있음을 역설적으로 확인.
+  - `./gradlew test --tests "*LocalSmoke*"` → `No tests found for given includes`로 확인 — 기본 `test` 태스크가 `@Tag("manual")`을 정확히 배제하는 것을 검증.
+  - `./gradlew compileJava compileTestJava` 통과, `./gradlew clean test`(태그 제외된 일반 스위트) **전체 GREEN**(기존 `ChromaClientTest`/`OpenAiCompatibleEmbeddingClientTest`/`ProjectStructureRagServiceTest` 포함 전 스위트 회귀 없음 확인).
+- **사용자가 Docker Desktop이 켜진 환경에서 직접 재확인 필요**: `docker-compose.local-smoke.override.yml` 안내대로 ollama/chroma를 띄운 뒤 `./gradlew localSmokeTest`를 실행해 4단계 체크리스트(특히 (2) 배치 임베딩 응답 개수 일치)가 실제로 통과하는지 실측 확인.
+
+### 산출물 정리
+- 신규: `src/main/java/com/legacy/rag/VectorStoreClient.java`, `docker-compose.local-smoke.override.yml`, `src/test/java/com/legacy/rag/ProjectStructureRagServiceLocalSmokeTest.java`.
+- 수정: `src/main/java/com/legacy/rag/ChromaClient.java`(`implements VectorStoreClient`), `src/main/java/com/legacy/rag/ProjectStructureRagService.java`(생성자·필드 인터페이스화), `src/test/java/com/legacy/rag/ProjectStructureRagServiceTest.java`(지역 변수 타입), `build.gradle`(`excludeTags 'manual'` + `localSmokeTest` 태스크).
+- 검증 기록: `docs/advancement/4.tested/rag_vectorstore_local_smoke_test.md`(신규 — 기존 `scenario_N_test.md`는 시나리오 단위 문서라 이번 건(RAG 결합도 해소 + 로컬 검증 인프라 자체)은 특정 scenario에 속하지 않아 새 파일로 분리. 4단계 문서 전이 규칙에서 "완전히 새 범주"로 판단).
+- **RAG "B안"(코드 내용 청킹, 2026-08-21 설계)은 이번 범위에 포함하지 않음** — 이 작업(0단계 결합도 해소 + 로컬 검증 인프라)이 끝나야 시작 가능한 후속 작업으로 남겨둠.
+
+**남은 것**: (1) 사용자가 Docker Desktop 켜진 환경에서 `localSmokeTest` 실측 재확인(특히 배치 임베딩 개수 일치), (2) 이 브랜치(`feature/2026-08-24-vectorstore-client-local-rag-verification`)와 `feature/2026-08-21-llm-model-db-failover`(27~31차)가 각각 `master`에 병합될 때 handOff.md 번호 순서 정리, (3) RAG "B안"(코드 내용 청킹) 착수 — 이 작업 완료가 선행조건.
+
+## RAG "B안" 코드 내용 청킹 — TASK-001~005(청커 4종 + 라우터) 구현 (33차, 2026-08-24)
+
+**번호 안내**: 32차(`feature/2026-08-24-vectorstore-client-local-rag-verification`)에서 인계받은 번호를 이어
+쓴다. 이번 작업은 그 브랜치가 만든 `VectorStoreClient` 인터페이스가 선행 조건이라 사용자 지시대로
+`master`가 아니라 `feature/2026-08-24-vectorstore-client-local-rag-verification`에서 분기한 새 브랜치
+(`feature/2026-08-24-rag-content-chunking`)에서 진행했다. `master`에는 26차까지, `feature/2026-08-21-*`
+라인에는 27~31차가 아직 있어 세 브랜치가 `master`로 합쳐질 때 handOff.md 번호 순서 정리가 또 한 번
+필요함을 남겨둔다.
+
+근거: `analyzer-plan/docs/chat/etc/2026-08-21-rag-code-content-indexing-formal-req-and-design.md`
+(PM 정식 REQ-1~9 + PL 기술설계 전문). 이번 세션 범위는 B안 Task 10개 중 TASK-001~005(청커
+4종+라우터)까지만 — TASK-006(`CodeContentRagService` 골격) 이후는 다음 세션 범위로 남겨두고
+손대지 않았다(아직 실제 서비스와 연결하지 않음, 단위 테스트로 청커 자체 정확성만 검증).
+
+### 신규 의존성
+- `build.gradle`에 `com.github.javaparser:javaparser-core:3.25.10` 추가(symbol-solver 불필요,
+  청킹은 구문 구조만 필요). Maven Central 접근이 이번 세션에서는 정상 동작해(`curl` 200 확인)
+  실제로 다운로드·컴파일·테스트 실행까지 전부 이 세션에서 검증했다(과거 세션 기록처럼 접근 불가
+  상황이 아니었음 — 명확히 구분해 남겨둔다).
+
+### TASK-001 — `JavaAstChunker`(신규, `com.legacy.rag`)
+- `javaparser-core`(`ParserConfiguration.LanguageLevel.JAVA_17`)로 파싱, 클래스별 skeleton 청크
+  (필드+메서드/생성자 시그니처만, 본문은 `MethodDeclaration.setBody(null)`로 제거해 세미콜론
+  시그니처로 출력, 생성자는 본문 필수라 빈 블록으로 대체, 중첩 타입 멤버는 자기 자신이 별도
+  skeleton 청크로 처리되므로 부모 skeleton에서는 제거해 중복/비대화 방지) + 메서드/생성자별
+  전체 본문 청크(원본 소스 그대로, 포맷/주석 보존)를 만든다.
+- 파싱 실패(문법 오류) 시 예외를 던지지 않고 `null` 반환 — 호출부(`ChunkerRouter`)가 이를
+  신호로 자동 폴백. 클래스도 메서드도 하나도 못 뽑은 경우(파싱은 성공했지만 skeleton 대상이
+  없는 경우)도 안전하게 `null`로 넘겨 폴백을 태우게 했다.
+- REQ-1 하드캡 초과 시 `ChunkSplitter`(신규 공통 유틸)로 2차 재분할, 같은 `symbolName`에
+  `#1`/`#2`... 순번을 붙인다.
+
+### TASK-002 — `HtmlChunker`(신규)
+- 새 무거운 의존성(jsoup 등) 추가 없이 정규식+태그 밸런스 카운팅으로 직접 구현 — jsoup 같은
+  관용적(lenient) 파서는 깨진 마크업도 스스로 보정해버려 REQ-3(파싱 실패를 명시적으로 감지해
+  폴백 전환)과 오히려 안 맞는다고 판단(이번 세션 판단, 설계 문서는 "검토해도 됨" 정도로만 열어둠).
+- `th:fragment` 속성이 있는 요소를 최상위 기준으로 우선 추출, 없으면 최상위 `<div id="...">`
+  블록을 경계로 사용. `<script>`/`<style>`/HTML 주석 내부는 스캔 전용 마스킹본(길이·줄바꿈은
+  보존, 내용만 공백 처리)에서 blank 처리해 그 안의 가짜 태그가 경계 판정을 오염시키지 않게 했다
+  (실제 청크 내용은 항상 원본에서 그대로 슬라이스).
+- 짝이 맞는 닫는 태그를 못 찾으면(태그 불균형) `HtmlChunkingException`(신규, unchecked)을 던짐 —
+  th:fragment도 id-div도 아예 없는 경우(경계 자체가 없음, 에러 아님)는 `null` 반환으로 구분했다.
+
+### TASK-003 — `JsChunker`(신규)
+- 최상위 `function name(...) { ... }` 정규식 매칭 + 중괄호 상태머신. 문자열('/"/`)·line/block
+  comment 내부를 상태머신으로 스캔 전용 마스킹(길이 보존)한 뒤 그 마스킹본에서만 정규식 매칭과
+  중괄호 뎁스 카운팅을 수행해 오탐을 방지했다. "최상위"는 매치 지점까지의 순수 중괄호 증감을
+  누적해 depth==0일 때만 채택하는 방식으로 판별(중첩 함수는 건너뜀).
+- 매치 0건이거나 중괄호 불균형(닫는 괄호를 못 찾음) 감지 시 `null` 반환 → 폴백.
+- `.jsx`/`.ts`/`.tsx`/`.vue`는 이 청커 자체는 확장자를 신경 쓰지 않으므로(라우터가 판단)
+  그대로 재사용 시도됨. `.vue`는 설계 문서가 이미 예상한 대로 methods 객체의 축약 메서드 문법
+  (`greet() {...}`)이 `function` 키워드 패턴과 안 맞아 실측으로도 매치 0건 → 폴백 상시 경유를
+  테스트로 재확인했다(테스트: `vue_스타일_콘텐츠는_대체로_매치가_없어_null을_반환한다`).
+
+### TASK-004 — `FallbackChunker`(신규)
+- 고정 라인 윈도우(기본 150줄)+오버랩(기본 30줄) 슬라이딩. 빈 파일/`null` 소스도 최소 1개
+  청크(빈 문자열)를 만들어 커버리지 0을 방지. 파싱 개념이 없어 항상 성공하는 게 계약 — REQ-1
+  하드캡도 동일하게 적용해(단일 초장문 라인 등 극단적 케이스 방어) 4개 청커 모두 하드캡을
+  예외 없이 보장하도록 통일했다(설계 문서가 TASK-004에 하드캡을 명시하진 않았지만, REQ-1이
+  "공통 원칙"으로 기술돼 있어 폴백에도 동일 적용하는 게 안전하다고 판단 — 리스크 아님, 보강).
+
+### TASK-005 — `ChunkerRouter`(신규)
+- 전용 파서가 있는 3개 카테고리만 확장자 기준 라우팅: `.java`→Java, `.html`→HTML,
+  `.js`/`.jsx`/`.ts`/`.tsx`/`.vue`→JS. **그 외 모든 확장자는 처음부터 폴백 직행**(예외 목록
+  하드코딩 없음 — REQ-9 핵심). 확장자 분류는 기존 `MainApiController.isSupportedFile()`의
+  확장자 집합 관례를 참고했다(그 메서드를 직접 재사용하진 않음 — 그건 파일 스캔 필터링용이라
+  용도가 다르고, 이 클래스가 알아야 할 건 "어느 카테고리로 라우팅할지"뿐이라 라우팅 전용의
+  더 작은 Set 3개만 새로 선언).
+- 전용 청커가 `null`을 반환하거나 예외(`HtmlChunkingException` 등)를 던지면 `catch`로 잡아
+  폴백으로 자동 전환 — 테스트로 "확장자는 java인데 문법 오류", "확장자는 html인데 태그 불균형",
+  "확장자는 js인데 중괄호 불균형" 3가지 통합 시나리오를 모두 확인했다. 또한 ".py 확장자에
+  완전히 유효한 Java 문법을 넣어도 Java 청커가 시도되지 않는다"는 테스트로 "확장자 기준
+  라우팅이지 내용 스니핑이 아니다"를 명시적으로 증명해뒀다(REQ-9 취지 실증).
+
+### 공통 — `CodeChunk`/`ChunkSizeLimits`/`ChunkSplitter`(신규)
+- `CodeChunk`: `filePath`/`startLine`/`endLine`(공통) + `symbolName`/`symbolType`(파서 기반
+  청크만, 폴백은 둘 다 null) record — REQ-4 그대로.
+- `ChunkSizeLimits.MAX_CHUNK_CHARS`(12,288자) = nomic-embed-text 참고 토큰한도 8,192의 50%
+  (REQ-1) × 보수적 문자/토큰 추정치 3자(설계 문서 "1토큰≈3~4자" 중 더 낮은 값 채택, 리스크 6번
+  인지 — 토크나이저 미실측이라는 잔여 위험은 그대로 남아있음, 이번 범위에서 해소하지 않음).
+- `ChunkSplitter.enforceHardCap()`: 4개 청커가 공통으로 거치는 2차 재분할 유틸. 줄 단위로
+  자르되 한 줄 자체가 하드캡을 넘는 예외 상황(미니파이된 JS 등)은 문자 단위 추가 분할, 조각마다
+  `symbolName#순번`을 붙인다.
+- 실제 대형 메서드 실측치(`runAnalysisResume` 10,667자, `looksLikeClaudeMd` 9,264자, 설계 문서
+  기준)는 이 하드캡(12,288자) 바로 아래라 재분할 트리거 테스트용으로는 크기가 부족했다 — 테스트는
+  동일 계열(대형 절차형 메서드)이되 확실히 캡을 넘는 합성 픽스처(1000줄 반복 본문)를 사용했음을
+  명시해뒀다(테스트 코드 주석에도 이 근거를 남김).
+
+### 테스트 — 신규 5개 클래스, 34개 테스트 케이스
+`JavaAstChunkerTest`/`HtmlChunkerTest`/`JsChunkerTest`/`FallbackChunkerTest`/`ChunkerRouterTest`
+(전부 `com.legacy.rag`, 패키지 접근 제한자 그대로 테스트하려고 같은 패키지에 배치). 각 청커마다
+정상 파싱 성공/파싱 실패→폴백 전환/하드캡 초과 시 재분할/빈 파일 케이스를 다뤘고, 라우터는 3개
+카테고리 라우팅+그 외 확장자 폴백 직행+전용 파서 실패 시 폴백 전환 통합 시나리오를 다뤘다.
+`./gradlew clean test`(태그 제외 기본 스위트) **전체 GREEN 확인**(303개 테스트, 기존
+`com.legacy.rag` 스위트 포함 회귀 없음).
+
+### 산출물 정리
+- 신규: `src/main/java/com/legacy/rag/{CodeChunk,ChunkSizeLimits,ChunkSplitter,JavaAstChunker,
+  HtmlChunker,HtmlChunkingException,JsChunker,FallbackChunker,ChunkerRouter}.java`,
+  `src/test/java/com/legacy/rag/{JavaAstChunkerTest,HtmlChunkerTest,JsChunkerTest,
+  FallbackChunkerTest,ChunkerRouterTest}.java`.
+- 수정: `build.gradle`(`javaparser-core` 의존성 추가).
+- 신규 클래스는 전부 패키지 접근 제한자(디폴트, `public` 아님) — 아직 Spring 빈으로 등록하지
+  않았다(다음 세션 TASK-006에서 `CodeContentRagService`가 실제로 이들을 조립할 때 필요에 따라
+  `@Component` 여부를 결정하는 게 자연스럽다고 판단, 이번 세션 범위 밖이라 임의로 앞서가지
+  않음).
+
+**남은 것(다음 세션 범위)**: TASK-006(`CodeContentRagService` 골격, `ObjectProvider` no-op 패턴
++ 컬렉션명 sanitize(SHA-256) + REQ-8 반응형 차원 방어) → TASK-007/008(통합) → TASK-009(검증,
+Chroma `where` `$ne` 연산자 실동작 확인 포함) → TASK-010(정리). 설계 문서 리스크 2번(REQ-8 완전
+사전차단을 원하면 `VectorStoreClient`에 차원 파라미터 추가가 필요 — 이번 세션 범위 밖, 선행
+사이클 담당자에게 별도 전달 필요하다는 메모는 여전히 유효).
+
+## `JsChunker` 정규식 리터럴 인식 버그 수정 — QA 실측 발견 결함 해소 (34차, 2026-08-24)
+
+33차 직후 QA가 `dashboard.js` 실측 검증(TASK-001~005) 과정에서 발견해 `bug-suspects.md`에
+등록한 버그를 사용자 승인으로 즉시 수정했다. 같은 브랜치(`feature/2026-08-24-rag-content-chunking`)
+이어서 작업. 근거: `analyzer-plan/docs/chat/qa/2026-08-24-rag-content-chunking-task001-005-verification.md`.
+
+### 버그 원인
+`JsChunker.mask()`가 JS 정규식 리터럴(`/.../`) 문법을 전혀 모른 채 `"`/`'`를 무조건 문자열
+시작으로 해석했다. `dashboard.js` 1050행 `cd.match(/filename="?([^";\s]+)"?/)`처럼 정규식
+리터럴 안에 `"`가 홀수(3)번 있으면 상태머신이 "미종결 문자열"에 빠져 그 뒤 코드(`{`/`}` 포함)를
+전부 마스킹, 결국 짝이 맞는 `}`를 못 찾아 `chunk()` 전체가 `null`(전체 폴백)을 반환 — 그 이전에
+이미 정상 인식되던 함수들까지 통째로 버려지는 구조적 결함이었다.
+
+### 수정 내용
+- `mask()`의 상태머신에 `REGEX` 상태를 신규 추가(문자열 상태와 배타적).
+- `/`를 만나면 새 `isRegexStart(char[] masked, int index)` 헬퍼로 나눗셈/정규식 리터럴 시작을
+  판별하는 **휴리스틱**을 적용: `masked`(지금까지 처리된, 문자열/주석 내용이 공백 처리된 스캔
+  전용 사본)를 거슬러 올라가 직전 유의미(non-whitespace) 문자를 본다.
+  - 직전 문자가 `)`/`]`/`"`/`'`/`` ` ``(함수호출·인덱싱 결과 또는 문자열 리터럴 뒤) → 나눗셈.
+  - 직전 문자가 식별자/숫자 구성 문자(letter/digit/`_`/`$`)면 그 단어 전체를 역방향으로 모아
+    `REGEX_CONTEXT_KEYWORDS`(`return`/`typeof`/`instanceof`/`in`/`of`/`new`/`delete`/`void`/
+    `throw`/`case`/`do`/`else`/`yield`/`await`) 포함 여부로 재분기 — 포함되면(예:
+    `return /re/`) 정규식, 아니면(일반 변수/숫자) 나눗셈.
+  - 그 외(연산자, `(`, `,`, `=`, 줄/파일 시작 등) → 정규식 리터럴 시작.
+- `REGEX` 상태 안에서는: `\`(백슬래시) 이스케이프는 다음 한 글자를 통째로 소비(`\/` 포함),
+  `[...]` 문자클래스 안의 `/`는 종료로 안 침(정규식 문법상 문자클래스 안 `/`는 이스케이프 없이도
+  리터럴을 안 끝냄), 줄바꿈을 만나면 비정상 종료로 간주해 즉시 `NORMAL`로 복귀(정규식 리터럴은
+  한 줄을 못 넘는다는 안전장치). 내부의 `{`/`}`/`"`/`'`를 포함한 모든 내용은 문자열과 동일하게
+  전부 blank 처리(구조 오탐 방지), 델리미터(`/`) 자체는 문자열의 따옴표처럼 blank하지 않음.
+
+### 휴리스틱의 한계(명시적으로 남김)
+완전한 JS 파서 없이는 나눗셈/정규식 리터럴 판별이 100% 정확할 수 없다 — 이건 실무에서 널리
+쓰이는 근사 휴리스틱(경량 JS 토크나이저/신택스 하이라이터 다수가 쓰는 방식)이지 완벽한 해법이
+아니다. 알려진 반례: 문자열 리터럴 종료 직후 공백 없이 바로 정규식이 오는 극단적 조합(예:
+`"x"/regex/`처럼 실제로는 존재하지 않는 나열)이나, `REGEX_CONTEXT_KEYWORDS`에 없는 표현식
+컨텍스트 키워드(예: 화살표 함수 바디의 암묵적 반환 등 드문 패턴) 뒤에 오는 정규식은 여전히
+나눗셈으로 오판될 수 있다. 이번 범위는 QA가 실측 재현한 `dashboard.js`류의 흔한 패턴(메서드
+호출 인자로 쓰인 정규식, `return` 뒤 정규식)을 확실히 잡는 데 집중했고, 100% 정확도를 목표로
+삼지 않았다(사용자 작업지시에도 명시된 방향).
+
+### 테스트
+`src/test/java/com/legacy/rag/JsChunkerTest.java`에 4개 회귀 테스트 추가(총 11개, 기존 34개
+스위트 전체는 307개로 증가):
+- `정규식_리터럴_안의_홀수개_따옴표가_문자열_시작으로_오인되지_않는다` — QA 재현 최소 케이스
+  (`cd.match(/filename="?([^";\s]+)"?/)` 포함 3개 함수짜리 합성 소스)로 이제 3개 함수 전부
+  정상 추출됨을 확인.
+- `나눗셈_연산자는_정규식_리터럴로_오인되지_않는다` — `a / b`, `a / b / 2`(연쇄), `compound /= 2`,
+  `arr[0] / 2`, `(a + b) / 2` 등 흔한 나눗셈 패턴이 휴리스틱 반대 방향(정규식으로 오판)으로
+  깨지지 않음을 확인.
+- `return_뒤의_정규식_리터럴도_인식된다` — 키워드 뒤 정규식 케이스(`return /^[0-9]+$/.test(s)`)
+  검증.
+- `dashboard_js_실파일에서_최상위_함수가_폴백_없이_정상_추출된다` — 실제 `dashboard.js`(1,828줄)
+  파일을 직접 읽어 실행. **실측 결과 69개 함수 정상 추출(폴백 없음, 버그 수정 전엔 `null`)**.
+  QA가 언급한 "31개"는 버그로 1050행에서 중단되기 전까지 인식된 개수였을 뿐 파일 전체 개수가
+  아니었던 것으로 보인다(파일 전체 기준 `function` 키워드 매치는 top-level 선언 54개 +
+  이벤트 리스너 콜백 등 named function expression 15개 = 69개, 별도로 grep 정규식 매치 카운트로
+  교차 확인함 — depth==0 판정을 포함해 전부 기존(TASK-003) 알고리즘의 원래 동작이지 이번 수정으로
+  새로 생긴 특성이 아님). `downloadCompletionPpt`(버그 진원지 함수) 자체가 정상 추출되는지도
+  별도로 확인.
+- `./gradlew clean test` 전체 재실행 — **307개 전부 GREEN**, 실패/에러 0건, 기존 34개(문자열/
+  주석 마스킹 등) 회귀 없음 확인.
+
+### 산출물 정리
+- 수정: `src/main/java/com/legacy/rag/JsChunker.java`(REGEX 상태 추가 + `isRegexStart` 휴리스틱
+  헬퍼 + `REGEX_CONTEXT_KEYWORDS` 상수), `src/test/java/com/legacy/rag/JsChunkerTest.java`(회귀
+  테스트 4개 추가).
+- `analyzer-plan/docs/pipeline/bug-suspects.md`는 지시대로 손대지 않았다(QA가 상태 갱신 예정).
+- QA 검증 요청함(다음 단계) → **재-QA Pass 완료**(`analyzer-plan/docs/chat/qa/2026-08-24-jschunker-regex-literal-bugfix-verification.md`, 307개 테스트 GREEN 재확인, bug-suspects.md 해당 항목 "수정 완료"로 갱신됨).
+
+## `localSmokeTest` 실측 중 발견 — WebClient 응답 버퍼 한도 초과로 RAG 압축이 상시 fallback되던 버그 수정 (35차, 2026-08-24)
+
+같은 브랜치(`feature/2026-08-24-rag-content-chunking`) 이어서 작업. 사용자가 Docker Desktop을 켜고
+`localSmokeTest`를 직접 실행/디버깅하던 중(다른 세션 경유로 발견 경위 인계) 두 가지를 확인했다.
+
+### 환경 문제(코드와 무관, 참고용)
+로컬 Windows에 네이티브 Ollama(`qwen3:4b` 등 보유)가 `127.0.0.1:11434`를 이미 점유해 Docker의
+ollama와 포트 충돌 — Java(Reactor Netty)가 IPv4 우선 시도로 잘못된 서버에 붙어 "model not found"
+404가 났던 것으로, 사용자 승인 받아 네이티브 프로세스를 종료해 해결(코드 변경 없음). 이후로도
+`compactPackageGroups()`가 fallback되는 현상이 재현돼 아래 진짜 버그로 이어짐.
+
+### 버그 원인 — 진단
+`ProjectStructureRagService.compactPackageGroups()`의 catch 블록이 `e.getMessage()`만 로깅해
+원인 추적이 막혀 있어, 이번에 `log.warn(..., e)`로 스택트레이스까지 남기도록 임시 변경 후
+`localSmokeTest`를 재실행해 원인을 특정했다:
+- 로그에 찍히던 `"200 OK from POST http://localhost:11434/api/embed"`는 커스텀 `onStatus` 에러
+  핸들러가 만든 메시지가 아니라(그 포맷은 `"배치 임베딩 API %d 오류: ..."`), Spring WebClient가
+  응답을 `.bodyToMono(Map.class)`로 디코딩하다 자체 실패했을 때 붙이는 진단용 메시지였다.
+- 실제 원인(Caused by)은 `org.springframework.core.io.buffer.DataBufferLimitException: Exceeded
+  limit on max bytes to buffer : 262144` — WebClient 기본 응답 버퍼 한도(256KB)를 초과한 것.
+  `embedBatch()`가 46개 문서(legacy-analyzer 자기자신의 `analysis`/`auth`/`core` 패키지, topK=5
+  초과분)의 임베딩(768차원 float 배열)을 한 번에 응답받는데, 그 JSON 크기가 256KB를 가볍게 넘겼다.
+  Ollama `/api/embed` 자체는 curl/python 직접 호출로 200 OK + 요청 개수와 정확히 일치하는 46개
+  임베딩을 정상 반환함을 별도로 확인 — "배치 임베딩 응답 개수 불일치"라는 최초 가설은 기각.
+- `compactPackageGroups()`의 넓은 `catch (Exception e)`가 이 디코딩 실패까지 "RAG 실패, 원본
+  fallback"으로 삼켜버려 겉으로는 정상 동작(README 생성은 막히지 않음)처럼 보였다 — 32차에서
+  실행 검증을 못 해(Docker 미기동) 이번에 처음 실측으로 드러난 결함.
+
+### 수정 내용
+- `application.properties`에 `rag.http.max-in-memory-bytes`(기본 10MB, `RAG_HTTP_MAX_IN_MEMORY_BYTES`)
+  신규 추가 — RAG "B안"(코드 내용 청킹)이 오면 문서 수·길이가 더 커질 것을 감안해 여유 있게 설정.
+- `OpenAiCompatibleEmbeddingClient`/`ChromaClient` 둘 다 `WebClient.Builder`에
+  `ExchangeStrategies.builder().codecs(c -> c.defaultCodecs().maxInMemorySize(...))`를 적용.
+  `ChromaClient`는 지금 이 세션에서 실제로 재현된 장애는 아니지만(topK가 5~30으로 작아 응답이
+  작음) 같은 근본 원인이라 방어적으로 함께 적용(query 응답에도 임베딩류 데이터가 실려 돌아올 수
+  있음, 2026-08-20 결합도 해소로 두 클라이언트가 나란히 존재하는 김에 일관되게 처리).
+- `ProjectStructureRagService.compactPackageGroups()`의 로그를 `log.warn(msg, e)`(Throwable
+  포함)로 영구 변경 — 앞으로 같은 종류의 "겉보기엔 정상 fallback인데 원인 불명" 상황을 다음에는
+  스택트레이스로 바로 진단할 수 있게 함(이번 진단에 실제로 결정적이었음).
+- 신규 생성자 파라미터 추가에 따라 테스트 호출부 전체(`ChromaClientTest`/
+  `OpenAiCompatibleEmbeddingClientTest`/`ProjectStructureRagServiceTest`/
+  `ProjectStructureRagServiceLocalSmokeTest`)에 `10485760` 인자 반영.
+
+### 검증
+- `./gradlew clean test` — 307개 전부 GREEN(기존 스위트 회귀 없음).
+- **`./gradlew localSmokeTest`를 실제 Docker 컨테이너(Ollama+Chroma) 대상으로 재실행 — PASS.**
+  로그로 실제 압축 성공을 확인: `[RAG 압축 완료] sessionId=..., 패키지 수=11, 응답 크기=3133자
+  (임계값 1자 초과)`, topK 초과로 실제 압축된 패키지 `[com.legacy.analysis, com.legacy.auth,
+  com.legacy.core]`, cleanup 후 컬렉션 미잔존까지 4단계 체크리스트 전부 통과. 32차에서 Docker
+  미기동으로 못 했던 "배치 임베딩 응답 개수 일치" 실측(체크리스트 2번, 설계 문서가 "이번 검증의
+  최대 값어치"로 꼽은 항목)이 이번에 처음으로 실제 통과했다.
+
+### 산출물 정리
+- 수정: `src/main/java/com/legacy/rag/{OpenAiCompatibleEmbeddingClient,ChromaClient,
+  ProjectStructureRagService}.java`, `src/main/resources/application.properties`,
+  테스트 4개 파일(생성자 인자 반영).
+- **로컬 스모크 인프라(32차) 자체는 배선 문제 없음이 이번 실측으로 확인됨** — `docker-compose.
+  local-smoke.override.yml`/`build.gradle`(`@Tag("manual")`/`localSmokeTest`)은 무수정.
+
+**남은 것**: (1) 이 브랜치가 이제 TASK-006(`CodeContentRagService` 골격) 착수 가능한 상태 —
+문서 수/길이가 더 커질 B안에서도 이번에 올린 10MB 버퍼 한도가 충분한지는 실측이 쌓이면서 계속
+확인 필요. (2) `docker-compose.local-smoke.override.yml`의 `11434:11434` 호스트 포트 하드코딩이
+네이티브 Ollama를 설치한 개발자와 충돌할 수 있음 — 포트를 바꾸려면 `localSmokeTest` Gradle
+태스크가 `-DragSmoke.*` 시스템 프로퍼티를 포크된 테스트 JVM으로 forwarding하지 않는 문제도 같이
+고쳐야 함(`build.gradle`에 `systemProperties = System.properties` 계열 설정 없음, 발견만 하고
+이번 범위에서는 수정하지 않음 — 우선순위 낮음, 기본 포트로도 이번 실측은 성공했으므로).
+
+## RAG "B안" 코드 내용 청킹 — TASK-006~010(`CodeContentRagService` 골격+통합+검증+정리, B안 완성) (36차, 2026-08-24)
+
+**번호 안내**: 35차(같은 브랜치, WebClient 버퍼 한도 버그 수정) 직후 이어서 진행. 35차 세션과 이번
+세션 사이에 워킹트리를 공유하는 별도 세션이 동시에 존재했을 가능성이 있어(사용자 안내), 착수 전
+`git status`/`git diff`로 최신 상태를 먼저 확인했고 35차의 변경분(모두 커밋 전 상태)을 그대로 둔 채
+이어서 작업했다 — 겹치는 파일 수정은 없었음(35차는 `ChromaClient`/`OpenAiCompatibleEmbeddingClient`/
+`ProjectStructureRagService`만 건드렸고, 이번 작업은 신규 `CodeContentRagService` 및 그 호출부만
+건드림).
+
+근거: `analyzer-plan/docs/chat/etc/2026-08-21-rag-code-content-indexing-formal-req-and-design.md`
+(PM 정식 REQ-1~9 + PL 기술설계 전문). TASK-001~005(청커 4종+라우터)는 33차, JsChunker 버그수정은
+34차에서 이미 완료 — 이번 세션에서 TASK-006(`CodeContentRagService` 골격)부터 TASK-010(정리)까지
+전부 진행해 **B안 Task 10개가 모두 완성**됐다.
+
+### TASK-006 — `CodeContentRagService`(신규, `com.legacy.rag`)
+- 공개 메서드 3개: `indexProject(sourceFolderPath, List<Path> files)` / `querySimilar(sourceFolderPath,
+  queryText, topK)` / `cleanup(sourceFolderPath)`. `collectionKey=sourceFolderPath` — A안
+  (`ProjectStructureRagService`)의 세션 키 관례를 그대로 재사용.
+- **REQ-5 no-op**: A안은 `@ConditionalOnProperty`로 빈 자체가 없어지는 방식이지만, 이 서비스는
+  세션 시작/종료 훅과 파일별 분석 프롬프트 조립부 등 호출부가 여러 곳이라 항상 빈으로 등록해두고,
+  내부에서 `ObjectProvider<VectorStoreClient>`/`ObjectProvider<EmbeddingClient>`를
+  `getIfAvailable()`로 선택 주입해 없으면(=`rag.enabled=false`로 그 두 빈 자체가 없음) 모든 공개
+  메서드가 조용히 no-op하도록 설계했다 — 호출부는 이 서비스의 존재 여부를 매번 확인할 필요가 없다.
+  `rag.content.enabled`(기본 false)는 A안의 `rag.enabled`와 별개인 독립 토글.
+- **컬렉션명 sanitize(리스크 §5-1, 신규 발견 이슈 해소)**: `sourceFolderPath`(Windows 경로)를
+  JDK 표준 `MessageDigest`(SHA-256)로 해시한 뒤 앞 16자만 잘라 `"code-" + hash16`로 컬렉션명을
+  만든다 — 신규 의존성 추가 없이 해결(SHA-256은 JDK 표준이라 별도 라이브러리 불필요, 설계 문서
+  예상대로).
+- **`max-index-files` 서킷브레이커**: 색인 대상 파일 수가 이 값(기본 500)을 넘으면 색인 자체를
+  스킵하고 로그만 남긴다.
+- **`query-top-k`/`snippet-max-chars`**: `querySimilar()` 결과 개수(기본 3)·스니펫 길이(기본 500자)
+  상한 — 호출부가 더 큰 값을 요청해도 이 설정값으로 캡해 프롬프트 증가량을 통제한다.
+- **배치 임베딩**: 프로젝트 전체 파일의 청크를 먼저 다 모은 뒤 `EmbeddingClient.embedBatch()`
+  **한 번**으로 임베딩한다(23차 세션 교훈 재사용 — 파일 수만큼 왕복하지 않음). 저장(upsert)은
+  파일 단위로 나눠 호출해 한 파일의 실패가 다른 파일까지 막지 않게 했다.
+- **REQ-8 반응형 차원방어**: `VectorStoreClient`에 차원 지정 기능이 없어(08-20 합의 4메서드뿐)
+  완전한 사전차단은 불가 — 같은 `indexProject()` 호출 안에서 **첫 upsert 실패**를 감지하면
+  해당 컬렉션을 `deleteCollection()` 후 `createOrGetCollection()`으로 재생성해 **같은 파일의
+  upsert를 1회만 재시도**한다. 재시도도 실패하면 예외를 삼키고 로그만 남긴 뒤 그 파일만 스킵(다음
+  파일은 계속 색인) — purge 시도 자체는 한 번의 `indexProject()` 호출에서 최초 1회만 하도록
+  플래그로 제한(반복 실패 시 매번 purge하면 오히려 낭비이고, 차원 문제가 아닌 다른 근본 원인일
+  가능성이 높다고 판단).
+- **querySimilar 4-파라미터 오버로드(신규, `public`)**: `querySimilar(sourceFolderPath, queryText,
+  topK, excludeFilePath)` — `excludeFilePath`가 주어지면 Chroma `where` 절에
+  `{"filePath": {"$ne": excludeFilePath}}`를 실어 자기 자신의 코드를 "유사한 기존 코드"로
+  되돌려주는 무의미한 결과를 줄인다. 설계 문서가 명시한 3-파라미터 공개 시그니처는 그대로 유지하고
+  (내부적으로 이 오버로드를 `excludeFilePath=null`로 위임), TASK-007/008 통합 지점에서만
+  4-파라미터 버전을 직접 사용한다.
+- **재색인 가드**: 같은 `sourceFolderPath`로 이미 색인이 끝나 있으면(재개 분석 등으로 중복 호출)
+  다시 색인하지 않는다.
+
+### TASK-007/008 — 통합(병렬 가능 지시대로 두 지점 함께 진행)
+- **세션 라이프사이클 훅 재사용**: 완전히 새 엔드포인트/스레드를 만들지 않고 `MainApiController`의
+  기존 지점을 그대로 재사용했다.
+  - `runAnalysis()`: `collectFileList()` 직후(파일 목록이 확정된 시점)에
+    `codeContentRagService.indexProject(sourceRootPath.toString(), fileList)` 호출 추가.
+    `sourceRootPath.toString()`은 이후 `analyzeFile()`이 `analyzeCodeWithClaude()`에 넘기는
+    `sourceFolderPath`와 항상 동일한 값(카피 모드 여부와 무관 — 기존 코드 확인 결과 A안의
+    `setModel`/`sessionSystemPrompts`와 같은 세션 키 관례)이라 `querySimilar()`가 같은 컬렉션을
+    정확히 찾는다.
+  - `runAnalysis()`의 기존 `finally` 블록(`clearSessionSystemPrompt`를 호출하던 지점, FAILED·
+    COMPLETED에서만 실행되고 PAUSED는 재개 시 재사용하려고 건너뛰는 기존 패턴)에
+    `codeContentRagService.cleanup(...)` 호출을 나란히 추가 — 완전히 새 정리 지점을 만들지
+    않고 CLAUDE.md 세션 프롬프트 정리와 동일한 시점·조건을 그대로 재사용했다.
+  - `runAnalysisResume()`(PAUSED 세션 재개)에도 대칭으로 `indexProject`/`cleanup` 호출을
+    추가했다 — 정상 재개(같은 JVM)라면 `CodeContentRagService`의 재색인 가드 덕에 사실상
+    no-op이고, 앱 재시작으로 메모리 상태가 사라진 경우에만 재개 시점의 파일 목록만큼이라도
+    다시 색인해 완전한 커버리지 손실을 피한다(재개 파일 목록이 최초 전체 목록보다 적을 수 있는
+    한계는 인지하고 있음 — 리스크로 아래에 남김).
+  - `MainApiController` 생성자에 `CodeContentRagService`를 일반 필수 의존성으로 추가했다
+    (A안의 `ragServiceProvider`와 달리 `ObjectProvider` 불필요 — 서비스 자체가 항상 빈으로
+    등록되고 내부에서 no-op을 스스로 판단하기 때문).
+- **최소 실사용 시나리오(사람이 확정한 범위)**: `ClaudeServiceImpl.analyzeCodeWithClaude()`에
+  `codeContentRagService` 협력자를 생성자 주입으로 추가하고, `userContent` 조립부(JSON 응답 포맷
+  지시문 앞)에 `buildSimilarCodeContext()` 헬퍼로 만든 참고 섹션을 덧붙였다. 현재 분석 중인
+  파일의 소스코드를 쿼리로 `querySimilar(sourceFolderPath, sourceCode, 3, fileName)`(자기 자신
+  제외)을 호출해, top-3·500자 캡이 이미 적용된 스니펫을 "[참고: 같은 프로젝트의 유사한 기존 코드
+  패턴]" 섹션으로 추가한다. `codeContentRagService`가 null이거나(구버전 테스트 등) 예외를
+  던지거나 빈 리스트를 반환하면 빈 문자열이라 `userContent`가 기존과 100% 동일 — 기존 재시도/
+  에러분류 등 `analyzeCodeWithClaude()`의 나머지 로직은 무수정.
+- **하위 호환 테스트 갱신**: `ClaudeServiceImpl`/`MainApiController` 생성자 시그니처가 각각
+  1개 파라미터씩 늘어나 기존 테스트 7개(`ClaudeServiceImpl*Test` 5개, `MainApiController*Test`
+  2개)의 `new ClaudeServiceImpl(...)`/`new MainApiController(...)` 호출부에 `null` 인자를
+  추가했다 — 두 서비스 모두 `null`이 들어와도(구버전 테스트가 이 신규 협력자를 모른 채 호출)
+  사용 지점에서 null 체크로 안전하게 동작함을 이번에 추가한 신규 테스트로 별도 확인했다.
+
+### TASK-009 — 검증
+- `CodeContentRagServiceTest`(신규, `com.legacy.rag`, 14개 테스트) — 실제 `ChunkerRouter`(청킹
+  로직은 목킹하지 않음, 정확성은 TASK-001~005 테스트가 이미 검증)와 Mockito로 만든
+  `VectorStoreClient`/`EmbeddingClient`/`ObjectProvider` 목으로 검증: REQ-5 no-op(토글 꺼짐/
+  인프라 없음 2가지 경로), `max-index-files` 초과 스킵, 정상 색인→쿼리 흐름, 미색인 세션의 안전한
+  빈 결과, `query-top-k` 캡핑, `snippet-max-chars` 캡핑, **REQ-8 반응형 복구**(첫 upsert 실패→
+  purge→재시도 성공 / 재시도도 실패 시 해당 파일만 스킵하고 다른 파일은 계속 색인), 재색인 가드,
+  cleanup 흐름 2종.
+- **리스크 §5-3(Chroma `where` `$ne` 연산자)**: 실서버 동작이 이 프로젝트에서 검증된 적 없다는
+  점을 테스트 코드 주석에 명시하고, `VectorStoreClient.query()`에 실제로 전달되는 `where` 절이
+  `{"filePath": {"$ne": excludeFilePath}}` 형태로 구성되는지만 Mockito 목킹 레벨로 고정했다
+  (`excludeFilePath가_주어지면_ne_연산자로_where절을_구성한다_실서버_동작은_미검증`). **실서버
+  검증은 이번 세션에서 하지 못했다 — 명시적으로 미검증으로 남긴다**(Docker 없는 환경 제약은
+  32차와 동일하게 적용됨 가능성이 있으나, 이번 세션은 Docker 상태를 별도로 확인하지 않고 시간
+  budget상 유닛 테스트 수준에서 마무리했다).
+- `ClaudeServiceImplSimilarCodeContextTest`(신규, `com.legacy.analysis`, 5개 테스트) —
+  `analyzeCodeWithClaude()` 통합 지점: 검색결과 있음(섹션 추가+스니펫 반영)/없음(기존과 동일)/
+  협력자 null(예외 없음)/`querySimilar` 예외(예외 없음)/`sourceFolderPath` 없음(호출 자체 생략,
+  `verifyNoInteractions`) 5가지 경로.
+- `./gradlew clean test` — **326개 전부 GREEN**(35차까지의 기존 스위트 307개 + 이번 세션 신규
+  19개, 회귀 없음).
+
+### TASK-010 — 정리
+- `application.properties`에 `rag.content.enabled`/`max-index-files`/`query-top-k`/
+  `snippet-max-chars` 4개 신규 프로퍼티를 A안의 `rag.*` 배선 스타일 그대로 추가(환경변수
+  `RAG_CONTENT_*`, 기본값은 REQ 설계 문서 예시 그대로).
+- `docker-compose.yml`의 `app` 서비스 `environment` 블록에 위 4개 환경변수를 `RAG_ENABLED` 등과
+  같은 스타일로 추가.
+- `.env.lite.example`은 8-19차 이후 scenario_1 hold 상태 소관이라 애매하다고 판단해 **건드리지
+  않았다** — 필요해지면 scenario_1 담당 세션이 다른 `RAG_CONTENT_*` 값들과 함께 일괄 반영하는
+  게 안전하다고 보고 후속 과제로 남긴다.
+
+### 산출물 정리
+- 신규: `src/main/java/com/legacy/rag/CodeContentRagService.java`,
+  `src/test/java/com/legacy/rag/CodeContentRagServiceTest.java`,
+  `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextTest.java`,
+  `docs/advancement/4.tested/rag_content_chunking_b_test.md`.
+- 수정: `src/main/java/com/legacy/analysis/{MainApiController,ClaudeServiceImpl}.java`(생성자에
+  `CodeContentRagService` 추가 + 훅 배선), `src/main/resources/application.properties`,
+  `docker-compose.yml`, 기존 테스트 7개(생성자 인자 `null` 추가).
+
+### 리스크/후속 과제(설계 문서 §5 대비 이번 세션 결론)
+1. §5-1(컬렉션명 sanitize) — **해소**(SHA-256 슬러그).
+2. §5-2(REQ-8 사전차단 불가) — **반응형 복구로 구현 완료**. 완전한 사전차단을 원하면
+   `VectorStoreClient` 인터페이스에 차원 파라미터 추가가 필요하다는 기존 제안은 여전히 유효
+   (이번 범위 밖).
+3. §5-3(Chroma `$ne` 실동작) — 유닛 목킹 레벨로만 고정, **실서버 미검증**으로 남음. 다음에 Docker
+   가용한 세션이 있으면 `querySimilar(..., excludeFilePath)`가 실제로 자기 파일을 제외하는지
+   실측 필요.
+4. §5-4(`.vue` 폴백 상시 경유) — 33차에서 이미 알려진 리스크, 이번 범위에서 미변경.
+5. §5-5(대형 프로젝트 `indexProject` 동기 실행 지연) — `max-index-files`로 최악만 방어, 진짜
+   해결(비동기화)은 여전히 별도 최적화 라운드 필요.
+6. §5-6(청크 크기 캡이 토크나이저 실측 아닌 문자수 추정) — 33차와 동일하게 미해소.
+7. §5-7(세션 비정상 종료 시 컬렉션 누수) — A안과 동일한 기존 구조적 한계, 새로 생기지 않음.
+   다만 `runAnalysisResume()`이 재개 시 파일 목록이 최초보다 적을 수 있어 재색인 커버리지가
+   완전하지 않을 가능성은 이번에 새로 생긴 미세 리스크로 추가 기록.
+8. §5-8(세션 내부 검색으로 범위 한정) — 설계대로, 변경 없음.
+9. **신규 제안**: `rag.http.max-in-memory-bytes`(35차 도입, 기본 10MB)가 B안의 더 큰 문서
+   페이로드에서도 충분한지 실측 필요 — 35차 handOff에도 동일하게 남겨진 항목.
+
+**RAG "B안"(코드 내용 청킹, TASK-001~010)이 이번 세션으로 전부 완성됐다.** QA 검증 요청함(다음
+단계) — 이 세션은 서브에이전트 호출 도구가 없어 검증 자체는 다음 세션/사람이 진행해야 한다.
+
+## RAG "B안" 자기제외(`$ne` where절) 경로 형식 불일치 버그 수정 (37차, 2026-08-25)
+
+**배경**: 36차 직후 QA 세션(2026-08-25)이 실컨테이너(Ollama+Chroma) 대상 실측 검증을 진행하며
+`analyzer-plan/docs/pipeline/bug-suspects.md`에 신규 버그를 등록했다(상세 근거:
+`analyzer-plan/docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md`).
+사용자가 즉시 수정을 승인해 이 세션에서 바로 처리했다.
+
+### 버그 원인 — 조사 결과
+- `CodeContentRagService.indexProject()` → `collectFileChunks()`가 각 청크 메타데이터
+  `filePath`에 항상 `file.toString()`(호출부가 넘긴 `Path`의 원본 문자열 표현, 사실상 전체
+  경로)을 저장한다.
+- 반면 `ClaudeServiceImpl.buildSimilarCodeContext()`(舊 3-인자 `analyzeCodeWithClaude` 내부에서만
+  호출됨)는 `excludeFilePath`로 `fileName`(파일명만)을 그대로 넘겼다. 이 `fileName`은
+  `MainApiController.analyzeFile()` 1944행 근처의 `filePath.getFileName().toString()`에서 온
+  값 — **정작 그 시점에 `analyzeFile()`은 전체 경로를 가진 `filePath`(Path) 자체를 이미 들고
+  있었다**(같은 `fileList`를 `indexProject()`에도 그대로 넘긴 것과 동일 객체). 즉 전체 경로
+  정보 자체가 없어서가 아니라, 있는데도 안 넘기고 있었다.
+- 두 값의 형식(전체 경로 vs 파일명만)이 항상 달라 Chroma `$ne` where절이 결코 매칭되지 않았다
+  (`$ne` 연산자 자체는 QA 실측으로 정상 동작 확인됨 — 순수 형식 불일치 버그).
+
+### 수정 방향 — 호출부가 이미 가진 전체 경로를 그대로 넘기도록 변경(색인 형식은 무변경)
+QA 지시 원칙대로 색인 로직(`indexProject`)은 건드리지 않고(기존 색인된 컬렉션과의 정합성 유지),
+호출부가 이미 갖고 있던 전체 경로 정보를 새 매개변수로 명시적으로 전달하는 방향으로 수정했다.
+
+- `ClaudeService` 인터페이스에 4-인자 오버로드 신설:
+  `analyzeCodeWithClaude(String sourceCode, String fileName, String sourceFolderPath, String fullFilePath)`.
+  `fullFilePath`가 색인 시 저장된 것과 동일한 형식(전체 경로)이어야 자기제외가 실제로 동작한다.
+  하위호환을 위해 **default 메서드**로 선언해(3-인자로 위임) 이 메서드를 재정의하지 않는 다른
+  구현체(테스트의 익명 클래스 등)를 깨지 않게 했다.
+- `ClaudeServiceImpl`: 기존 3-인자 `analyzeCodeWithClaude`는 내부적으로 4-인자 버전에
+  `fullFilePath=fileName`(기존과 동일한, 형식 불일치가 있는 값)을 넘기도록 위임 — **README
+  생성·기존 테스트 호출부의 동작은 100% 그대로 유지**(회귀 없음, 의도적으로 버그를 남겨둔
+  하위호환 경로). 4-인자 버전이 실제 로직을 담당하며 `buildSimilarCodeContext(fullFilePath, ...)`
+  를 호출해 `excludeFilePath`로 `fullFilePath`를 그대로 전달한다.
+- `MainApiController.analyzeFile()`: 청크 미분할 직접호출(舊 1964행)과 `analyzeFileInChunks()`
+  경유 호출(舊 1914행, 청크 단위 `chunkDesc`는 표시용으로 그대로 두고 자기제외 식별자만
+  별도로 `fullFilePath` 매개변수 추가) 두 지점 모두 `filePath.toString()`(전체 경로, `indexProject`에
+  넘긴 것과 동일 `Path` 객체이므로 문자열이 정확히 일치)을 4-인자 오버로드의 `fullFilePath`로
+  넘기도록 수정. README 생성 호출(舊 1683행)은 `analyzeCodeWithClaude`가 README 분기에서
+  `buildSimilarCodeContext` 호출 자체를 타지 않아(파일명이 README.md/README_AI_SUMMARY.md면
+  조기 반환) 애초에 자기제외와 무관 — 수정하지 않음.
+
+### 테스트
+- `ClaudeServiceImplSimilarCodeContextTest`(Mockito, 기존 5개 + 신규 3개 = 8개 전부 통과):
+  4-인자 오버로드가 `fullFilePath`를 `excludeFilePath`로 그대로 `querySimilar`에 전달하는지,
+  3-인자 오버로드는 기존처럼 `fileName`을 대신 쓰는 하위호환이 유지되는지, `fullFilePath=null`이면
+  `excludeFilePath` 없이 호출되는지 3가지를 각각 고정.
+- **실컨테이너 검증(Docker 가용 확인 후 진행, `docker ps`로 ollama/chroma/app/db 4개 컨테이너
+  healthy 상태 확인)**: 신규
+  `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextLocalSmokeTest.java`
+  (`@Tag("manual")`, `./gradlew localSmokeTest`로만 실행)를 작성해 `com.legacy.rag` 패키지
+  실파일(`CodeChunk.java`)을 실제 색인한 뒤, production과 동일한 호출 형태(4-인자,
+  `filePath.toString()`)로 `ClaudeServiceImpl.analyzeCodeWithClaude()`를 호출해 LLM에 실제로
+  전달될 `userContent`의 참고 섹션에서 자기 자신이 제외되는지 end-to-end로 확인 — **PASS**
+  (기존 3-인자 경로는 여전히 자기 포함=true로 남아 하위호환 특성화도 함께 확인). 자기 자신 청크의
+  ground truth는 `ChunkerRouter`가 `com.legacy.rag` package-private이라 이 테스트 패키지
+  (`com.legacy.analysis`)에서 재현할 수 없어, Chroma REST `/get`을
+  `where={"filePath": 전체경로}`로 직접 호출해(`VectorStoreClient` 추상화 우회, 기존
+  `CodeContentRagServiceLocalSmokeTest` 패턴 재사용) 정확히 얻었다 — 첫 시도에서
+  `userContent` 전체(쿼리 원문이 그대로 들어가는 "[소스 코드]:" 섹션 포함)를 기준으로 비교해
+  오탐(자기 자신의 원문이 쿼리 자체에도 있으니 항상 true)이 났던 걸 발견해, "[참고: 같은
+  프로젝트의 유사한 기존 코드 패턴]" 헤딩 이후 구간만 비교하도록 고쳐 실제 통과를 확인했다.
+- `./gradlew clean test` 전체 재실행 — 41개 테스트 클래스 전부 GREEN(0 실패, 0 에러), 신규
+  smoke 테스트는 `@Tag("manual")`로 기본 `test`에서 정상 제외됨을 재확인.
+
+### 산출물 정리
+- 수정: `src/main/java/com/legacy/analysis/ClaudeService.java`(4-인자 default 메서드 신설),
+  `src/main/java/com/legacy/analysis/ClaudeServiceImpl.java`(4-인자 실구현 + 3-인자 위임),
+  `src/main/java/com/legacy/analysis/MainApiController.java`(`analyzeFile`/`analyzeFileInChunks`
+  두 호출 지점에 `fullFilePath` 전달).
+- 신규: `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextLocalSmokeTest.java`.
+- 수정(테스트): `src/test/java/com/legacy/analysis/ClaudeServiceImplSimilarCodeContextTest.java`
+  (신규 3개 케이스 추가, 기존 5개는 무변경).
+- `analyzer-plan/docs/pipeline/bug-suspects.md`는 이 세션에서 건드리지 않음(QA 소관, 지시대로
+  손대지 않음) — QA 검증 요청 필요.
+
+### 리스크/후속 과제
+- 3-인자 `analyzeCodeWithClaude`(README 생성 등)는 여전히 자기제외가 형식 불일치로 동작하지
+  않는 하위호환 경로로 **의도적으로 남겨뒀다** — README 생성은 애초에 이 로직을 타지 않아
+  실질 영향 없음. 향후 3-인자 호출부가 새로 생기고 그 지점도 자기제외가 필요해지면 4-인자
+  오버로드로 전환해야 한다는 점을 기록해둔다.
+- `analyzeFileInChunks()`의 청크별 `chunkDesc`(프롬프트 표시용, "파일명 (청크 N/M)")는 이번
+  수정과 무관하게 그대로 두었다 — 자기제외 식별자(`fullFilePath`)만 별도로 분리해 넘기므로
+  표시용 문자열 형식은 영향받지 않는다.
+
+**QA 검증 완료 (같은 날, 2026-08-25)** — Mockito 회귀 테스트 3건 + 신규 실컨테이너 테스트
+(`ClaudeServiceImplSimilarCodeContextLocalSmokeTest`, `@Tag("manual")`)를 QA가 직접 재실행해
+Pass 확인. 4-인자(전체경로) 경로는 자기제외 성공, 3-인자(파일명만) 하위호환 경로는 의도대로
+여전히 자기 포함 — 두 경로 모두 예상대로 동작. `./gradlew clean test` 41개 클래스 전부 GREEN
+재확인. `analyzer-plan/docs/pipeline/bug-suspects.md`의 해당 항목도 "수정 완료"로 갱신됨. 근거:
+`analyzer-plan/docs/chat/qa/2026-08-25-rag-content-chunking-self-exclusion-fix-verification.md`.
+
+**이로써 RAG "B안"(TASK-001~010, 33~37차)이 청킹 계층부터 실컨테이너 자기제외 버그 수정까지
+전 구간 QA Pass로 완료됐다.** 상세 검증 현황은 `docs/advancement/4.tested/rag_content_chunking_b_test.md`
+참고(이 세션에서 함께 현행화함).
+
+### 브랜치 현황 정리 (2026-08-25, 문서 현행화)
+이 시점 기준 `master`(26차)에서 갈라져 나간 3개 작업 브랜치의 관계와 완료 상태:
+
+| 브랜치 | 분기 기준 | handOff 차수 | 상태 |
+|---|---|---|---|
+| `feature/2026-08-21-llm-model-db-failover` | master 26차 | 27~31차 | Phase 0~4 + 보안버그 2건 QA Pass. Phase 5~7(컨펌 모달 프론트/시드데이터/통합검증) 남음 |
+| `feature/2026-08-24-vectorstore-client-local-rag-verification` | master 26차 | 32차 | QA Pass, 완료 |
+| `feature/2026-08-24-rag-content-chunking` | 위 vectorstore-client 브랜치 | 33~37차 | QA Pass, 완료(RAG "B안" 전체) |
+
+세 브랜치 모두 아직 `master`에 병합되지 않았다 — `master`의 `handOff.md`는 26차에서 멈춰 있고
+각 브랜치가 그 이후 독립적으로 번호를 이어간 것이라, 지금 이 표가 실제 브랜치 상태를 알 수 있는
+유일한 소스다(병합 시점에 `master` 기준으로 handOff 차수를 다시 정리할 필요가 있음 — 병합 여부/
+순서는 사용자 결정 사항, 이 세션에서 임의로 진행하지 않음).

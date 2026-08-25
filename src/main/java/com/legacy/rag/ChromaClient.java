@@ -7,6 +7,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
@@ -26,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Component
 @ConditionalOnProperty(name = "rag.enabled", havingValue = "true")
-public class ChromaClient {
+public class ChromaClient implements VectorStoreClient {
 
     private static final Logger log = LoggerFactory.getLogger(ChromaClient.class);
 
@@ -41,11 +42,19 @@ public class ChromaClient {
     public ChromaClient(
             @Value("${rag.chroma.url}") String baseUrl,
             @Value("${rag.chroma.tenant:default_tenant}") String tenant,
-            @Value("${rag.chroma.database:default_database}") String database) {
+            @Value("${rag.chroma.database:default_database}") String database,
+            @Value("${rag.http.max-in-memory-bytes:10485760}") int maxInMemoryBytes) {
         this.tenant = tenant;
         this.database = database;
+        // OpenAiCompatibleEmbeddingClient와 같은 이유(Spring WebClient 기본 응답 버퍼 한도
+        // 256KB 초과 방지) — query()/upsert() 응답에도 임베딩 값이 실려 돌아올 수 있어 동일하게
+        // 상향한다. 지금 당장 이 클라이언트에서 재현된 장애는 아니지만 같은 근본 원인이라 함께 적용.
+        ExchangeStrategies strategies = ExchangeStrategies.builder()
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(maxInMemoryBytes))
+                .build();
         this.webClient = WebClient.builder()
                 .baseUrl(baseUrl)
+                .exchangeStrategies(strategies)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
     }
@@ -58,6 +67,7 @@ public class ChromaClient {
      * 이름으로 컬렉션을 가져오거나(없으면) 생성하고, id를 반환한다. 결과는 캐시되므로 같은
      * 이름으로 다시 호출해도 원격 호출 없이 즉시 반환된다.
      */
+    @Override
     public String createOrGetCollection(String name) {
         String cached = collectionIdCache.get(name);
         if (cached != null) return cached;
@@ -74,6 +84,7 @@ public class ChromaClient {
     }
 
     /** ids/embeddings/documents/metadatas는 모두 같은 길이의 병렬 리스트여야 한다. */
+    @Override
     public void upsert(String collectionId, List<String> ids, List<List<Double>> embeddings,
             List<String> documents, List<Map<String, Object>> metadatas) {
         if (ids.isEmpty()) return;
@@ -92,6 +103,7 @@ public class ChromaClient {
      * @return 유사도 상위 topK개 document 텍스트(쿼리 1개 기준 — Chroma는 쿼리 배치를 지원하지만
      *         이 서비스는 항상 쿼리 1개씩만 보내므로 결과의 첫 번째 묶음만 사용한다)
      */
+    @Override
     public List<String> query(String collectionId, List<Double> queryEmbedding, int topK, Map<String, Object> where) {
         Map<String, Object> body = new HashMap<>();
         body.put("query_embeddings", List.of(queryEmbedding));
@@ -116,6 +128,7 @@ public class ChromaClient {
      * 재현으로 확인된 동작이라 여기도 이름을 그대로 받는다. 호출부(`createOrGetCollection`을
      * 호출할 때 쓴 이름)를 그대로 넘겨야 한다.
      */
+    @Override
     public void deleteCollection(String name) {
         try {
             webClient.delete()

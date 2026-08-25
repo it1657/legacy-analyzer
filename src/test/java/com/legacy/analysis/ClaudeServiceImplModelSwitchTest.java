@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 class ClaudeServiceImplModelSwitchTest {
 
   private ClaudeServiceImpl newService(String llmProvider, String llmLocalModel, String apiModel) throws Exception {
-    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, null);
+    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, null, null);
     setField(service, "llmProvider", llmProvider);
     setField(service, "llmLocalModel", llmLocalModel);
     setField(service, "apiModel", apiModel);

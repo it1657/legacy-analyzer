@@ -63,6 +63,13 @@ services:
       RAG_ENABLED: ${RAG_ENABLED:-false}
       RAG_CHROMA_URL: ${RAG_CHROMA_URL:-http://chroma:8000}
       RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-nomic-embed-text}
+      # RAG "B안"(코드 내용 청킹/인덱싱, CodeContentRagService) 독립 스위치 — RAG_ENABLED와는
+      # 별개 토글이라 인프라(RAG_ENABLED=true)가 갖춰진 환경에서도 이 기능만 따로 끄고 켤 수 있다.
+      # 기본 false(꺼짐)라 이 블록이 배포돼도 기존 동작과 100% 동일.
+      RAG_CONTENT_ENABLED: ${RAG_CONTENT_ENABLED:-false}
+      RAG_CONTENT_MAX_INDEX_FILES: ${RAG_CONTENT_MAX_INDEX_FILES:-500}
+      RAG_CONTENT_QUERY_TOP_K: ${RAG_CONTENT_QUERY_TOP_K:-3}
+      RAG_CONTENT_SNIPPET_MAX_CHARS: ${RAG_CONTENT_SNIPPET_MAX_CHARS:-500}
       TZ: Asia/Seoul
     ports:
       - "8803:8803"

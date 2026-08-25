@@ -60,6 +60,10 @@ public class MainApiController {
   // (일반 생성자 주입이면 빈이 없을 때 컨텍스트 기동 자체가 실패함) — appendJavaStructure()에서
   // getIfAvailable()로 안전하게 사용.
   private final org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider;
+  // RAG "B안"(코드 내용 청킹/인덱싱) — CodeContentRagService는 항상 빈으로 등록되고 내부에서
+  // rag.content.enabled/인프라 유무를 스스로 판단해 no-op하므로(REQ-5), ProjectStructureRagService와
+  // 달리 ObjectProvider 없이 일반 생성자 주입으로 받는다.
+  private final com.legacy.rag.CodeContentRagService codeContentRagService;
 
   @Value("${app.analysis.max-file-size-bytes:524288}")
   private long maxFileSizeBytes;
@@ -96,7 +100,8 @@ public class MainApiController {
       NotificationService notificationService,
       ProjectTypeDetector projectTypeDetector,
       PresentationGeneratorService presentationGeneratorService,
-      org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider) {
+      org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider,
+      com.legacy.rag.CodeContentRagService codeContentRagService) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -109,6 +114,7 @@ public class MainApiController {
     this.projectTypeDetector = projectTypeDetector;
     this.presentationGeneratorService = presentationGeneratorService;
     this.ragServiceProvider = ragServiceProvider;
+    this.codeContentRagService = codeContentRagService;
   }
 
   @GetMapping("/")
@@ -963,6 +969,11 @@ public class MainApiController {
         log.info("[파일 목록 수집] {}개 파일 발견", fileList.size());
         sessionManager.initializeFileList(sessionId, fileList.size());
         session.addRecentLog(String.format("[분석 처리 진행 중] 총 %d개 파일 분석 시작...", fileList.size()));
+
+        // RAG "B안" 코드 내용 색인 — sourceFolderPath는 이후 analyzeFile()이 analyzeCodeWithClaude()에
+        // 넘기는 sourceRootPath.toString()과 항상 동일해야 querySimilar()가 같은 컬렉션을 찾는다.
+        // rag.content.enabled=false거나 인프라가 없으면 내부에서 조용히 no-op(REQ-5).
+        codeContentRagService.indexProject(sourceRootPath.toString(), fileList);
       } catch (Exception e) {
         session.setCurrentPhase("FAILED");
         session.addErrorLog("파일 목록 수집 실패: " + e.getMessage());
@@ -1226,6 +1237,8 @@ public class MainApiController {
       // (sourceRootPath는 try 블록 지역 변수라 여기서 재접근 불가 — 파라미터로 다시 계산)
       if ("FAILED".equals(session.getCurrentPhase()) || "COMPLETED".equals(session.getCurrentPhase())) {
         claudeService.clearSessionSystemPrompt(Path.of(normalizedSourcePath).toString());
+        // RAG "B안" 컬렉션도 같은 세션 종료 시점에 함께 정리한다(PAUSED는 재개 시 재사용하므로 유지).
+        codeContentRagService.cleanup(Path.of(normalizedSourcePath).toString());
       }
       // FAILED 상태가 된 경우 알림 발송 (history가 있을 때만)
       if ("FAILED".equals(session.getCurrentPhase())) {
@@ -1283,6 +1296,11 @@ public class MainApiController {
         }
       }
       claudeService.setSessionSystemPrompt(sourceRootPath.toString(), claudeMdContent);
+
+      // RAG "B안" 코드 내용 색인 — 정상 재개(같은 JVM, PAUSED 유지)라면 최초 분석 시점에 이미
+      // 색인이 끝나 있어 CodeContentRagService 내부 가드로 재색인이 생략된다. 앱 재시작 등으로
+      // 메모리 상태가 사라진 경우에만 이 재개 파일 목록만큼이라도 다시 색인해 완전한 no-op을 피한다.
+      codeContentRagService.indexProject(sourceRootPath.toString(), fileList);
 
       session.addRecentLog(String.format("[재개] %d개 파일 이어서 분석합니다...", fileList.size()));
 
@@ -1460,6 +1478,7 @@ public class MainApiController {
       if ("FAILED".equals(session.getCurrentPhase()) || "COMPLETED".equals(session.getCurrentPhase())) {
         if (session.getSourcePath() != null) {
           claudeService.clearSessionSystemPrompt(Path.of(session.getSourcePath()).toString());
+          codeContentRagService.cleanup(Path.of(session.getSourcePath()).toString());
         }
       }
       // FAILED 상태가 된 경우 이력에 사유를 남기고 알림 발송 (history가 있을 때만)
@@ -1874,7 +1893,7 @@ public class MainApiController {
   }
 
   private String analyzeFileInChunks(String originalCode, String fileName,
-      String sourceRootPath) throws Exception {
+      String sourceRootPath, String fullFilePath) throws Exception {
     String[] lines = originalCode.split("\n", -1);
     StringBuilder finalResult = new StringBuilder();
 
@@ -1892,8 +1911,11 @@ public class MainApiController {
 
       String chunkDesc = String.format("%s (청크 %d/%d)", fileName,
           (chunkIndex / chunkSizeLines) + 1, (lines.length + chunkSizeLines - 1) / chunkSizeLines);
+      // 2026-08-25 버그수정: RAG "B안" 자기제외가 실제로 동작하려면 색인 시 저장한 것과 동일한
+      // 형식(전체 경로)을 넘겨야 한다 — chunkDesc(파일명+청크 표기)는 프롬프트 표시용일 뿐,
+      // 자기제외 식별자로는 fullFilePath(원본 파일 전체 경로)를 그대로 넘긴다.
       String analyzedChunk = claudeService.analyzeCodeWithClaude(
-          chunkContent.toString(), chunkDesc, sourceRootPath);
+          chunkContent.toString(), chunkDesc, sourceRootPath, fullFilePath);
 
       String[] analyzedLines = analyzedChunk.split("\n", -1);
       int skipLines = contextStart < chunkIndex ? (chunkIndex - contextStart + 2) : 0;
@@ -1938,11 +1960,16 @@ public class MainApiController {
       String commentedCode;
       if (fileSize > chunkingThresholdBytes) {
         commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
-            () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString()));
+            () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString(), filePath.toString()));
         log.info("[자동 청크 분할] {} ({}bytes)", filePath.getFileName(), fileSize);
       } else {
+        // 2026-08-25 버그수정: filePath.toString()(전체 경로)를 RAG "B안" 자기제외 식별자로
+        // 함께 넘긴다 — indexProject()가 이 fileList의 동일 Path 객체 기준으로 청크 메타데이터
+        // filePath를 저장하므로(file.toString()), 여기서도 같은 filePath.toString()을 넘겨야
+        // 형식이 정확히 일치해 자기제외가 실제로 동작한다(analyzer-plan
+        // docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md 참고).
         commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
-            () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString()));
+            () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString(), filePath.toString()));
       }
 
       retryHandler.executeWithRetry(sessionId, filePath.toString(), () -> {
