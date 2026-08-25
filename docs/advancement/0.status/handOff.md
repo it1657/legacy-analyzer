@@ -1,4 +1,4 @@
-# 진행 현황 핸드오프 (2026-08-19 기준, 26차 갱신)
+# 진행 현황 핸드오프 (2026-08-21 기준, 27차 갱신)
 
 이 문서는 `legacy-analyzer`를 "Claude API ↔ 로컬/사내 LLM 설정만으로 전환" 가능하게 만드는 작업의 현재까지 진행 상황을 정리한다. 새 세션/다른 담당자가 이어받을 때 이 문서만 읽고 바로 이어갈 수 있도록 작성한다.
 
@@ -358,6 +358,433 @@ GitHub Secrets(`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`) 등록 후 태그 push �
 자세한 논의 경위는 `analyzer-plan` 프로젝트의 `docs/chat/etc/2026-08-19-scenario-1-2-hold-scenario-3-active-decision.md`, `docs/chat/etc/2026-08-19-pgx-qwen3-rag-langchain4j-exploration-plan.md` 참고.
 
 **남은 것**: (1) PGX 계정 sudo/Docker 권한 확인(사용자가 직접), (2) 확인 결과에 맞는 설치 스텝 확정, (3) 설치 방식 확정 후 PM/PL에 방향 전환(독립 샌드박스, RAG 동시 구축) 재확인 검토, (4) scenario_1의 실행 검증 미착수 항목들(총파일 카운터 버그 등)은 보류 상태 그대로 유지 — CoP 리뷰 취합 시점까지 보류.
+
+
+## 모델 목록 DB화(관리자 CRUD) + 크레딧소진 컨펌 기반 failover 착수 — Phase 0~1 완료 (27차, 2026-08-21)
+
+`analyzer-plan` 프로젝트(별도 리드 트랙)에서 PM/PL 협의로 확정한 신규 이니셔티브 착수. 하드코딩된
+모델 드롭다운(하이쿠/소넷/오퍼스)을 관리자가 DB로 CRUD하는 구조로 옮기고, 분석 도중 크레딧
+(결제 잔액) 소진 시 자동전환이 아니라 "자체 LLM으로 진행하시겠습니까?" 컨펌 후 전환하는 기능을
+추가한다. Phase 0~7(17개 task)로 분해된 계획을 이 세션에서 순서대로 진행 중.
+
+**근거 문서**:
+- `analyzer-plan/docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md`
+- `analyzer-plan/docs/chat/etc/2026-08-21-llm-model-min-active-guard-and-handoff.md`
+
+작업 브랜치: `feature/2026-08-21-llm-model-db-failover` (시작 커밋 `5cbe055`, setModel 레이스컨디션
+핫픽스 직후).
+
+### Phase 0 — 엔티티/Resolver 기반 (T1~T4)
+- **T1**: `LlmProvider` enum(`ANTHROPIC`/`LOCAL`) + `LlmModelOption` JPA 엔티티 신설
+  (`com.legacy.analysis.llm`, 테이블 `llm_model_options`). `ddl-auto=update`(기존 설정 그대로)라
+  별도 마이그레이션 스크립트 없이 재기동 시 테이블이 자동 생성된다.
+- **T2**: `LlmModelOptionRepository` 신설(활성 목록/모델키 조회/failover 대상 조회/활성 카운트).
+- **T3**: `AnthropicLlmClient`/`OpenAiCompatibleLlmClient`에서 `@ConditionalOnProperty` 제거 —
+  두 빈이 `llm.provider` 값과 무관하게 항상 함께 등록되도록 변경(세션별 동시 사용 전제).
+- **T4**: `LlmClientResolver` 신설. provider(enum)를 받아 알맞은 `LlmClient` 구현체를 반환한다.
+  테스트 편의를 위해 생성자 파라미터 타입을 구현체가 아닌 `LlmClient` 인터페이스로 두고, 파라미터명을
+  스프링 빈 이름(`anthropicLlmClient`/`openAiCompatibleLlmClient`)과 일치시켜 `@Qualifier` 없이도
+  모호성 없이 주입되게 했다(가짜 LlmClient를 그대로 주입해 실제 HTTP 없이 단위 테스트 가능).
+
+### Phase 1 — Service/CRUD 백엔드 (T5~T8)
+- **T5**: `LlmModelOptionService` 신설(`com.legacy.analysis.llm`). CRUD + 사람이 확정한 두 가지
+  가드를 트랜잭션 안에서 카운트 확인 후 적용: `setActive(id, false)`/`delete(id)`가 활성 모델을
+  0개로 만들면 `IllegalStateException("최소 1개 모델은 활성 상태여야 합니다.")` 거부. `setFailoverTarget`은
+  대상이 비활성이거나 `ANTHROPIC`이면 거부하고, 지정 시 기존에 지정돼 있던 다른 모델은 자동 해제해
+  "정확히 0개 또는 1개"만 유지한다. 패키지를 `com.legacy.analysis.llm`에 둔 이유: 컨트롤러만
+  `com.legacy.admin`에 둬서 기존 `admin → analysis` 의존 방향(역방향 금지)을 그대로 지키기 위함
+  (근거: 위 설계 문서 §4).
+- **T6**: `LlmModelAdminController`(`com.legacy.admin`) 신설 — 관리자 CRUD API 6종
+  (`GET/POST /api/admin/llm-models`, `PUT /{id}`, `PATCH /{id}/active`, `PATCH /{id}/failover-target`,
+  `DELETE /{id}`). 응답은 기존 `AdminController`와 동일하게 `Map<String,Object>` 기반(이 패키지의
+  실제 컨벤션 — 신설 DTO 클래스를 별도로 만들지 않고 기존 스타일을 따름).
+- **T7**(회귀 리스크 최대) — `ClaudeServiceImpl` 리팩터링: 단일 `LlmClient llmClient` 필드를
+  제거하고 `LlmClientResolver`/`LlmModelOptionService`를 주입받도록 생성자 변경. 3개 호출 지점
+  (`analyzeCodeWithClaude`/`generateSessionClaudeMd`/`generateProjectReadmeWithClaude`)을
+  `resolveLlmClient(modelKey).call(...)`로 교체. `resolveLlmClient()`는 전역 local 모드
+  (`!isAnthropicMode()`)면 기존처럼 DB 조회 없이 무조건 로컬 클라이언트로 고정(레이어 A 100% 보존),
+  anthropic 모드(기본값)면 modelKey로 `llm_model_options`를 조회해 provider를 확인한다(DB에 없는
+  모델은 안전하게 기존 기본값 ANTHROPIC 처리). `setModel()`의 유효성 검증도 하드코딩
+  `SUPPORTED_MODELS` 화이트리스트 대신 `llmModelOptionService.isActiveModel(...)`(DB) 기준으로 교체.
+  생성자 시그니처 변경으로 `ClaudeServiceImpl`을 직접 `new`하던 기존 테스트 5개
+  (`ClaudeServiceImplNormalizeCommentTest`/`ModelSwitchTest`/`GenerateClaudeMdTest`/
+  `RoleMergeTest`/`AnalyzeCodeSystemPromptTest`)를 새 생성자에 맞게 갱신(로컬모드 테스트는
+  `LlmClientResolver`로 기존 가짜 LlmClient를 감싸서 그대로 재사용, `ModelSwitchTest`는
+  `LlmModelOptionService`를 Mockito로 목킹).
+- **T8**: `LlmModelOptionServiceTest`(19건, 가드 규칙 전수 검증)/`LlmModelAdminControllerTest`
+  (11건, HTTP 계층 변환 검증) 신규 작성. 기존 `LlmProviderSwitchTest`도 갱신 필요 — T3에서
+  `@ConditionalOnProperty`를 제거하면서 이 테스트의 전제("`llm.provider` 값에 따라 빈이 정확히
+  하나만 뜬다")가 깨져 2건 실패했음을 발견, "두 빈이 항상 공존 + `LlmClientResolver`가 provider
+  값에 맞게 정확히 라우팅"을 검증하도록 재작성해 원래 테스트 목표(설정값만으로 요청 목적지가
+  실제로 바뀐다)를 새 아키텍처 기준으로 그대로 보존.
+- **T7 이후 전체 회귀 테스트 실행**: `./gradlew clean test` — **300건 전부 통과, 실패/에러 0건**
+  (기존 267건 + `LlmProviderSwitchTest` 갱신분 포함 + 신규 Phase 0~1 테스트 33건). 회귀 없음 확인.
+
+**남은 것**: Phase 2(관리자 화면)부터 Phase 7(통합/회귀 검증)까지 계속 진행 예정. 이 세션 안에서
+이어서 진행한다.
+
+### Phase 2 — 관리자 화면 (T9~T10) 완료
+`admin/dashboard.html`에 "LLM 모델 관리" 섹션 신설(기존 사용자 관리 모달/테이블 패턴 재사용,
+이 파일은 index.html/dashboard.js와 달리 HTML+JS가 한 파일에 있어 T9/T10을 한 번에 반영):
+사이드바 nav-item, 목록 테이블(표시명/모델키/provider/노출순서/상태/failover 대상/작업),
+추가·수정 모달(모델 키·provider는 등록 후 불변이라 수정 모드에서 input disabled), Phase 1의
+관리자 CRUD API 6종에 연동하는 JS 8개 함수. 서버가 400으로 거부하는 케이스(최소 1개 활성 모델
+유지, failover 대상은 활성 LOCAL 모델만 등)는 응답 `message`를 그대로 alert에 노출.
+커밋: Java 컴파일 대상이 아닌 템플릿 변경이라 `./gradlew compileJava`로는 검증되지 않음 — 브라우저
+수동 확인은 Phase 7(통합 검증)에서 함께 진행 예정.
+
+**다음 단계**: Phase 3(사용자 드롭다운 DB화, `GET /api/config/llm-models` API 신설 +
+index.html/dashboard.js 하드코딩 제거) 착수 예정.
+
+## 모델 목록 DB화 — Phase 3(사용자 드롭다운 DB화) 완료 (28차, 2026-08-21)
+
+직전 세션(27차)이 API 세션 한도 오류로 중단된 뒤, 사람이 이어서 진행을 요청해 워킹트리 상태를
+`git status`/`git diff`로 먼저 확인함 — 27차 커밋(`7ec533d`) 이후 워킹트리는 clean했고 Phase 3
+관련 코드는 아직 전혀 없었음(index.html 하드코딩 3개 `<option>` 그대로, `GET /api/config/llm-models`
+엔드포인트 미존재) 확인 후 처음부터 이 세션에서 새로 진행.
+
+### 백엔드 — `GET /api/config/llm-models` 신설
+- `MainApiController`에 `LlmModelOptionService` 생성자 주입 추가(12번째 파라미터 — 기존 11개
+  뒤에 추가, 기존 파라미터 순서/의미는 그대로 보존).
+- `GET /api/config/llm-models` 신설: `llmModelOptionService.listActive()`(활성 모델만,
+  `displayOrder` 오름차순 — Repository가 이미 정렬해서 반환하는 기존 계약을 그대로 사용)를
+  `List<Map<String,Object>>`(modelKey/displayName/provider/displayOrder)로 변환해 반환.
+  관리자 CRUD API(`/api/admin/llm-models`, `@PreAuthorize("hasRole('ADMIN')")`)와 달리 이
+  엔드포인트는 인증만 요구하고 관리자 권한은 요구하지 않음(일반 사용자용 조회).
+- **전역 local 모드 처리**: 설계 문서 §3 "전역 local 모드 경로는 그대로 유지" 원칙에 따라 이
+  엔드포인트 자체는 `isAnthropicMode()` 여부와 무관하게 항상 DB 목록을 반환하도록 구현하고, 그
+  대신 프런트(`dashboard.js`)가 `/api/config/llm-provider` 응답의 `provider==='local'`일 때만
+  기존과 동일하게 드롭다운을 "로컬 모델: {model}" 단일 표시로 강제 치환하고, `provider==='anthropic'`
+  일 때만 이 신규 API를 호출하도록 분기했다 — `initLlmProviderConfig()`의 기존 local 분기 코드는
+  전혀 건드리지 않음.
+
+### 프런트엔드
+- `index.html`: 하드코딩된 `<option>` 3개(하이쿠/소넷/오퍼스) 제거, "모델 목록 불러오는 중..."
+  placeholder 1개만 남김.
+- `dashboard.js`:
+  - `populateModelSelectOptions(models)` 신설 — `#modelSelect`를 주어진 목록으로 채움. 기존
+    선택값이 새 목록에도 있으면 유지, 없으면 첫 항목 선택.
+  - `loadAnthropicModelOptions()` 신설 — `GET /api/config/llm-models` 호출해 드롭다운을 채움.
+  - `initLlmProviderConfig()` 수정 — `provider==='anthropic'`이면 `loadAnthropicModelOptions()`
+    호출. `/api/config/llm-provider` 자체가 실패하거나(네트워크 오류/비정상 응답) `llm-models`
+    조회가 실패/빈 배열이면 `FALLBACK_MODEL_OPTIONS`(기존 하드코딩 3개와 동일한 값)로 안전하게
+    폴백 — 관리자가 DB 모델을 전부 비활성화하는 것은 `LlmModelOptionService`가 막지만, 그와
+    별개로 프런트 자체 안전망도 남겨둠.
+  - 분석 완료 결과 패널의 모델 라벨 표시(`showCompletionResult` 내부) — 기존엔
+    `modelDisplayNames` 하드코딩 맵만 사용했으나, 이제 `#modelSelect`의 선택된 `<option>` 텍스트
+    (=DB의 `displayName`)를 우선 사용하고, 옛 하드코딩 모델키가 어딘가 남아있는 경우(예: 과거
+    이력)를 위해 기존 맵을 폴백으로 유지, 최종 폴백은 raw modelKey.
+  - `initLlmProviderConfig()`의 local 분기(레이어 A)와 formData에 modelSelect 값을 담는 기존
+    로직(제출 시 `document.getElementById('modelSelect')?.value`)은 변경 없음 — DB 기반으로
+    채워진 `<option value="{modelKey}">`를 그대로 읽으므로 자연히 맞물림.
+
+### 테스트
+- `MainApiControllerLlmProviderTest`: 생성자 파라미터 12개 → 13개로 늘어난 것에 맞춰
+  `newController()` 헬퍼를 오버로드(`LlmModelOptionService` 목 주입 가능하게)하고, 신규 테스트 2건
+  추가 — `listActive()` 결과를 controller가 순서 그대로/필드 그대로 변환하는지, 빈 목록일 때도
+  깨지지 않는지 검증(Mockito로 `LlmModelOptionService` 목킹, 기존 admin 패키지 관례와 동일).
+- `MainApiControllerDetectExtensionsTest`: 생성자 인자 개수 변경에 맞춰 `null` 1개 추가만 반영
+  (동작 변경 없음).
+- `./gradlew clean test` — **302건 전부 통과, 실패/에러 0건**(기존 300건 + 신규 2건). 회귀 없음
+  확인.
+
+### 리스크/제안 (dev-progress 성격 기록)
+- `MainApiController` 생성자 파라미터가 13개로 늘어남 — 이미 27차 시점에 `LlmClientResolver`
+  도입 등으로 여러 컨트롤러/서비스 생성자가 길어지는 추세였는데, Phase 4(failover 컨펌 백엔드)에서
+  세션 상태 저장이 추가로 필요해지면 한 번 더 늘어날 가능성이 있음. 지금 범위는 아니지만 Phase 4
+  착수 시 생성자 파라미터 객체화(예: 설정 묶음 Bean) 여부를 PL이 판단하면 좋겠다는 제안만 남김
+  (코드로 옮기지 않음).
+- 트랜잭션: 이번 변경은 조회(`listActive()`, 이미 `@Transactional(readOnly = true)`)만 추가했고
+  여러 쓰기 작업이 얽힌 로직은 없어 트랜잭션 관련 리스크 없음.
+
+**남은 것**: Phase 4(failover 컨펌 백엔드) ~ Phase 7(통합/회귀 검증)은 다음 세션 몫. 이 세션은
+Phase 3까지만 범위였음.
+
+## 모델 목록 DB화 — Phase 4(failover 컨펌 백엔드) 완료 (29차, 2026-08-21)
+
+인계 지시(사람 메시지)에 따라 이번 세션은 **Phase 4만** 범위로 진행. Phase 0~3에서 이미 만들어둔
+`LlmModelOptionService`(특히 `getActiveFailoverTarget()` — 이미 구현돼 있어 재사용만 함)/
+`ClaudeServiceImpl.setModel(...)`을 그대로 활용했고, 이번 세션에서 새로 만든 인프라는 없음(설계
+문서 §3-4가 이미 정확히 예견한 대로 기존 PAUSED/`pendingFilePathsJson`/`/api/session/resume` 인프라를
+재사용). 근거 문서: analyzer-plan
+`docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md` §3~§4.
+
+### 1. `SessionState` — 신규 필드/상태값
+- `failoverModelKey`(String, `failover_model_key`)/`failoverConfirmedAt`(LocalDateTime,
+  `failover_confirmed_at`) 컬럼 추가(`ddl-auto=update`라 별도 마이그레이션 스크립트 불필요).
+- `STATUS_AWAITING_FAILOVER_CONFIRM = "AWAITING_FAILOVER_CONFIRM"` 상수 신설 — status/currentPhase
+  두 free-text 필드에 공용으로 쓴다(설계 문서 지시대로 enum화하지 않음, 기존 PAUSED 등과 동일한
+  문자열 컨벤션 유지).
+- `shouldStop()`에 이 상태 인식 추가(`isCancelled || PAUSED(status/currentPhase) ||
+  AWAITING_FAILOVER_CONFIRM(status/currentPhase)`) — 기존 PAUSED 인식은 그대로 보존.
+
+### 2. **기존 버그 수정** — `session.cancel()` 영구화 문제
+`runAnalysis()`/`runAnalysisResume()` 양쪽의 `INSUFFICIENT_CREDITS` 분기에서 `session.cancel()`
+호출을 제거했다(설계 문서 §3이 사전에 지적한 정확한 지점). 이 호출은 `isCancelled`를 영구 true로
+만드는데 이를 되돌리는 코드가 전체 코드베이스에 없어서, 크레딧 충전 후 `/api/session/resume`으로
+재개해도 재개된 스레드의 매 파일이 `shouldStop()`(→ `isCancelled` 체크)에 걸려 즉시 중단되는 버그가
+있었다 — **이번 범위(failover 신규 기능)와 무관하게 존재하던 기존 결함을 함께 고친 것**이며, 새
+기능을 위해 일부러 도입한 변경이 아니다. `creditExhausted` 플래그(latch.await() 이후 분기)만으로도
+"남은 파일 중단 후 PAUSED/컨펌대기 저장" 처리가 이미 충분해 `cancel()` 호출 자체가 애초에
+불필요했다 — 그 외 로그 메시지 문구 정리 외에는 이 두 분기의 다른 로직을 건드리지 않았다(외과적
+수정).
+
+### 3. 크레딧소진 분기 → `handleCreditExhaustedPause(...)` 공통 헬퍼로 통합
+`runAnalysis()`/`runAnalysisResume()` 두 곳에 중복돼 있던 "PAUSED 저장" 블록을 `MainApiController`의
+신규 private 메서드로 합쳤다:
+- `llmModelOptionService.getActiveFailoverTarget()`으로 활성 LOCAL failover 대상이 있는지 확인.
+- **있으면**: `session.setFailoverModelKey(대상 modelKey)`, `session.setStatus(...)`/
+  `setCurrentPhase(...)`를 `AWAITING_FAILOVER_CONFIRM`으로 전이. `AnalysisHistory`(내 분석 이력
+  목록에 노출되는 값)는 의도적으로 기존과 동일하게 `"PAUSED"`로 유지 — 새 상태값을 여기까지
+  전파하면 `my-activity.html`의 `h.status === 'PAUSED'` 분기(이어서 분석 버튼 노출 등, 프런트
+  Phase 5 이전)가 깨지므로, 이번 범위(백엔드만)에서는 세션 쪽 상태만 새 값을 갖고 이력 화면은
+  그대로 "일시정지"로 보이게 둔다.
+- **없으면**(관리자가 아직 failover 대상을 지정하지 않은 배포): 기존과 100% 동일하게 단순 PAUSED로
+  폴백(수동 재개만 가능) — 이 분기는 리팩터링 전 로직을 그대로 옮긴 것이라 동작 변경 없음.
+
+### 4. 신규 API `POST /api/session/failover/confirm`
+- 검증 순서: sessionId 필요 → 세션 존재 → `currentPhase == AWAITING_FAILOVER_CONFIRM` → 세션에
+  `failoverModelKey`가 있는지 → **재개할 pending 파일이 실제로 있는지**(모델 전환 같은 부작용을
+  남기기 전에 먼저 확인 — 아래 "설계 중 발견한 세부사항" 참고).
+- 통과하면 `claudeService.setModel(Path.of(session.getSourcePath()).toString(), failoverModelKey)`로
+  이 세션(소스경로 키)의 이후 LLM 호출을 자체 LLM으로 전환하고(2026-08-20 setModel 레이스컨디션
+  핫픽스의 세션 격리 키 정규화와 동일하게 맞춤), `failoverConfirmedAt`을 기록한 뒤 재개 스레드를
+  기동한다.
+- 재개 스레드 기동 로직은 새로 안 만들고, 기존 `/api/session/resume`의 로직을
+  `resumePendingFilesInThread(session, sessionId)` private 메서드로 추출해 두 엔드포인트가 공유하게
+  했다(설계 문서 §4 "기존 resume 로직 재사용/위임" 지시 그대로 반영) — `resumeSession()`도 이
+  헬퍼를 호출하도록 리팩터링했지만 외부 동작(요청/응답 스키마)은 변경 없음.
+- "아니오"(중단 유지) 케이스는 설계 문서 지시대로 별도 API를 만들지 않음 — `AWAITING_FAILOVER_CONFIRM`
+  상태 그대로 두면 됨.
+- 인증/권한: 기존 `/api/session/pause`·`/api/session/resume`과 동일하게 `Authentication` 파라미터나
+  세션 소유자 검증 없이 `SecurityConfig`의 전역 `.requestMatchers("/api/**").authenticated()`에만
+  의존한다(코드로 직접 확인 — 기존 pause/resume도 이 방식이라 신규 API만 다르게 갈 이유가 없음).
+
+### 설계 중 발견한 세부사항 (원 설계에 없던 결정)
+- `claudeService.setModel(...)`은 세션의 pending 파일이 하나도 없는 비정상 상태(이론상 거의 발생
+  안 하지만)에서도 호출되면 "모델은 바뀌었는데 재개는 실패"라는 애매한 부작용이 남는다. 그래서
+  `resumePendingFilesInThread(...)`가 내부적으로 하는 pending-empty 체크를 `confirmFailover(...)`
+  앞단에서 한 번 더(의도적 중복) 수행해, 실패 응답일 때는 모델 전환/컨펌시각 기록이 전혀 없었던
+  것처럼 부작용 없이 거부하도록 했다.
+- `GET /api/analysis/status/{sessionId}`(폴링 엔드포인트)의 `completed` 플래그 계산에
+  `AWAITING_FAILOVER_CONFIRM`을 **의도적으로 추가하지 않았다.** 처음엔 PAUSED와 동일하게 넣으려
+  했으나, 현재 `dashboard.js`의 폴링 로직(`startPolling()`)이 `completed===true`를 받으면
+  `phase==='PAUSED'`/`'CANCELLED'`가 아닌 한 무조건 `handleAnalysisCompletion()`(정상 완료 처리 —
+  write-back까지 트리거)으로 빠지는 구조라, 그대로 뒀다면 컨펌 대기 상태를 "분석 완료"로 오인하는
+  실질적 회귀가 생겼을 것이다(발견 후 되돌림). Phase 5(프런트 컨펌 모달)에서 `dashboard.js`에
+  `AWAITING_FAILOVER_CONFIRM` 전용 분기를 추가하는 시점에 이 플래그도 함께 넣어야 한다 — **Phase 5
+  착수 시 필수 확인 항목**으로 남김.
+
+### 테스트
+- `SessionStateFailoverTest`(7건) — 신규 필드 기본값/getter-setter, `shouldStop()`이
+  `AWAITING_FAILOVER_CONFIRM`을 status/currentPhase 양쪽에서 인식하는지, 기존 PAUSED/isCancelled
+  인식이 그대로인지 검증.
+- `MainApiControllerFailoverConfirmTest`(8건, 기존 리플렉션+Mockito 패턴 재사용) —
+  `handleCreditExhaustedPause`가 failover 대상 유무에 따라 올바르게 분기하는지(대상 있으면
+  AWAITING_FAILOVER_CONFIRM 전이 + AnalysisHistory는 PAUSED 유지, 없으면 기존과 동일한 단순 PAUSED
+  폴백 — `session.setStatus(...)`를 호출하지 않는 기존 동작까지 회귀 확인), `confirmFailover`의
+  상태검증(세션 없음/상태 불일치/모델키 없음/pending 없음) 4종 실패 케이스와 정상 케이스(모델 전환
+  호출 인자, `failoverConfirmedAt` 기록, `ANALYZING`/`IN_PROGRESS` 전이) 검증.
+- `./gradlew clean test` — **317건 전부 통과, 실패/에러 0건**(기존 302건 + 신규 15건). 회귀 없음
+  확인. `session.cancel()` 제거가 기존 "충전 후 이어서 분석" 관련 테스트를 깨지 않았음(애초에 그
+  경로를 직접 실행하는 기존 테스트가 없었음 — `runAnalysis`/`runAnalysisResume`이 스레드풀/파일
+  I/O가 얽힌 private 메서드라 기존에도 단위 테스트 대상이 아니었다).
+
+### 리스크/제안 (dev-progress 성격 기록)
+- `MainApiController` 생성자 파라미터는 이번에 늘지 않았다(13개 그대로) — `handleCreditExhaustedPause`/
+  `resumePendingFilesInThread`/`confirmFailover`가 전부 기존 필드(`sessionManager`,
+  `analysisHistoryRepository`, `llmModelOptionService`, `claudeService`)만 사용해 신규 의존성 주입이
+  필요 없었다. 27차에 남겼던 "생성자 파라미터 객체화 검토" 제안은 이번 범위에서는 실현할 필요가
+  없었음(향후 Phase 5/6/7에서 파라미터가 더 늘어나면 그때 다시 검토 권장).
+- 트랜잭션: 이번 변경은 `LlmModelOptionService.getActiveFailoverTarget()`(이미
+  `@Transactional(readOnly = true)`) 조회만 추가했고, `SessionState`/`AnalysisHistory` 저장은 이
+  프로젝트 관행대로 `@Transactional` 없이 그대로 뒀다(기존 pause/resume/credit-exhausted 경로와
+  동일 — 여러 쓰기가 얽혀 있긴 하지만 원래부터 트랜잭션 없이 동작하던 코드를 그대로 옮긴 것뿐이라
+  이번에 새로 도입한 리스크는 아님).
+- Phase 5 착수 시 반드시 함께 볼 것: (1) 위에서 언급한 `AnalysisStatusDto.completed`/`dashboard.js`
+  폴링 분기, (2) `AnalysisHistory.status`를 계속 `"PAUSED"`로만 남길지, 프런트가 컨펌 모달을 띄우기
+  위해 별도로 `AWAITING_FAILOVER_CONFIRM`을 구분해서 노출해야 하는 필드가 필요할지(현재는
+  `GET /api/analysis/status/{sessionId}`의 `phase`로만 구분 가능하고 `failoverModelKey`를 프런트에
+  내려주는 필드가 아직 없음 — 컨펌 모달에 "자체 LLM(qwen3-32b)으로 진행하시겠습니까?"처럼 모델명을
+  보여주려면 `AnalysisStatusDto`나 별도 조회 API에 이 값을 추가해야 함, 이번 범위에서는 의도적으로
+  보류).
+
+**남은 것**: Phase 5(failover 컨펌 프론트) ~ Phase 7(통합/회귀 검증)은 다음 세션 몫. 이 세션은
+Phase 4까지만 범위였음.
+
+## 보안 버그 수정 — 세션 제어 4개 API 소유자 검증 누락 (30차, 2026-08-21)
+
+QA가 `analyzer-plan/docs/pipeline/bug-suspects.md`에 등록한 인가 우회 버그를 사람이 즉시 수정
+승인해 이번 세션에서 처리했다. 29차 문서(§4 "인증/권한")에 이미 "기존 pause/resume도 세션 소유자
+검증 없이 전역 `.requestMatchers("/api/**").authenticated()`에만 의존한다"고 기록해 뒀던 바로 그
+문제 — **로그인만 하면 sessionId를 아는 임의 사용자가 `/api/session/pause`·`/resume`·`/cancel`·
+`/failover/confirm` 4개 API로 남의 세션을 제어(일시정지/재개/취소/failover 전환)할 수 있었다.**
+
+### 원인 조사 — 기존 컨벤션 확인
+- `MainApiController`가 `new Thread(() -> runAnalysis(...))`로 분석을 별도 스레드에서 돌리기 때문에
+  `SecurityContextHolder`(스레드 로컬)가 자동 전파되지 않는다는 건 이미 1차 세션부터 알려진 제약(위
+  "확정된 주요 설계 결정" 참고)이지만, **이번에 고친 4개 엔드포인트는 전부 스레드 진입 전의 동기
+  컨트롤러 메서드**라 이 제약과 무관 — `startAnalysis`/`uploadAnalysis`처럼 `Authentication
+  authentication` 파라미터를 그대로 주입받아 쓸 수 있었다(실제로 같은 파일의 다른 10개 엔드포인트가
+  이미 이 방식을 쓰고 있었음 — grep으로 확인).
+- 더 결정적으로, **완전히 동일한 문제(세션 소유자 검증)를 이미 겪고 고쳐둔 선례**를 찾았다 —
+  `com.legacy.api.monitoring.MonitoringController`가 세션 상세조회/메트릭/로그/요약/삭제 5개
+  엔드포인트에 `isOwnerOrAdmin(session, authentication)` private 헬퍼(세션 소유자 OR ADMIN 허용,
+  `user.getUserId()`(로그인ID, String) ↔ `session.getUsername()`(String) 비교)를 이미 쓰고 있었다.
+  이번 수정은 **이 기존 패턴을 그대로 재사용**했다(새 패턴을 발명하지 않음 — work order 지시 그대로).
+  ADMIN 예외를 넣을지 여부도 이 선례가 이미 "허용"으로 답을 갖고 있어 별도 논의 없이 그대로 따름.
+- `SessionState.userId`(Long, `user.getSeq()`와 비교 가능)도 존재하지만, 이미 확립된
+  `MonitoringController`의 `username`(String, `user.getUserId()`) 비교 방식과 다르면 두 컨트롤러가
+  서로 다른 소유자 검증 방식을 갖게 되므로, 일관성을 위해 `username` 비교 쪽을 그대로 채택했다.
+
+### 구현
+- `MainApiController`에 `isSessionOwnerOrAdmin(SessionState, Authentication)` private 헬퍼 신설
+  (기존 `isAdmin(Authentication)` 재사용 + `user.getUserId().equals(session.getUsername())`).
+- `pauseSession`/`resumeSession`/`confirmFailover`: 시그니처에 `Authentication authentication` 파라미터
+  추가, 기존 "세션을 찾을 수 없습니다" 체크 **바로 다음 단계**에 소유자 검증 삽입(세션 not-found
+  처리 순서는 그대로 유지 — work order 지시). 실패 시 이 컨트롤러의 기존 컨벤션대로
+  `{success:false, message:"본인 세션만 제어할 수 있습니다."}` 반환(별도 HTTP status 없이 200 +
+  success:false — 같은 메서드의 다른 실패 케이스들과 동일한 응답 스키마).
+- `cancelSession`: 원래 `sessionManager.cancelSession(sessionId)`을 먼저 호출한 뒤에야 세션을
+  조회하는 구조였는데(세션 not-found 시에도 그냥 `success:true`로 조용히 넘어가는 기존 동작 — 이건
+  건드리지 않음), 소유자 검증을 위해 `sessionManager.getSession(sessionId)`로 먼저 조회하고 세션이
+  실제로 존재할 때만 소유자 검증 → 통과하면 기존 `cancelSession(...)` 호출로 이어지도록 순서를
+  재구성했다. `getSession()`은 활성세션 맵 조회(+ 없으면 DB 폴백) 뿐인 조회 전용 메서드라 한 번 더
+  불러도 부작용 없음.
+- `SecurityConfig`는 건드리지 않았다 — 전역 `/api/**`.authenticated() 규칙은 그대로 유효하고, 이번
+  수정은 그 위에 컨트롤러 레벨 소유자 검증만 얹은 것.
+
+### 테스트
+- `MainApiControllerFailoverConfirmTest` 갱신 — 리플렉션 호출부를
+  `getDeclaredMethod("confirmFailover", Map.class, Authentication.class)`로 맞추고, 기존 6개 테스트는
+  전부 `session.setUsername("owner")` + `ownerAuthentication("owner")`(신규 헬퍼, real
+  `UsernamePasswordAuthenticationToken` 사용 — 이 저장소의 `AuthControllerTest`/`AuthTestFixtures`가
+  이미 쓰는 방식과 동일)를 추가해 **기존 정상 흐름이 소유자 본인 호출 전제로 그대로 통과**하도록
+  갱신(회귀 아님 — 버그가 고쳐진 결과). 신규 2건: 세션 소유자가 아니면 거부(모델 전환 등 부작용 없음
+  확인 포함), ADMIN은 소유자가 아니어도 컨펌 가능.
+- `MainApiControllerSessionOwnershipTest`(신규, 8건) — pause/resume/cancel 3개 엔드포인트 각각
+  소유자 본인 성공 + 타인 거부(세션 상태 불변 확인 포함), pause는 ADMIN 예외 성공 케이스도 추가,
+  cancel은 세션이 아예 없는 경우 기존 동작(`success:true`) 유지 확인.
+- `./gradlew clean test` — **327건 전부 통과, 실패/에러 0건**(기존 317건 + 신규 10건: Failover
+  테스트 +2, 신규 Ownership 테스트 8건).
+
+### 리스크/제안
+- `getSessionFileList`/`getFilePreview`/`getUploadManifest`/`cleanupUploadSession` 등 같은 파일 안의
+  다른 세션 관련 엔드포인트도 소유자 검증이 없는 채로 남아있다(코드 확인함). 이번 work order 범위는
+  명시된 4개뿐이라 손대지 않았지만, 같은 유형의 잠재적 인가 우회이므로 **별도 버그로 등록해 후속
+  조치가 필요**하다고 제안만 남긴다(범위 확대 금지 지시 준수).
+- 트랜잭션: 이번 변경은 기존 로직 흐름에 조회(`getSession`) 1회를 앞당겨 추가한 것뿐이고 새로운
+  쓰기 로직을 넣지 않아 트랜잭션 관련 리스크 없음.
+
+**남은 것**: 위 "리스크/제안"의 나머지 세션 API 소유자 검증 미비 건, 그리고 여전히 Phase 5(failover
+컨펌 프론트) ~ Phase 7(통합/회귀 검증).
+
+## 보안 버그 수정 — 저장형 XSS(모델 드롭다운) + 세션 파일/업로드 5개 API 소유자 검증 누락 (31차, 2026-08-21)
+
+analyzer-plan `docs/pipeline/bug-suspects.md`에 등록된 버그 2건을 사람이 즉시 수정 승인해 같은
+세션(브랜치 `feature/2026-08-21-llm-model-db-failover`, 30차 커밋 `adb93bc` 다음)에서 이어서 고쳤다.
+
+### 버그 1 — 저장형 XSS 가능성 (Phase 3, 커밋 `a7b2166`)
+- **증상**: 관리자가 `/api/admin/llm-models` CRUD(`LlmModelAdminController`)에서 `displayName`에
+  `<script>`/`onerror=` 같은 HTML을 넣으면, `GET /api/config/llm-models` 응답을 거쳐
+  `dashboard.js`의 `populateModelSelectOptions()`가 이 값을 이스케이프 없이
+  `select.innerHTML = models.map(m => \`<option value="...">${m.displayName}</option>\`)...`로
+  직접 조립해 넣고 있었다. 이 API는 Phase 3(2026-08-21)부터 **인증된 전체 사용자**가 호출하는
+  일반 드롭다운이라, 관리자 전용 화면(`admin/dashboard.html`)에 있던 기존의 유사 패턴과 달리
+  노출 범위가 전체 사용자로 넓어진 지점이었다.
+- **프런트엔드 수정** (`src/main/resources/static/js/dashboard.js`
+  `populateModelSelectOptions`): 문자열 템플릿 조립을 버리고 `document.createElement('option')` +
+  `.value`/`.textContent`로 옵션을 만들도록 변경. `textContent`는 브라우저가 자동으로
+  HTML 특수문자를 이스케이프하므로 `<script>` 등을 넣어도 그대로 텍스트로만 표시되고 실행되지
+  않는다. dashboard.js 안에 이미 이런 안전한 `createElement` 패턴이 있는지 먼저 grep했으나
+  없었고(기존 `innerHTML` 문자열 조립이 지배적 관행), 표준적인 `createElement`+`textContent`
+  방식으로 새로 적용했다.
+- **범위 확인**: 같은 파일(`dashboard.js`)에서 `innerHTML`을 쓰는 다른 곳(로컬 provider 단일
+  옵션 표시(608행 근처, `config.model`이 출처 — 이건 관리자 CRUD `displayName`이 아니라
+  `application.properties`의 서버 설정값이라 위험도가 다르고 Phase 3~4 변경 범위 밖), 알림 목록
+  `renderNotifications`(1827행, `notif.title`/`notif.message` 미이스케이프), 그리드
+  플레이스홀더 등)까지 grep으로 확인했으나, 이번 사이클(Phase 3~4)에서 새로 도입되거나 노출
+  범위가 넓어진 지점은 `populateModelSelectOptions` 하나였다. 나머지는 기존부터 있던 별개
+  패턴(관리자 전용 화면이거나, 이번 사이클 변경분이 아님)이라 범위 확대 없이 손대지 않았다 —
+  후속 조치가 필요하면 별도 버그로 등록해야 한다는 제안만 남긴다.
+- **서버측 sanitize는 추가하지 않기로 판단**: `LlmModelAdminController.createModel`/`updateModel`이
+  호출하는 `LlmModelOptionService.create`/`update`를 확인한 결과 `displayName`에 대해
+  null/blank 체크와 `trim()`만 하고 별도 이스케이프/길이제한/특수문자 제한이 없었다. 동일하게
+  `UserController`(`com.legacy.admin`)의 사용자 프로필 `displayName`(`updateProfile` 등)도
+  null/blank 체크 + trim만 하고 sanitize가 전혀 없는 것을 확인했다 — 즉 이 코드베이스에서
+  "displayName류 필드는 trim만 하고 서버가 가공하지 않는다"가 기존에 이미 확립된 일관된 관례다.
+  `LlmModelAdminController`는 `@PreAuthorize("hasRole('ADMIN')")`로 관리자만 호출 가능하고, 이
+  프로젝트는 "관리자는 신뢰된 주체"라는 전제를 여러 곳(서버 경로 직접 지정 기능 등)에서 이미 갖고
+  있다. 이 전제 위에서, XSS의 실제 방어 지점은 "신뢰되지 않는 값을 표시하는 시점"(브라우저
+  DOM 삽입)이지 "신뢰된 관리자가 입력하는 시점"이 아니라고 판단해 **서버측 sanitize는 추가하지
+  않고 프런트엔드 이스케이프만으로 대응했다**(과설계 방지). 다만 이 판단은 "관리자 신뢰" 전제가
+  이 프로젝트에 여전히 유효하다는 전제 위에 있으므로, 그 전제가 바뀌면(예: 관리자 계정 다수 위임
+  등) 재검토가 필요하다는 점을 남겨둔다.
+- **테스트**: 이 프로젝트에 JS 단위테스트 프레임워크(package.json/jest 등)가 없어 새로 도입하지
+  않았다(지시대로 과도한 테스트 인프라 도입 금지). 대신 Java 쪽에서
+  `MainApiControllerLlmProviderTest`에 회귀 테스트 1건을 추가해, `GET /api/config/llm-models`가
+  `<script>alert('xss')</script>` 같은 `displayName`을 가공 없이 원문 그대로 반환하는지(서버
+  계약)만 확인했다 — 실제 DOM 삽입 안전성(textContent 사용)은 코드 리뷰로 갈음했다.
+
+### 버그 2 — 세션 파일/업로드 API 5개 소유자 검증 부재
+- **증상**: 30차에서 `pause`/`resume`/`cancel`/`confirmFailover` 4개(세션 "제어" API)에만
+  `isSessionOwnerOrAdmin` 소유자 검증을 추가했는데, 같은 파일(`MainApiController`)의 세션 "조회/정리"
+  API 5개 — `getSessionFileList`(`/api/session/{sessionId}/files`),
+  `getFilePreview`(`/api/session/{sessionId}/preview`),
+  `getUploadManifest`(`/api/upload-session/{sessionId}/manifest`),
+  `getUploadedFileContent`(`/api/upload-session/{sessionId}/file`),
+  `cleanupUploadSession`(`/api/upload-session/{sessionId}/cleanup`) — 은 그대로 남아 있었다.
+  `sessionId`만 알면 로그인한 임의 사용자가 남의 세션의 파일 목록/미리보기(diff)/업로드 원문을
+  조회하거나, 남의 업로드 임시 원본을 삭제(`cleanupUploadSession`, 쓰기성 동작이라 더 위험)할 수
+  있었다.
+- **"업로드 세션"이 별개 엔티티인지 먼저 확인**: `getUploadManifest`/`getUploadedFileContent`/
+  `cleanupUploadSession`이 다루는 "업로드 세션"은 별도 엔티티가 아니라, `sourcePath`가 업로드
+  샌드박스(`uploadStoragePath`) 하위인 **동일한 `SessionState`**였다(기존
+  `getValidatedUploadRoot(SessionState)` 헬퍼가 바로 이 검증을 함). 즉 소유자 필드는 다른 세션
+  API와 동일하게 `session.getUsername()`이라, 새 헬퍼를 만들 필요 없이 30차에서 신설한
+  `isSessionOwnerOrAdmin(SessionState, Authentication)`을 그대로 재사용했다.
+- **구현**: 5개 메서드 전부, 기존 "세션을 찾을 수 없습니다"(404 또는 그에 준하는 에러 처리) 단계
+  **바로 다음**에 소유자 검증을 삽입했다(정보노출 방지 순서 유지 — 세션 존재 여부를 소유자
+  검증보다 먼저 판단). 응답 스키마는 각 메서드의 기존 컨벤션을 그대로 따름 —
+  `getSessionFileList`/`getUploadManifest`/`cleanupUploadSession`은 `Map<String,Object>`에
+  `error` 필드만 채워 200으로 반환(기존 not-found 처리와 동일 스키마), `getFilePreview`/
+  `getUploadedFileContent`는 `ResponseEntity`라 `403 FORBIDDEN`으로 응답(기존
+  `SecurityException` catch 블록이 이미 403을 쓰던 것과 일관).
+  `isSessionOwnerOrAdmin`의 Javadoc도 "세션 제어 4개"뿐 아니라 이번에 추가된 조회/정리 5개까지
+  포함하도록 갱신했다.
+- **테스트**: `MainApiControllerSessionFileAndUploadOwnershipTest`(신규, 13건) — 5개 메서드 각각
+  (a) 소유자 본인 성공, (b) 타인 거부(파일 목록/원본 텍스트/업로드 원문이 노출되지 않고,
+  `cleanupUploadSession`은 실제로 파일이 삭제되지 않는지까지 확인), 그 중 제어 가능한 2개는
+  ADMIN 예외/세션 not-found 시 소유자 검증보다 먼저 404가 나는지도 함께 확인. 업로드 3종은
+  `@TempDir`로 실제 파일시스템에 임시 업로드 디렉터리를 만들고 `uploadStoragePath`
+  (`@Value` 필드, 스프링 컨텍스트 없이 테스트하므로 리플렉션으로 세팅)를 그 경로로 지정해 실제
+  I/O까지 검증했다.
+- **SecurityConfig는 이번에도 건드리지 않음**: 30차와 동일하게, 전역 `/api/**`.authenticated()
+  규칙 위에 컨트롤러 레벨 소유자 검증만 추가한 것.
+
+### 공통
+- `./gradlew clean test` — **341건 전부 통과, 실패/에러 0건**(기존 327건 + 신규: LlmProviderTest
+  XSS 회귀 +1건, SessionFileAndUploadOwnershipTest 13건).
+- 수정 파일: `src/main/resources/static/js/dashboard.js`(populateModelSelectOptions),
+  `src/main/java/com/legacy/analysis/MainApiController.java`(5개 메서드 + `isSessionOwnerOrAdmin`
+  Javadoc), `src/test/java/com/legacy/analysis/MainApiControllerLlmProviderTest.java`(XSS 회귀
+  테스트 1건 추가).
+- 신규 파일: `src/test/java/com/legacy/analysis/MainApiControllerSessionFileAndUploadOwnershipTest.java`.
+- `analyzer-plan/docs/pipeline/bug-suspects.md`는 지시대로 건드리지 않았다 — QA 재검증 대상으로
+  남겨둠.
+
+### 리스크/제안
+- 관리자 전용 화면(`admin/dashboard.html`)에도 사용자 `displayName`/LLM 모델 `displayName`을
+  `innerHTML`로 미이스케이프 삽입하는 동일 패턴이 여러 곳(1021/1102/1154/1764행 등) 남아있다.
+  "관리자는 신뢰된 주체" 전제로 이번 범위에서는 의도적으로 손대지 않았으나, 그 전제가 흔들리면
+  (관리자 계정 다수 위임 등) 함께 재검토가 필요하다.
+- `renderNotifications`(dashboard.js 1827행)도 `notif.title`/`notif.message`를 `innerHTML`로
+  미이스케이프 삽입한다 — 이번 사이클(Phase 3~4) 변경 범위 밖이라 손대지 않았으나 별도 버그로
+  등록할 가치가 있어 보인다.
+
+**QA 검증 필요**: 위 두 버그 수정 모두 analyzer-plan `docs/pipeline/bug-suspects.md`의 해당 항목에
+대한 재검증이 필요하다(이 프로젝트에는 QA 서브에이전트 호출 도구가 연결돼 있지 않아 이 handOff.md
+기록으로 검증 요청을 갈음한다).
 
 ## VectorStoreClient 인터페이스 추출 + 로컬 RAG 검증 4단계 구현 (32차, 2026-08-24)
 

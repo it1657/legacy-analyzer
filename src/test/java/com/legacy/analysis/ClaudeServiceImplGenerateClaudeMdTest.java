@@ -1,6 +1,7 @@
 package com.legacy.analysis;
 
 import com.legacy.analysis.llm.LlmClient;
+import com.legacy.analysis.llm.LlmClientResolver;
 import com.legacy.analysis.llm.LlmResult;
 import org.junit.jupiter.api.Test;
 
@@ -39,7 +40,11 @@ class ClaudeServiceImplGenerateClaudeMdTest {
   }
 
   private ClaudeServiceImpl newService(RecordingLlmClient llmClient, String llmProvider) throws Exception {
-    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, llmClient, null);
+    // 이 테스트는 전부 llmProvider="local"(전역 local 모드)이라 resolveLlmClient()가 DB(LlmModelOptionService)를
+    // 조회하지 않고 LlmClientResolver의 로컬 클라이언트로 바로 고정된다 — anthropicLlmClient 자리는 이 경로에서
+    // 쓰이지 않으므로 null로 둬도 안전하다.
+    LlmClientResolver llmClientResolver = new LlmClientResolver(null, llmClient);
+    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, llmClientResolver, null, null);
     setField(service, "llmProvider", llmProvider);
     setField(service, "llmLocalModel", "qwen2.5-coder:7b");
     setField(service, "apiModel", "claude-sonnet-5");

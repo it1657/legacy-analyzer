@@ -12,6 +12,12 @@ import jakarta.persistence.*;
 @Table(name = "analysis_sessions")
 public class SessionState {
 
+  // 크레딧 소진 시 자동전환 대신 사용자 컨펌을 거치는 상태값(status/currentPhase 공용 문자열,
+  // Phase 4/2026-08-21). 기존 PAUSED와 마찬가지로 스키마 변경 없이 free-text 컬럼에 이 문자열을
+  // 그대로 저장한다 — enum이 아니라 상수로만 관리하는 이유는 status/currentPhase 두 필드가 모두
+  // 이미 자유 문자열 컨벤션(IN_PROGRESS/PAUSED/COMPLETED/FAILED/CANCELLED 등)이기 때문이다.
+  public static final String STATUS_AWAITING_FAILOVER_CONFIRM = "AWAITING_FAILOVER_CONFIRM";
+
   @Id
   @Column(length = 36)
   private String sessionId;
@@ -93,6 +99,19 @@ public class SessionState {
   // '이어서 분석'(재개) 시에도 최초 선택을 그대로 유지해야 하므로 forceActive와 동일하게 세션에 영속한다.
   @Column(name = "generate_readme")
   private boolean generateReadme = true;
+
+  // 크레딧소진 컨펌 대기 상태(AWAITING_FAILOVER_CONFIRM)에서 "예" 선택 시 전환할 자체 LLM 모델키.
+  // 크레딧 소진을 감지한 시점에 관리자가 지정해둔 failover 대상(LlmModelOptionService.getActiveFailoverTarget())
+  // 값을 그대로 기록해두고, 컨펌 응답(POST /api/session/failover/confirm) 시 이 값으로
+  // claudeService.setModel(...)을 호출한다. 근거: analyzer-plan
+  // docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §4.
+  @Column(name = "failover_model_key", length = 200)
+  private String failoverModelKey;
+
+  // 사용자가 "자체 LLM으로 진행하시겠습니까?" 컨펌에 "예"로 응답한 시각. null이면 아직 미응답
+  // (컨펌 대기 중이거나, 애초에 failover 대상이 없어 이 흐름을 타지 않은 세션).
+  @Column(name = "failover_confirmed_at")
+  private LocalDateTime failoverConfirmedAt;
 
   @Transient
   @JsonProperty("sessionSummary")
@@ -337,9 +356,18 @@ public class SessionState {
   public boolean isGenerateReadme() { return generateReadme; }
   public void setGenerateReadme(boolean generateReadme) { this.generateReadme = generateReadme; }
 
-  // 분석을 중단해야 하는지 판단
+  public String getFailoverModelKey() { return failoverModelKey; }
+  public void setFailoverModelKey(String failoverModelKey) { this.failoverModelKey = failoverModelKey; }
+
+  public LocalDateTime getFailoverConfirmedAt() { return failoverConfirmedAt; }
+  public void setFailoverConfirmedAt(LocalDateTime failoverConfirmedAt) { this.failoverConfirmedAt = failoverConfirmedAt; }
+
+  // 분석을 중단해야 하는지 판단 (AWAITING_FAILOVER_CONFIRM도 PAUSED와 동일하게 "사용자 응답을
+  // 기다리며 처리를 멈춰야 하는" 상태라 shouldStop() 인식 대상에 포함한다)
   public boolean shouldStop() {
-    return isCancelled || "PAUSED".equals(status) || "PAUSED".equals(currentPhase);
+    return isCancelled || "PAUSED".equals(status) || "PAUSED".equals(currentPhase)
+        || STATUS_AWAITING_FAILOVER_CONFIRM.equals(status)
+        || STATUS_AWAITING_FAILOVER_CONFIRM.equals(currentPhase);
   }
 
   // 분석 완료 상태 확인

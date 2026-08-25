@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class ClaudeServiceImplNormalizeCommentTest {
 
   private String invoke(String comment, String extension) throws Exception {
-    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, null, null);
+    ClaudeServiceImpl service = new ClaudeServiceImpl(null, null, null, null, null, null, null);
     Method method = ClaudeServiceImpl.class.getDeclaredMethod("normalizeComment", String.class, String.class);
     method.setAccessible(true);
     return (String) method.invoke(service, comment, extension);

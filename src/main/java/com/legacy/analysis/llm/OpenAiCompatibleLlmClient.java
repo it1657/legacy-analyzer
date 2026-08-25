@@ -3,7 +3,6 @@ package com.legacy.analysis.llm;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -36,9 +35,14 @@ import java.util.concurrent.Semaphore;
  * (실측: 100파일 중 성공 7·기존 스킵 2·실패 91, 성공률 7%). 이 클래스 안에 세마포어를 둬서
  * 실제 HTTP 요청 전송 자체를 `llm.local.max-concurrent-calls`(기본 1)개로 제한한다 — 대기
  * 중인 호출은 요청을 아직 보내지 않은 상태라 타임아웃 시계가 돌지 않고 안전하게 큐잉된다.
+ *
+ * 2026-08-21(모델 목록 DB화 + 크레딧소진 failover): {@code @ConditionalOnProperty} 제거 —
+ * 세션별로 Anthropic/로컬 모델을 런타임에 동시에 골라 쓸 수 있어야 하므로, 이 빈을 항상
+ * 등록해두고 {@link LlmClientResolver}가 매 호출마다 provider에 맞는 구현체를 고른다.
+ * {@code llm.local.url}이 비어 있어도(관리자가 로컬 모델을 아직 하나도 등록하지 않은 배포)
+ * 생성자 주입 자체는 안전하다(WebClient는 실제 요청 시점에만 접속을 시도).
  */
 @Component
-@ConditionalOnProperty(name = "llm.provider", havingValue = "local")
 public class OpenAiCompatibleLlmClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmClient.class);

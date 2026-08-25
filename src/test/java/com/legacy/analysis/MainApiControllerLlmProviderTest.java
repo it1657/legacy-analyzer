@@ -1,19 +1,27 @@
 package com.legacy.analysis;
 
+import com.legacy.analysis.llm.LlmModelOption;
+import com.legacy.analysis.llm.LlmModelOptionService;
+import com.legacy.analysis.llm.LlmProvider;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * handOff.md "다음 단계" 3번(local provider일 때 비용 0 처리)·4번(GET /api/config/llm-provider)
- * 항목이 이미 코드에 구현돼 있었으나 테스트가 없어 이를 검증한다.
+ * 항목이 이미 코드에 구현돼 있었으나 테스트가 없어 이를 검증한다. Phase 3(2026-08-21)부터는
+ * GET /api/config/llm-models(사용자 드롭다운용 활성 모델 조회) 검증도 이 클래스에서 함께 다룬다.
  *
- * MainApiController는 생성자 의존성이 11개라 계정/인증/알림 등 실제 빈을 전부 준비하기보다는,
- * 이 두 기능이 실제로 쓰는 claudeService 외 나머지는 null로 넘기고(둘 다 다른 의존성을 건드리지
- * 않음) private 메서드/필드는 리플렉션으로 접근한다 — 이 저장소의 기존 테스트
+ * MainApiController는 생성자 의존성이 12개라 계정/인증/알림 등 실제 빈을 전부 준비하기보다는,
+ * 이 두 기능이 실제로 쓰는 claudeService(+ llmModelOptionService) 외 나머지는 null로 넘기고(다른
+ * 의존성을 건드리지 않음) private 메서드/필드는 리플렉션으로 접근한다 — 이 저장소의 기존 테스트
  * (PresentationGeneratorScreenFlowTest)와 동일한 리플렉션 접근 패턴을 따른다.
  */
 class MainApiControllerLlmProviderTest {
@@ -64,12 +72,25 @@ class MainApiControllerLlmProviderTest {
   }
 
   private MainApiController newController(ClaudeService claudeService, String llmProvider) throws Exception {
+    return newController(claudeService, llmProvider, null);
+  }
+
+  private MainApiController newController(ClaudeService claudeService, String llmProvider,
+      LlmModelOptionService llmModelOptionService) throws Exception {
     MainApiController controller = new MainApiController(
-        claudeService, null, null, null, null, null, null, null, null, null, null, null, null);
+        claudeService, null, null, null, null, null, null, null, null, null, null, null, null,
+        llmModelOptionService);
     Field field = MainApiController.class.getDeclaredField("llmProvider");
     field.setAccessible(true);
     field.set(controller, llmProvider);
     return controller;
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<Map<String, Object>> getLlmModelOptions(MainApiController controller) throws Exception {
+    Method m = MainApiController.class.getDeclaredMethod("getLlmModelOptions");
+    m.setAccessible(true);
+    return (List<Map<String, Object>>) m.invoke(controller);
   }
 
   private double calculateEstimatedCost(MainApiController controller, long inputTokens, long outputTokens,
@@ -154,5 +175,61 @@ class MainApiControllerLlmProviderTest {
     boolean result = (boolean) m.invoke(controller);
 
     assertEquals(false, result, "/.dockerenv가 없는 일반 환경(로컬/CI)에서는 false여야 함");
+  }
+
+  @Test
+  void llm_모델_조회_엔드포인트는_활성_모델만_노출순서대로_반환한다() throws Exception {
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    LlmModelOption sonnet = new LlmModelOption("claude-sonnet-4-6", "Claude Sonnet", LlmProvider.ANTHROPIC, 0);
+    LlmModelOption haiku = new LlmModelOption("claude-haiku-4-5-20251001", "Claude Haiku", LlmProvider.ANTHROPIC, 1);
+    // listActive()는 Repository가 이미 displayOrder 오름차순으로 정렬해 반환하는 계약이므로
+    // Mock에서도 그 순서 그대로 리스트를 준다(정렬 로직 자체는 이 컨트롤러 책임이 아님).
+    when(llmModelOptionService.listActive()).thenReturn(List.of(sonnet, haiku));
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-4-6"), "anthropic",
+        llmModelOptionService);
+
+    List<Map<String, Object>> result = getLlmModelOptions(controller);
+
+    assertEquals(2, result.size());
+    assertEquals("claude-sonnet-4-6", result.get(0).get("modelKey"));
+    assertEquals("Claude Sonnet", result.get(0).get("displayName"));
+    assertEquals("ANTHROPIC", result.get(0).get("provider"));
+    assertEquals("claude-haiku-4-5-20251001", result.get(1).get("modelKey"));
+  }
+
+  @Test
+  void llm_모델_조회_엔드포인트는_비활성_모델이_섞여있어도_서비스가_거른_활성_목록만_그대로_전달한다() throws Exception {
+    // listActive() 자체가 활성 모델만 걸러 반환하는 계약이므로(LlmModelOptionService 책임),
+    // 여기서는 컨트롤러가 서비스 반환값을 그대로 변환만 하는지 확인한다.
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.listActive()).thenReturn(List.of());
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-4-6"), "anthropic",
+        llmModelOptionService);
+
+    List<Map<String, Object>> result = getLlmModelOptions(controller);
+
+    assertEquals(0, result.size());
+  }
+
+  @Test
+  void llm_모델_조회_엔드포인트는_displayName을_이스케이프_없이_원문_그대로_반환한다() throws Exception {
+    // 저장형 XSS 버그 수정(2026-08-21, bug-suspects.md)의 회귀 방지 테스트.
+    // 서버(API)는 displayName을 가공/이스케이프하지 않고 원문 그대로 전달하는 것이 이 프로젝트의 기존
+    // 관례(UserController.updateProfile 등의 displayName 필드도 동일하게 trim만 하고 별도 sanitize 없음)와
+    // 일치한다 — 실제 XSS 방어는 dashboard.js의 populateModelSelectOptions()가 innerHTML 대신
+    // textContent로 DOM에 삽입하는 프런트엔드 계층에서 담당한다(브라우저 자동 이스케이프).
+    // 즉 이 테스트는 "서버가 악의적 문자열을 왜곡 없이 그대로 반환하는지"만 확인하고, DOM 삽입
+    // 안전성 자체는 코드 리뷰로 갈음한다(이 프로젝트에 JS 단위테스트 프레임워크가 없음).
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    String maliciousDisplayName = "<script>alert('xss')</script>";
+    LlmModelOption malicious = new LlmModelOption("claude-sonnet-4-6", maliciousDisplayName, LlmProvider.ANTHROPIC, 0);
+    when(llmModelOptionService.listActive()).thenReturn(List.of(malicious));
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-4-6"), "anthropic",
+        llmModelOptionService);
+
+    List<Map<String, Object>> result = getLlmModelOptions(controller);
+
+    assertEquals(maliciousDisplayName, result.get(0).get("displayName"),
+        "서버는 sanitize 없이 원문을 그대로 반환해야 하며, XSS 방어 책임은 프런트엔드(textContent)에 있다");
   }
 }

@@ -557,16 +557,59 @@ function toggleTreeExpandAll() {
   });
 }
 
+// Phase 3(2026-08-21) 이전까지 index.html에 하드코딩돼 있던 3개 Claude 모델. DB(GET
+// /api/config/llm-models) 조회가 실패하거나 결과가 비어 있을 때만 안전망으로 사용한다 —
+// 관리자가 실수로 모든 모델을 비활성화해도(LlmModelOptionService가 막긴 하지만) 화면이 완전히
+// 깨지지 않도록 최후의 폴백을 남겨둔다.
+const FALLBACK_MODEL_OPTIONS = [
+  { modelKey: 'claude-sonnet-4-6', displayName: 'Claude Sonnet (권장 · $3/$15 per 1M)' },
+  { modelKey: 'claude-opus-4-8', displayName: 'Claude Opus (고품질 · $15/$75 per 1M)' },
+  { modelKey: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)' }
+];
+
+/**
+ * AI 모델 드롭다운(#modelSelect)을 주어진 옵션 목록으로 채운다.
+ * 이전에 선택돼 있던 값이 새 목록에도 있으면 그대로 유지하고, 없으면 첫 항목을 선택한다
+ * (사용자가 드롭다운을 조작한 뒤 목록이 다시 채워지는 경우를 대비).
+ *
+ * @param {Array<{modelKey: string, displayName: string}>} models - 드롭다운에 채울 모델 목록
+ */
+function populateModelSelectOptions(models) {
+  const select = document.getElementById('modelSelect');
+  if (!select || !models || models.length === 0) return;
+
+  const previousValue = select.value;
+  // 저장형 XSS 방지(2026-08-21 버그 수정): displayName은 관리자가 /api/admin/llm-models CRUD로
+  // 자유 입력하는 값이라 <script>/onerror= 같은 HTML을 그대로 문자열 템플릿으로 조립해 innerHTML에
+  // 넣으면 인증된 전체 사용자 브라우저에서 실행될 수 있었다(bug-suspects.md 참고). option을 DOM
+  // 요소로 직접 만들고 .textContent로만 채워 브라우저가 자동으로 이스케이프하게 한다.
+  select.innerHTML = '';
+  models.forEach(m => {
+    const option = document.createElement('option');
+    option.value = m.modelKey;
+    option.textContent = m.displayName;
+    select.appendChild(option);
+  });
+
+  const stillExists = models.some(m => m.modelKey === previousValue);
+  select.value = stillExists ? previousValue : models[0].modelKey;
+  select.disabled = false;
+}
+
 // scenario_0.md: 현재 활성화된 LLM provider를 물어봐서, local이면 모델 드롭다운을
-// "로컬 모델: {model} (무료·자체 호스팅)" 단일 표시로 바꾼다. anthropic(기본값)이면 아무것도 안 바꾼다 —
-// 기존 3개 Claude 모델 선택 동작 그대로 유지.
+// "로컬 모델: {model} (무료·자체 호스팅)" 단일 표시로 바꾼다. anthropic(기본값)이면 DB에 등록된
+// 활성 모델 목록(GET /api/config/llm-models)으로 드롭다운을 채운다(Phase 3, 2026-08-21).
 async function initLlmProviderConfig() {
   const select = document.getElementById('modelSelect');
   const hint = document.getElementById('modelSelectHint');
 
   try {
     const resp = await fetch('/api/config/llm-provider');
-    if (!resp.ok) return; // 조회 실패 시 기존 Claude 드롭다운 그대로 둔다 (안전한 기본 동작)
+    if (!resp.ok) {
+      // 조회 실패 시에도 드롭다운이 "불러오는 중..." 자리표시자로 비어있지 않도록 안전망을 채운다.
+      populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
+      return;
+    }
     const config = await resp.json();
 
     if (select && config.provider === 'local') {
@@ -574,8 +617,10 @@ async function initLlmProviderConfig() {
       select.innerHTML = `<option value="${modelName}" selected>로컬 모델: ${modelName} (무료 · 자체 호스팅)</option>`;
       select.disabled = true; // 선택지가 하나뿐이라 조작 불가로 표시
       if (hint) hint.textContent = '자체 호스팅 LLM · 과금 없음';
+    } else if (select) {
+      // provider === 'anthropic' — 전역 local 모드가 아니므로 DB 기반 모델 목록을 채운다.
+      await loadAnthropicModelOptions();
     }
-    // provider === 'anthropic'이면 기존 드롭다운(3개 Claude 모델)을 그대로 둔다.
 
     // 컨테이너(Docker)로 구동 중이면 app 컨테이너에 임의 호스트 경로 bind mount가 없어
     // "서버 경로 직접 지정" 기능이 필연적으로 오류난다(2026-07 확인). 관리자여서 window.onload에서
@@ -586,8 +631,30 @@ async function initLlmProviderConfig() {
       if (localPathAnalysisSection) localPathAnalysisSection.style.display = 'none';
     }
   } catch (e) {
-    // 네트워크 오류 등으로 조회 실패해도 기존 Claude 드롭다운으로 동작해야 하므로 조용히 무시
+    // 네트워크 오류 등으로 조회 실패해도 드롭다운이 비어있지 않도록 안전망으로 채운다
     console.warn('[LLM provider 조회 실패]', e);
+    populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
+  }
+}
+
+/**
+ * anthropic(기본) 모드에서 GET /api/config/llm-models를 조회해 AI 모델 드롭다운을 채운다.
+ * 관리자가 DB(llm_model_options)에 등록한 활성 모델을 displayOrder 순으로 그대로 반영한다.
+ * 조회 실패/빈 목록이면 기존에 하드코딩돼 있던 3개 모델(FALLBACK_MODEL_OPTIONS)로 대체한다.
+ */
+async function loadAnthropicModelOptions() {
+  try {
+    const resp = await fetch('/api/config/llm-models');
+    if (!resp.ok) {
+      console.warn('[LLM 모델 목록 조회 실패] status=', resp.status);
+      populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
+      return;
+    }
+    const models = await resp.json();
+    populateModelSelectOptions(models && models.length > 0 ? models : FALLBACK_MODEL_OPTIONS);
+  } catch (e) {
+    console.warn('[LLM 모델 목록 조회 실패]', e);
+    populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
   }
 }
 
@@ -1011,13 +1078,18 @@ function showCompletionResult(data) {
   const readmePath = formatReadmePathForDisplay(data.readmePath);
   const readmeContent = data.readmeContent || '(README.md 생성 중 또는 없음)';
 
-  const usedModel = document.getElementById('modelSelect')?.value || 'claude-sonnet-4-6';
-  const modelDisplayNames = {
+  // Phase 3(2026-08-21): 모델 드롭다운이 DB(GET /api/config/llm-models) 기반으로 동적 구성되므로,
+  // 표시 라벨은 하드코딩된 맵 대신 선택된 <option>의 텍스트(=DB의 displayName)를 우선 사용한다.
+  // 폴백 맵은 옛 하드코딩 모델키가 어딘가에 남아있어도(예: 과거 분석 이력) 라벨이 깨지지 않게 유지한다.
+  const modelSelectEl = document.getElementById('modelSelect');
+  const usedModel = modelSelectEl?.value || 'claude-sonnet-4-6';
+  const selectedOptionText = modelSelectEl?.selectedOptions?.[0]?.text;
+  const legacyModelDisplayNames = {
     'claude-sonnet-4-6': 'Claude Sonnet',
     'claude-opus-4-8': 'Claude Opus',
     'claude-haiku-4-5-20251001': 'Claude Haiku'
   };
-  const modelLabel = modelDisplayNames[usedModel] || usedModel;
+  const modelLabel = selectedOptionText || legacyModelDisplayNames[usedModel] || usedModel;
 
   document.getElementById('cr_loginId').textContent = loginId;
   document.getElementById('cr_model').textContent = modelLabel;
