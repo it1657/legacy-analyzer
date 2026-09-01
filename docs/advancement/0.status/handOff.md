@@ -1,4 +1,4 @@
-# 진행 현황 핸드오프 (2026-08-21 기준, 27차 갱신)
+# 진행 현황 핸드오프 (2026-09-01 기준, 41차 갱신)
 
 이 문서는 `legacy-analyzer`를 "Claude API ↔ 로컬/사내 LLM 설정만으로 전환" 가능하게 만드는 작업의 현재까지 진행 상황을 정리한다. 새 세션/다른 담당자가 이어받을 때 이 문서만 읽고 바로 이어갈 수 있도록 작성한다.
 
@@ -1589,3 +1589,97 @@ GREEN 재확인.
 - failover: 다중 탭 동시 세션에서 `failoverModalShown` 미대응(가드가 모듈 전역).
 - scenario_1/2 여전히 hold, scenario_3(PGX)는 사용자의 sudo/Docker 권한 확인 대기 중(26차부터
   이어지는 별개 트랙).
+
+## 2026-09-remaining-unit-tests 사이클 완료 — 목표1(레거시 전체 단위 테스트 커버리지) 로드맵 종결 (41차, 2026-09-01)
+
+analyzer-plan 파이프라인의 마지막 단위 테스트 사이클
+`2026-09-remaining-unit-tests`(TASK-001~015)를 게이트1 승인 → dev 구현 → QA 검증 → 게이트2 승인
+→ `master` squash 병합 → 원격 push까지 전부 완료했다. 이로써 "테스트가 전혀 없던 패키지를 순차적으로
+덮는" 목표1 로드맵의 네 사이클(`2026-07-audit`/`2026-07-auth`/`2026-08-admin`/`2026-09-remaining`)이
+전부 종료됐다.
+
+### 범위와 결과
+
+- 대상 4개 패키지: `com.legacy.notification`(REQ-001) / `com.legacy.api.usage`(REQ-002) /
+  `com.legacy.statistics`(REQ-003) / `com.legacy.api.monitoring`(REQ-004).
+- 신규 파일 15개(픽스처 4 + 테스트 11), **+2,911줄, 전부 `src/test/**`**. `src/main`·`build.gradle`
+  변경 0건(`git diff --name-only aca655e..HEAD -- src/main build.gradle`이 공집합임을 커밋 전 확인).
+- 신규 테스트 141건(notification 36 / api.usage 23 / statistics 37 / api.monitoring 45).
+- `./gradlew clean test` — **549건 전부 통과, 실패/에러/스킵 0건**(기존 408 + 신규 141). 브랜치 기준
+  1회, squash 병합 후 `master` 기준 1회, 총 두 번 실측했다.
+- QA 결과 **TASK-001~015 전부 Pass(각 1회차, Fail 0건, 에스컬레이션 없음)**. work-order 명세 대
+  테스트 메서드 1:1 대조에서 누락 0 / 과잉 0.
+
+### 병합 커밋
+
+- `037ae21` — `test/2026-09-remaining-unit-tests`를 `master`에 **squash 병합**(2026-08-admin
+  사이클 `9d1380b`와 동일한 관례). 게이트2에서 사람이 완료 보고와 merge/push를 함께 승인한 뒤
+  push 권한을 일시 개방한 시점에 실행했고, push 확인 직후 다시 잠갔다.
+- `test/2026-09-remaining-unit-tests` 브랜치는 **삭제하지 않고 로컬 보존**한다(파이프라인
+  `STRUCTURE.md` 11.1절 — 다른 사이클이 task 단위 커밋 패턴을 참고할 수 있게 하기 위함).
+
+### 40차 기록 정정 — `master`는 원격 전용 앞섬 상태가 아니었다
+
+40차가 "`master`는 원격보다 다수 커밋 앞선 로컬 전용 상태"라고 적어두었으나, 이번 push 직전
+`git fetch` 후 확인해보니 **로컬 `master`와 `origin/master`가 이미 완전 동기(양방향 격차 0)**
+상태였다. 즉 40차 이후 어느 시점에 원격 반영이 이뤄졌고 그 사실이 이 문서에 기록되지 않았던
+것이다. 그래서 이번 push는 `aca655e..037ae21` 단일 커밋 fast-forward로 나갔다. 앞으로 push 여부를
+판단할 때 이 문서의 서술만 믿지 말고 `git rev-list --count origin/master..master`로 실제 격차를
+확인할 것.
+
+### 게이트2에서 등록된 버그 6건 — 전부 `버그 확정(목표2 대상)`
+
+이번 사이클은 단위 테스트 추가가 범위여서 `src/main`을 일절 건드리지 않았고, 테스트가 드러낸
+기존 코드의 이상 동작은 dev/QA 단계에서 전부 "관찰·기록"에 그쳤다(판단은 게이트2 이후 사람 몫).
+6건 모두 `analyzer-plan/docs/pipeline/bug-suspects.md`에 등록됐고, 게이트2 직후 사람 판단으로
+**전부 `버그 확정 (목표2 대상, 2026-09-01 게이트2 이후 사람 판단)`으로 갱신**됐다(같은 파일
+102·109·116·123·130·137행에서 확인). 즉 이 6건은 목표2에서 실제로 고칠 대상이다.
+
+**1건은 성격이 다르므로 우선 검토가 필요하다 — `MonitoringController` 인가 비대칭:**
+
+- `MonitoringController`의 `getSessionMetrics`(:86) / `getSessionLogs`(:109) / `deleteSession`(:156)이
+  `if (session != null && !isOwnerOrAdmin(session, authentication))` 형태라, `getSession()`이 null을
+  반환하면 **단락평가로 소유자 검사가 호출조차 되지 않고** 그대로 조회/삭제로 진행된다. 반면
+  `getSessionDetails`(:48-55) / `getSessionSummary`(:132-139)는 먼저 `SESSION_NOT_FOUND`로 차단하므로
+  이 문제가 없다 — 같은 컨트롤러 안에서 처리 방침이 갈린다.
+- 파급의 핵심: `AnalysisSessionManager.deleteSession`(:254-263)이 `sessionRepository`와
+  `activeSessions`만 지우고 `PerformanceMetricsCollector.sessionMetrics` /
+  `AnalysisLogger.sessionLogs`는 **별개 인메모리 맵이라 그대로 남긴다.** 따라서 세션이 삭제된
+  뒤에도 남아 있는 타인의 로그(`filePath`/`message`/`errorType`)와 메트릭을 sessionId만 아는
+  사용자가 소유자 검사 없이 읽을 수 있다.
+- 심각도 한정: `SecurityConfig:82`가 `/api/**`를 `authenticated`로 막고 있어 **익명 접근은
+  불가능**하다. 단위 테스트에서 관찰된 "인증정보 없이 `deleteSession` 도달" 케이스는 필터를
+  우회한 단위 레벨 관찰이고, 실제 도달 가능한 경로는 **제3자 인증 사용자**다.
+
+나머지 5건(심각도 낮음, 전부 기존 코드 특성이며 이번 신규 코드가 만든 문제가 아님):
+
+| 대상 | 관찰된 동작 |
+|---|---|
+| `StatisticsController.getPerformanceStatistics` | `processingTimeMs`/`totalFiles`에 null이 섞이면 언박싱 NPE → 500 + `"성능 통계 조회 실패: null"` |
+| `StatisticsController.getTokenStatistics` | `inputTokens`/`outputTokens` null에서 각각 독립적으로 언박싱 NPE → 500. 같은 메서드 앞부분 집계값은 삼항 null 방어가 있어 방침이 갈림 |
+| `NotificationService.cleanupOldNotifications` | `createdAt=null` 1건의 NPE를 try-catch가 흡수해, 뒤따르던 정상 삭제 대상까지 **전량 미처리로 조용히 종료**(void라 호출부가 인지 불가) |
+| `PerformanceMetricsCollector.endFileAnalysis` | 세션 불일치 시 처리 시간은 반환되나 어느 세션에도 기록되지 않고 `filesInProgress`에 파일이 잔존. `fileStartTimes`가 `filePath`만 키로 써 병렬 분석 시 덮어쓰기 소지 |
+| `ApiResponseWrapper.error(message, errorInfo)` | `errorInfo`가 non-null이면 첫 인자 `message`를 어떤 필드에도 담지 않고 폐기(:50). 호출부가 조립한 `"메트릭 조회 실패: " + ...` 문자열이 응답에 전혀 실리지 않음 |
+
+### work-order 문구 부정확 1건 (Fail 처리하지 않음)
+
+TASK-014의 work-order가 지시한 `"메트릭 조회 실패: "+메시지` assertion은 바로 위 `ApiResponseWrapper`
+동작 때문에 **실측이 불가능한 명세**였다. dev가 관찰 가능한 값으로 대체했고 QA도 이를 Fail로
+잡지 않았으나, 작업지시서 쪽 부정확이므로 다음 버전에 반영이 필요하다(analyzer-plan에 전달 완료).
+
+### 파이프라인 쪽에서 함께 고쳐진 것 (이 저장소 `.claude/` 변경)
+
+이번 사이클 진행 중 "dev가 task 완료마다 qa를 호출한다"는 규칙이 한 번도 실제로 동작한 적이
+없었다는 사실이 드러났다 — `.claude/agents/dev.md`에 `Agent` 도구가 없어 물리적으로 호출이
+불가능했고, `qa.md`도 본문은 문서 작성을 전제하는데 `tools`에 `Write`가 없었다. analyzer-plan
+세션이 두 파일의 `tools`를 보정하고(`dev.md`에 `Agent, SendMessage` / `qa.md`에 `Write, Edit`),
+dev가 qa에게 직접 요청을 보낼 수 있게 된 데 따른 부작용을 막기 위해 `STRUCTURE.md` 17절(지시
+우선순위: **사람 > PM/PL 공식 산출물 > dev 개별 요청**)을 신설했다. 이번 사이클의 QA는 이
+보정 직후 실행돼 정상 동작했다. `.claude/`는 git 미추적이라 이 저장소 커밋에는 포함되지 않는다.
+
+### 다음 단계
+
+- 확정된 버그 6건 수정(특히 `MonitoringController` 인가 비대칭 우선) — 목표2 범위.
+- 목표2 착수 여부·순서는 analyzer-plan 쪽에서 별도 논의 후 신호 예정.
+- 기존 후속 과제(RAG B안 대형 프로젝트 성능/REQ-8 실서버 검증, failover 다중 탭 `failoverModalShown`,
+  scenario_1/2 hold, scenario_3 PGX 권한 대기)는 40차 기록 그대로 유효하다.
