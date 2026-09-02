@@ -83,7 +83,11 @@ public class MonitoringController {
       @PathVariable String sessionId, Authentication authentication) {
     try {
       SessionState session = sessionManager.getSession(sessionId);
-      if (session != null && !isOwnerOrAdmin(session, authentication)) {
+      if (session == null) {
+        return ApiResponseWrapper.error("세션을 찾을 수 없습니다.",
+            new ApiResponseWrapper.ErrorInfo("SESSION_NOT_FOUND", "유효하지 않은 세션 ID", null));
+      }
+      if (!isOwnerOrAdmin(session, authentication)) {
         return ApiResponseWrapper.error("접근 권한이 없습니다.",
             new ApiResponseWrapper.ErrorInfo("ACCESS_DENIED", "본인 세션만 조회할 수 있습니다.", null));
       }
@@ -106,7 +110,11 @@ public class MonitoringController {
       Authentication authentication) {
     try {
       SessionState session = sessionManager.getSession(sessionId);
-      if (session != null && !isOwnerOrAdmin(session, authentication)) {
+      if (session == null) {
+        return ApiResponseWrapper.error("세션을 찾을 수 없습니다.",
+            new ApiResponseWrapper.ErrorInfo("SESSION_NOT_FOUND", "유효하지 않은 세션 ID", null));
+      }
+      if (!isOwnerOrAdmin(session, authentication)) {
         return ApiResponseWrapper.error("접근 권한이 없습니다.",
             new ApiResponseWrapper.ErrorInfo("ACCESS_DENIED", "본인 세션만 조회할 수 있습니다.", null));
       }
@@ -153,7 +161,11 @@ public class MonitoringController {
       @PathVariable String sessionId, Authentication authentication) {
     try {
       SessionState session = sessionManager.getSession(sessionId);
-      if (session != null && !isOwnerOrAdmin(session, authentication)) {
+      if (session == null) {
+        return ApiResponseWrapper.error("세션을 찾을 수 없습니다.",
+            new ApiResponseWrapper.ErrorInfo("SESSION_NOT_FOUND", "유효하지 않은 세션 ID", null));
+      }
+      if (!isOwnerOrAdmin(session, authentication)) {
         return ApiResponseWrapper.error("접근 권한이 없습니다.",
             new ApiResponseWrapper.ErrorInfo("ACCESS_DENIED", "본인 세션만 삭제할 수 있습니다.", null));
       }

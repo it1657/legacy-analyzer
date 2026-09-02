@@ -2,6 +2,7 @@ package com.legacy.auth;
 
 import com.legacy.api.usage.ApiUsageFilter;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.ServletRequest;
 import jakarta.servlet.ServletResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,10 +15,13 @@ import org.springframework.context.annotation.Import;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
@@ -104,13 +108,12 @@ class SecurityConfigIntegrationTest {
   void secure_echo는_csrf_토큰_없이_요청하면_실제_관측된_상태코드로_거부된다() throws Exception {
     // 사전에 403을 단정하지 않고 실측 결과를 그대로 특성화 테스트로 고정한다.
     // 실제 로컬 실행 결과: 403 Forbidden (CSRF 보호가 정상 동작).
-    // 버그 의심 기록: 이 앱은 SessionCreationPolicy.STATELESS이면서 CSRF 토큰 저장소는
-    // 기본값(세션 기반)이라, 이론적으로는 STATELESS 환경에서 세션 기반 CSRF 토큰을
-    // 정상적으로 발급/보관할 방법이 없는 구조적 조합으로 보인다.
-    // 이 테스트는 403으로 막히는 "현재 동작"을 고정할 뿐이고, 세션을 쓸 수 없는 상태에서
-    // 실제 브라우저 클라이언트가 정상적인 흐름으로 CSRF 토큰을 발급받아 통과하는 경로가
-    // 존재하는지는 확인되지 않았다 — "버그 의심"으로 05-dev-progress.md에 별도 기록함
-    // (06-qa-results.md/bug-suspects.md 기록은 QA 담당).
+    // 2026-09-security-fixes(REQ-002): CSRF 토큰 저장소가 세션 기반 기본값에서 쿠키 기반
+    // (CookieCsrfTokenRepository.withHttpOnlyFalse())으로, 요청 핸들러는 마스킹 없는
+    // CsrfTokenRequestAttributeHandler(지연 로딩 opt-out)로 전환됐다. 전환 후 재실행에서도
+    // 이 시나리오의 상태코드는 403 그대로였다(실측 확인, 코드 변경 없이 주석만 갱신).
+    // "세션을 쓸 수 없어 정상 흐름이 존재하지 않는다"던 원래의 버그 의심은 더 이상 유효하지 않다 —
+    // 아래 마지막 시나리오(GET 쿠키 → POST 헤더 왕복)가 정상 흐름의 실재를 증명한다.
     mockMvc.perform(post("/secure/echo"))
         .andExpect(status().isForbidden());
   }
@@ -118,6 +121,8 @@ class SecurityConfigIntegrationTest {
   @Test
   @WithMockUser
   void secure_echo는_csrf_토큰을_첨부하면_통과한다() throws Exception {
+    // csrf() 포스트 프로세서는 현재 설정된 저장소/핸들러가 인정하는 유효 토큰을 주입하므로
+    // 쿠키 기반 전환 후에도 기대 상태코드는 200 그대로였다(재실행 실측).
     mockMvc.perform(post("/secure/echo").with(csrf()))
         .andExpect(status().isOk());
   }
@@ -128,6 +133,7 @@ class SecurityConfigIntegrationTest {
     // POST 요청은 인증 여부를 확인하는 인가(authorizeHttpRequests) 단계 이전에
     // CsrfFilter가 먼저 CSRF 토큰 검증에서 막기 때문으로 보인다(9/10번 GET 시나리오와
     // 달리 302 리다이렉트로 이어지지 않음 — 이 필터 순서 차이도 실측으로만 확인 가능했다).
+    // 2026-09-security-fixes(REQ-002) 쿠키 기반 전환 후 재실행에서도 403 그대로였다(주석만 갱신).
     mockMvc.perform(post("/secure/echo"))
         .andExpect(status().isForbidden());
   }
@@ -154,6 +160,30 @@ class SecurityConfigIntegrationTest {
     mockMvc.perform(get("/api/admin/ping"))
         .andExpect(status().isFound())
         .andExpect(header().string("Location", "http://localhost/auth/login"));
+  }
+
+  @Test
+  @WithMockUser
+  void 인증_사용자는_GET으로_받은_XSRF_TOKEN_쿠키_값을_그대로_헤더에_실어_POST를_통과한다() throws Exception {
+    // 2026-09-security-fixes(REQ-002)의 핵심 검증: 세션을 전혀 쓰지 않는 STATELESS 구성에서도
+    // 실제 브라우저와 동일한 왕복(GET으로 쿠키 수신 → 그 쿠키 값을 헤더로 재전송)으로
+    // CSRF 검증을 통과하는 정상 흐름이 존재함을 증명한다.
+    // 트레이드오프: 이 흐름을 성립시키기 위해 마스킹 없는 요청 핸들러를 쓰므로
+    // BREACH 대응 XOR 마스킹은 포기했다(04-work-order-v3 "REQ-002 요청 핸들러 보강" 절 승인 사항).
+
+    // (1) 인증 사용자로 permitAll GET 경로를 호출해 XSRF-TOKEN 쿠키를 발급받는다.
+    MvcResult tokenResult = mockMvc.perform(get("/admin/ping"))
+        .andExpect(status().isOk())
+        .andReturn();
+    Cookie csrfCookie = tokenResult.getResponse().getCookie("XSRF-TOKEN");
+    assertNotNull(csrfCookie, "GET 응답에 XSRF-TOKEN 쿠키가 즉시 발급돼야 한다(지연 로딩 opt-out).");
+    assertFalse(csrfCookie.isHttpOnly(), "클라이언트 JS가 읽을 수 있도록 HttpOnly가 꺼져 있어야 한다.");
+
+    // (2) 그 쿠키 값을 가공 없이 그대로 Cookie + X-XSRF-TOKEN 헤더 양쪽에 실어 POST하면 통과한다.
+    mockMvc.perform(post("/secure/echo")
+            .cookie(csrfCookie)
+            .header("X-XSRF-TOKEN", csrfCookie.getValue()))
+        .andExpect(status().isOk());
   }
 
   @RestController

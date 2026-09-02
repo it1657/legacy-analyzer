@@ -85,17 +85,18 @@ class MonitoringControllerLogsAndSummaryTest {
   // ---------- getSessionLogs ----------
 
   @Test
-  void getSessionLogs는_세션이_없어도_권한체크를_건너뛰고_로그를_조회한다() {
-    // 비대칭 동작: `session != null && !isOwnerOrAdmin(...)` 조건이라 세션이 없으면 체크 자체가 스킵된다.
+  void getSessionLogs는_세션이_없으면_SESSION_NOT_FOUND를_반환한다() {
+    // 2026-09-security-fixes(REQ-003)로 수정된 동작: getSessionSummary와 동일하게
+    // session==null이면 권한 체크/로그 조회에 도달하지 않고 SESSION_NOT_FOUND로 끊는다.
+    // (수정 전에는 `session != null && !isOwnerOrAdmin(...)` 조건이라 인증정보 없이도 로그가 조회됐다.)
     when(sessionManager.getSession(SESSION_ID)).thenReturn(null);
-    when(analysisLogger.getSessionLogs(SESSION_ID)).thenReturn(logs(2));
 
     ApiResponseWrapper<List<AnalysisLogEntry>> response =
         monitoringController.getSessionLogs(SESSION_ID, 100, 0, null);
 
-    assertTrue(response.isSuccess());
-    assertThat(response.getData()).hasSize(2);
-    verify(analysisLogger, times(1)).getSessionLogs(SESSION_ID);
+    assertErrorCode(response, "SESSION_NOT_FOUND");
+    assertEquals("유효하지 않은 세션 ID", response.getError().getMessage());
+    verify(analysisLogger, never()).getSessionLogs(anyString());
   }
 
   @Test

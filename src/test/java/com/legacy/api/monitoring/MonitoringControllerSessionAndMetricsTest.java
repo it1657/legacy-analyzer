@@ -147,21 +147,19 @@ class MonitoringControllerSessionAndMetricsTest {
   // ---------- getSessionMetrics ----------
 
   @Test
-  void getSessionMetrics는_세션이_없어도_권한체크를_건너뛰고_메트릭을_조회한다() {
-    // 비대칭 동작(최우선 확인 시나리오): getSessionDetails는 session==null이면 SESSION_NOT_FOUND지만,
-    // getSessionMetrics는 `session != null && !isOwnerOrAdmin(...)` 조건이라 존재하지 않는 세션 ID여도
-    // 권한 체크 없이 곧바로 메트릭 조회가 성공한다(인증정보가 아예 없어도 마찬가지).
-    Map<String, Object> metrics = new HashMap<>();
-    metrics.put("processedFiles", 3);
+  void getSessionMetrics는_세션이_없으면_SESSION_NOT_FOUND를_반환한다() {
+    // 2026-09-security-fixes(REQ-003)로 수정된 동작: getSessionDetails와 동일하게
+    // session==null이면 권한 체크/메트릭 조회에 도달하지 않고 SESSION_NOT_FOUND로 끊는다.
+    // (수정 전에는 `session != null && !isOwnerOrAdmin(...)` 조건이라 인증정보가 없어도
+    //  메트릭 조회가 그대로 성공하는 인가 우회 경로가 있었다.)
     when(sessionManager.getSession(SESSION_ID)).thenReturn(null);
-    when(metricsCollector.getSessionMetrics(SESSION_ID)).thenReturn(metrics);
 
     ApiResponseWrapper<Map<String, Object>> response =
         monitoringController.getSessionMetrics(SESSION_ID, null);
 
-    assertTrue(response.isSuccess());
-    assertThat(response.getData()).isSameAs(metrics);
-    verify(metricsCollector, times(1)).getSessionMetrics(SESSION_ID);
+    assertErrorCode(response, "SESSION_NOT_FOUND");
+    assertEquals("유효하지 않은 세션 ID", response.getError().getMessage());
+    verify(metricsCollector, never()).getSessionMetrics(anyString());
   }
 
   @Test
@@ -200,6 +198,20 @@ class MonitoringControllerSessionAndMetricsTest {
   }
 
   @Test
+  void getSessionMetrics는_인증정보가_없으면_NPE없이_ACCESS_DENIED를_반환한다() {
+    // getSessionDetails/getSessionSummary와 대칭을 맞추기 위한 커버리지(04-work-order-v3 TASK-007 보강).
+    // 세션은 실제로 존재하고 authentication만 null인 경우 — isOwnerOrAdmin의 null 가드가 동작해
+    // NPE 없이 ACCESS_DENIED로 끊기고, 메트릭 조회 실행부에는 도달하지 않아야 한다.
+    when(sessionManager.getSession(SESSION_ID)).thenReturn(aliceSession());
+
+    ApiResponseWrapper<Map<String, Object>> response =
+        monitoringController.getSessionMetrics(SESSION_ID, null);
+
+    assertErrorCode(response, "ACCESS_DENIED");
+    verify(metricsCollector, never()).getSessionMetrics(anyString());
+  }
+
+  @Test
   void getSessionMetrics는_조회_중_예외가_나면_METRICS_ERROR를_반환한다() {
     when(sessionManager.getSession(SESSION_ID)).thenReturn(aliceSession());
     when(metricsCollector.getSessionMetrics(SESSION_ID))
@@ -215,15 +227,16 @@ class MonitoringControllerSessionAndMetricsTest {
   // ---------- deleteSession ----------
 
   @Test
-  void deleteSession은_세션이_없어도_권한체크를_건너뛰고_삭제를_진행한다() {
-    // getSessionMetrics와 동일한 비대칭 구조: 존재하지 않는 세션 ID여도 삭제 호출이 그대로 진행된다.
+  void deleteSession은_세션이_없으면_SESSION_NOT_FOUND를_반환한다() {
+    // 2026-09-security-fixes(REQ-003)로 수정된 동작: 존재하지 않는 세션 ID면 삭제 호출 자체를 하지 않는다.
+    // (수정 전에는 인증정보 없이도 deleteSession이 호출되고 data=true로 성공 응답이 나갔다.)
     when(sessionManager.getSession(SESSION_ID)).thenReturn(null);
 
     ApiResponseWrapper<Boolean> response = monitoringController.deleteSession(SESSION_ID, null);
 
-    assertTrue(response.isSuccess());
-    assertEquals(Boolean.TRUE, response.getData());
-    verify(sessionManager, times(1)).deleteSession(SESSION_ID);
+    assertErrorCode(response, "SESSION_NOT_FOUND");
+    assertEquals("유효하지 않은 세션 ID", response.getError().getMessage());
+    verify(sessionManager, never()).deleteSession(anyString());
   }
 
   @Test
@@ -257,6 +270,18 @@ class MonitoringControllerSessionAndMetricsTest {
 
     assertErrorCode(response, "ACCESS_DENIED");
     assertEquals("본인 세션만 삭제할 수 있습니다.", response.getError().getMessage());
+    verify(sessionManager, never()).deleteSession(anyString());
+  }
+
+  @Test
+  void deleteSession은_인증정보가_없으면_NPE없이_ACCESS_DENIED를_반환한다() {
+    // getSessionMetrics와 동일 취지의 대칭 커버리지(04-work-order-v3 TASK-007 보강).
+    // 세션이 실존해도 인증정보가 없으면 삭제 실행부에 도달하지 않아야 한다.
+    when(sessionManager.getSession(SESSION_ID)).thenReturn(aliceSession());
+
+    ApiResponseWrapper<Boolean> response = monitoringController.deleteSession(SESSION_ID, null);
+
+    assertErrorCode(response, "ACCESS_DENIED");
     verify(sessionManager, never()).deleteSession(anyString());
   }
 

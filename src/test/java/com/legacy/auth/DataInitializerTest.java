@@ -1,16 +1,23 @@
 package com.legacy.auth;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -25,6 +32,11 @@ import static org.mockito.Mockito.when;
  * existsByUserId(...)가 false일 때만 각 계정 생성 로직에서 findByName(...)을 추가로 호출한다.
  * 이 순서 특성 때문에 시나리오 3/4에서는 두 역할(ADMIN/USER) 모두 "이미 존재"로 stub해
  * 서로 다른 계정 경로가 orElseThrow로 실패하지 않도록 격리한다.
+ *
+ * <p>2026-09-security-fixes(REQ-001): DataInitializer 생성자에 시딩 토글/기본 비밀번호 3개 파라미터가
+ * 추가됐다. 기존 5개 시나리오는 기존 동작과 동일한 기본값(true/"admin"/"1")을 넘겨 assertion을 그대로
+ * 유지하고(회귀 확인), 수정 후 동작(시딩 스킵, 로그 비밀번호 미노출, 비밀번호 오버라이드)은
+ * 아래 신규 시나리오 3건에서 검증한다.
  */
 class DataInitializerTest {
 
@@ -38,7 +50,17 @@ class DataInitializerTest {
     roleRepository = mock(RoleRepository.class);
     userRepository = mock(UserRepository.class);
     passwordEncoder = mock(PasswordEncoder.class);
-    dataInitializer = new DataInitializer(roleRepository, userRepository, passwordEncoder);
+    // 기존 시나리오는 기존 동작과 동일한 기본값(시딩 on, admin/1)으로 생성해 회귀 여부를 확인한다.
+    dataInitializer = new DataInitializer(roleRepository, userRepository, passwordEncoder,
+        true, "admin", "1");
+  }
+
+  /** 두 역할이 모두 존재하고 두 계정이 아직 없는 "정상 시딩" 상태로 stub한다. */
+  private void stubRolesExistAndUsersMissing() {
+    when(roleRepository.findByName("ADMIN")).thenReturn(Optional.of(AuthTestFixtures.newRole("ADMIN")));
+    when(roleRepository.findByName("USER")).thenReturn(Optional.of(AuthTestFixtures.newRole("USER")));
+    when(userRepository.existsByUserId("admin")).thenReturn(false);
+    when(userRepository.existsByUserId("test")).thenReturn(false);
   }
 
   @Test
@@ -151,5 +173,71 @@ class DataInitializerTest {
     RuntimeException exception = assertThrows(RuntimeException.class, () -> dataInitializer.run());
 
     assertEquals("USER 역할이 없습니다.", exception.getMessage());
+  }
+
+  // ---------- 2026-09-security-fixes(REQ-001) 수정 후 동작 검증 ----------
+
+  @Test
+  void seedDefaultAccounts가_false이면_admin과_test_계정을_모두_생성하지_않는다() throws Exception {
+    stubRolesExistAndUsersMissing();
+    DataInitializer noSeedInitializer = new DataInitializer(roleRepository, userRepository,
+        passwordEncoder, false, "admin", "1");
+
+    noSeedInitializer.run();
+
+    verify(userRepository, never()).save(argThat(u -> "admin".equals(u.getUserId())));
+    verify(userRepository, never()).save(argThat(u -> "test".equals(u.getUserId())));
+    // 계정 존재 여부 조회 자체에 도달하지 않는다(가드가 진입부에 있으므로).
+    verify(userRepository, never()).existsByUserId("admin");
+    verify(userRepository, never()).existsByUserId("test");
+    verify(passwordEncoder, never()).encode(anyString());
+  }
+
+  @Test
+  void 계정_생성_로그에_평문_비밀번호_값이_남지_않는다() throws Exception {
+    stubRolesExistAndUsersMissing();
+
+    ch.qos.logback.classic.Logger logger =
+        (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(DataInitializer.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      dataInitializer.run();
+    } finally {
+      logger.detachAppender(appender);
+      appender.stop();
+    }
+
+    List<String> messages = appender.list.stream()
+        .map(ILoggingEvent::getFormattedMessage)
+        .toList();
+
+    // 계정 생성 로그 자체는 그대로 남는다(userId 문자열 "admin"/"test"는 허용).
+    assertTrue(messages.stream().anyMatch(m -> m.contains("[기본 사용자 생성] userId=admin")));
+    assertTrue(messages.stream().anyMatch(m -> m.contains("[기본 사용자 생성] userId=test")));
+
+    // "비밀번호" 뒤에 콜론+값이 따라오는 형태(=평문 노출)가 어떤 로그에도 없어야 한다.
+    Pattern plainPasswordPattern = Pattern.compile("비밀번호\\s*[::]\\s*\\S");
+    for (String message : messages) {
+      assertFalse(plainPasswordPattern.matcher(message).find(),
+          "평문 비밀번호가 로그에 노출됨: " + message);
+      assertFalse(message.contains("비밀번호: admin"), "평문 비밀번호가 로그에 노출됨: " + message);
+      assertFalse(message.contains("비밀번호: 1"), "평문 비밀번호가 로그에 노출됨: " + message);
+    }
+  }
+
+  @Test
+  void 기본_비밀번호_설정값을_바꾸면_그_값으로_인코딩된다() throws Exception {
+    stubRolesExistAndUsersMissing();
+    DataInitializer customInitializer = new DataInitializer(roleRepository, userRepository,
+        passwordEncoder, true, "custom-pw", "custom-test-pw");
+
+    customInitializer.run();
+
+    verify(passwordEncoder, times(1)).encode("custom-pw");
+    verify(passwordEncoder, times(1)).encode("custom-test-pw");
+    verify(passwordEncoder, never()).encode("admin");
+    verify(passwordEncoder, never()).encode("1");
   }
 }
