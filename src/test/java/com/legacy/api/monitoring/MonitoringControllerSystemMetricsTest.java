@@ -61,5 +61,7 @@ class MonitoringControllerSystemMetricsTest {
     assertEquals("METRICS_ERROR", response.getError().getCode());
     // 응답 message("메트릭 조회 실패: 수집 오류")는 ErrorInfo에는 원인 메시지만 담긴다.
     assertEquals("수집 오류", response.getError().getMessage());
+    // REQ-003: 상위 수준 message도 응답에 함께 남는다(errorInfo.message와 별개).
+    assertEquals("메트릭 조회 실패: 수집 오류", response.getMessage());
   }
 }

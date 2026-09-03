@@ -355,12 +355,11 @@ class NotificationServiceTest {
   }
 
   @Test
-  void cleanupOldNotifications는_createdAt이_null인_알림을_만나면_나머지_삭제_대상도_처리하지_못한다() {
-    // 02-design-v1 3.2절 10번 PL 추가 관찰 케이스(선택). 게이트1에서 필수화하지 않기로 승인됐으나 포함한다.
-    // 관찰 결과: createdAt이 null인 항목이 스트림 filter에서 먼저 평가되면
-    // n.getCreatedAt().isBefore(...)에서 NullPointerException이 발생하고,
-    // 메서드 전체가 하나의 try-catch로 감싸여 있어 그 뒤의 "오래됨+읽음" 항목은 삭제되지 않은 채
-    // 메서드가 조용히 종료된다(호출부는 실패 사실을 알 수 없음).
+  void cleanupOldNotifications는_createdAt이_null인_알림만_건너뛰고_나머지_대상은_정상_삭제한다() {
+    // REQ-007 수정 후 확정 동작(02-design-v1 2.4절 근거).
+    // createdAt이 null인 항목은 정리 대상 판단이 불가능하므로 경고 로그만 남기고 필터에서 제외되며(삭제 안 함),
+    // 스트림이 중단되지 않으므로 뒤따르는 "오래됨+읽음" 항목(oldRead)은 예정대로 삭제된다.
+    // 목록 순서상 null 항목이 먼저 평가되는 배치를 그대로 유지해, 이전의 "전량 스킵" 회귀를 잡아낼 수 있게 한다.
     int daysOld = 30;
     LocalDateTime old = LocalDateTime.now().minusDays(daysOld + 1);
     Notification nullCreatedAt = NotificationTestFixtures.newNotification(1L, 1L, "SYSTEM", "t", "m",
@@ -371,7 +370,7 @@ class NotificationServiceTest {
 
     assertDoesNotThrow(() -> notificationService.cleanupOldNotifications(daysOld));
 
-    // NPE가 스트림 중간에서 발생하므로 뒤따르는 정상 삭제 대상(oldRead)도 삭제되지 않는다.
-    verify(notificationRepository, never()).delete(any(Notification.class));
+    verify(notificationRepository, never()).delete(nullCreatedAt);
+    verify(notificationRepository, times(1)).delete(oldRead);
   }
 }

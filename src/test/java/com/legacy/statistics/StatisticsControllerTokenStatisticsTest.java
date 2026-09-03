@@ -23,9 +23,9 @@ import static org.mockito.Mockito.when;
  * StatisticsController.getTokenStatistics()/getMyTokenStatistics()를 검증한다.
  * 02-design-v1 5.4절 근거.
  *
- * <p>getTokenStatistics의 평균 토큰 계산은 `mapToLong(AnalysisHistory::getInputTokens)`처럼 null 방어가 없는
- * 메서드 참조를 사용하므로 해당 필드가 null이면 언박싱 NPE가 발생할 수 있다(NPE 관찰 #2).
- * 관찰 케이스는 실제 실행 결과를 그대로 기록하며, 정상/버그 여부는 이 사이클에서 확정하지 않는다(게이트2 판단).
+ * <p>getTokenStatistics의 평균 토큰 계산은 2026-09-remaining-bugfixes 사이클(REQ-005)에서 언박싱 NPE가
+ * 수정되어, `inputTokens`/`outputTokens`가 null인 이력을 0으로 취급해 정상 계산한다.
+ * 기존 관찰 케이스 2건은 수정 후의 확정 동작(200 OK + null을 0으로 취급한 평균)을 검증하도록 갱신됐다.
  */
 class StatisticsControllerTokenStatisticsTest {
 
@@ -130,32 +130,39 @@ class StatisticsControllerTokenStatisticsTest {
   }
 
   @Test
-  void 관찰케이스_getTokenStatistics는_inputTokens가_null이_섞이면_500을_반환한다() {
-    // 관찰 목적 테스트(정상/버그 판단 아님, 게이트2 판단 대상).
-    // 실측 결과(2026-09-01): `mapToLong(AnalysisHistory::getInputTokens)` 언박싱 지점에서
-    // NullPointerException이 실제로 발생했고, try-catch가 이를 잡아 HTTP 500 +
-    // message = "토큰 통계 조회 실패: null"(NPE의 getMessage()가 null)을 반환했다.
+  void getTokenStatistics는_inputTokens가_null이_섞여도_0으로_처리해_정상_계산한다() {
+    // REQ-005 수정 후 확정 동작: null인 inputTokens는 0으로 취급하고 평균 계산에 포함한다.
+    // 픽스처: inputTokens = [100, null→0], outputTokens = [50, 75]
+    //  - avg_input  = (100 + 0) / 2 = 50.0    → Math.round(50.0) = 50
+    //  - avg_output = (50 + 75) / 2 = 62.5    → Math.round(62.5) = 63 (기존 계산과 동일)
     when(analysisHistoryRepository.findAll()).thenReturn(Arrays.asList(
         StatisticsTestFixtures.newAnalysisHistory(1L, 1L, "COMPLETED", 1, 1L, 100L, 50L),
         StatisticsTestFixtures.newAnalysisHistory(2L, 1L, "COMPLETED", 1, 1L, null, 75L)));
 
     ResponseEntity<?> response = statisticsController.getTokenStatistics();
 
-    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getStatusCode());
-    assertEquals("토큰 통계 조회 실패: null", bodyOf(response).get("message"));
+    assertEquals(HttpStatus.OK, response.getStatusCode());
+    Map<?, ?> body = bodyOf(response);
+    assertEquals(50L, body.get("avg_input_tokens"));
+    assertEquals(63L, body.get("avg_output_tokens"));
   }
 
   @Test
-  void 관찰케이스_getTokenStatistics는_outputTokens가_null이_섞여도_동일하게_500을_반환한다() {
-    // inputTokens 평균은 정상 계산된 뒤 outputTokens 파이프라인에서 독립적으로 NPE가 발생한다.
+  void getTokenStatistics는_outputTokens가_null이_섞여도_0으로_처리해_정상_계산한다() {
+    // outputTokens는 inputTokens와 별개 파이프라인이며 동일하게 null을 0으로 취급한다.
+    // 픽스처: inputTokens = [100, 201], outputTokens = [50, null→0]
+    //  - avg_input  = (100 + 201) / 2 = 150.5 → Math.round(150.5) = 151
+    //  - avg_output = (50 + 0) / 2 = 25.0     → Math.round(25.0) = 25
     when(analysisHistoryRepository.findAll()).thenReturn(Arrays.asList(
         StatisticsTestFixtures.newAnalysisHistory(1L, 1L, "COMPLETED", 1, 1L, 100L, 50L),
         StatisticsTestFixtures.newAnalysisHistory(2L, 1L, "COMPLETED", 1, 1L, 201L, null)));
 
     ResponseEntity<?> response = statisticsController.getTokenStatistics();
 
-    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getStatusCode());
-    assertEquals("토큰 통계 조회 실패: null", bodyOf(response).get("message"));
+    assertEquals(HttpStatus.OK, response.getStatusCode());
+    Map<?, ?> body = bodyOf(response);
+    assertEquals(151L, body.get("avg_input_tokens"));
+    assertEquals(25L, body.get("avg_output_tokens"));
   }
 
   @Test

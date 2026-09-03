@@ -20,6 +20,10 @@ public class ApiResponseWrapper<T> {
   @JsonProperty("error")
   private ErrorInfo error;
 
+  // 에러 응답의 상위 수준(사용자용) 메시지. errorInfo.message(원인 메시지)와는 별개로 함께 보존한다.
+  @JsonProperty("message")
+  private String message;
+
   @JsonProperty("timestamp")
   private LocalDateTime timestamp;
 
@@ -49,6 +53,7 @@ public class ApiResponseWrapper<T> {
     ApiResponseWrapper<T> response = new ApiResponseWrapper<>();
     response.success = false;
     response.data = null;
+    response.message = message;
     response.error = errorInfo != null ? errorInfo : new ErrorInfo(null, message, null);
     return response;
   }
@@ -76,6 +81,14 @@ public class ApiResponseWrapper<T> {
 
   public void setError(ErrorInfo error) {
     this.error = error;
+  }
+
+  public String getMessage() {
+    return message;
+  }
+
+  public void setMessage(String message) {
+    this.message = message;
   }
 
   public LocalDateTime getTimestamp() {

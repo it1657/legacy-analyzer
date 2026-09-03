@@ -249,30 +249,30 @@ public class StatisticsController {
 
       Map<String, Object> stats = new HashMap<>();
 
-      // 평균 처리 시간
+      // 평균 처리 시간 (processingTimeMs가 null인 이력은 0으로 취급)
       double avgProcessingTime = allAnalysis.isEmpty() ? 0 :
           allAnalysis.stream()
-              .mapToLong(AnalysisHistory::getProcessingTimeMs)
+              .mapToLong(h -> h.getProcessingTimeMs() != null ? h.getProcessingTimeMs() : 0L)
               .average()
               .orElse(0);
 
-      // 최소/최대 처리 시간
+      // 최소/최대 처리 시간 (processingTimeMs가 null인 이력은 0으로 취급)
       long minProcessingTime = allAnalysis.isEmpty() ? 0 :
           allAnalysis.stream()
-              .mapToLong(AnalysisHistory::getProcessingTimeMs)
+              .mapToLong(h -> h.getProcessingTimeMs() != null ? h.getProcessingTimeMs() : 0L)
               .min()
               .orElse(0);
 
       long maxProcessingTime = allAnalysis.isEmpty() ? 0 :
           allAnalysis.stream()
-              .mapToLong(AnalysisHistory::getProcessingTimeMs)
+              .mapToLong(h -> h.getProcessingTimeMs() != null ? h.getProcessingTimeMs() : 0L)
               .max()
               .orElse(0);
 
-      // 평균 파일 수
+      // 평균 파일 수 (totalFiles가 null인 이력은 0으로 취급)
       double avgFilesPerAnalysis = allAnalysis.isEmpty() ? 0 :
           allAnalysis.stream()
-              .mapToLong(AnalysisHistory::getTotalFiles)
+              .mapToLong(h -> h.getTotalFiles() != null ? h.getTotalFiles() : 0L)
               .average()
               .orElse(0);
 
@@ -334,12 +334,13 @@ public class StatisticsController {
       // 평균 토큰 수
       List<AnalysisHistory> allAnalysis = analysisHistoryRepository.findAll();
       if (!allAnalysis.isEmpty()) {
+        // 토큰 수가 null인 이력은 0으로 취급
         double avgInputTokens = allAnalysis.stream()
-            .mapToLong(AnalysisHistory::getInputTokens)
+            .mapToLong(h -> h.getInputTokens() != null ? h.getInputTokens() : 0L)
             .average()
             .orElse(0);
         double avgOutputTokens = allAnalysis.stream()
-            .mapToLong(AnalysisHistory::getOutputTokens)
+            .mapToLong(h -> h.getOutputTokens() != null ? h.getOutputTokens() : 0L)
             .average()
             .orElse(0);
 

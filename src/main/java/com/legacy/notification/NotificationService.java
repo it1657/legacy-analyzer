@@ -162,7 +162,16 @@ public class NotificationService {
       LocalDateTime cutoffDate = LocalDateTime.now().minusDays(daysOld);
       notificationRepository.findAll()
           .stream()
-          .filter(n -> n.getCreatedAt().isBefore(cutoffDate) && n.isRead())
+          .filter(n -> {
+            // createdAt이 null이면 정리 대상 여부를 판단할 수 없으므로 건너뛴다(삭제하지 않음).
+            // 예외로 전체 정리를 중단시키지 않기 위해 경고 로그만 남긴다.
+            if (n.getCreatedAt() == null) {
+              log.warn("[오래된 알림 정리] createdAt이 null이라 정리 대상 판단을 건너뜀. notificationId={}",
+                  n.getId());
+              return false;
+            }
+            return n.getCreatedAt().isBefore(cutoffDate) && n.isRead();
+          })
           .forEach(n -> notificationRepository.delete(n));
 
       log.info("[오래된 알림 정리] {}일 이상 이전의 읽은 알림 제거", daysOld);

@@ -124,6 +124,9 @@ class AdminControllerAnalysisHistoryMutationAndDownloadTest {
         response.getHeaders().getContentType().toString());
     assertEquals(pptxContent.length, response.getHeaders().getContentLength());
 
+    // REQ-002: 폼 필드용 form-data가 아니라 파일 첨부용 attachment 타입이어야 한다.
+    assertThat(response.getHeaders().getContentDisposition().isAttachment()).isTrue();
+
     String contentDisposition = response.getHeaders().getContentDisposition().toString();
     Pattern pattern = Pattern.compile("filename=\"analysis_myproject_\\d{8}_\\d{6}\\.pptx\"");
     assertThat(pattern.matcher(contentDisposition).find()).isTrue();
@@ -158,7 +161,7 @@ class AdminControllerAnalysisHistoryMutationAndDownloadTest {
   }
 
   @Test
-  void downloadPresentation_sourcePath가_null이면_파일명이_analysis로_고정된다() throws IOException {
+  void downloadPresentation_sourcePath가_null이면_파일명이_untitled로_대체된다() throws IOException {
     AnalysisHistory history = AdminTestFixtures.newAnalysisHistory(1L, 10L, null, "/out",
         1, 1, 0, 0, 100L, "COMPLETED", null, null, null);
     when(analysisHistoryRepository.findById(1L)).thenReturn(Optional.of(history));
@@ -167,10 +170,11 @@ class AdminControllerAnalysisHistoryMutationAndDownloadTest {
 
     ResponseEntity<byte[]> response = adminController.downloadPresentation(1L);
 
-    // projectName이 "analysis" 고정값이 되고, 파일명 포맷 자체는 그대로 "analysis_{projectName}_{timestamp}.pptx"라서
-    // 최종 파일명은 "analysis_analysis_{timestamp}.pptx"가 된다(다른 sourcePath 케이스와 동일한 포맷 규칙 적용).
+    // REQ-001 수정 후: projectName 기본값이 "untitled"로 대체되어 최종 파일명은
+    // "analysis_untitled_{timestamp}.pptx"가 된다. 접두사 "analysis_"와 중복되지 않으며,
+    // 파일명 포맷 규칙("analysis_{projectName}_{timestamp}.pptx")은 다른 sourcePath 케이스와 동일하게 유지된다.
     String contentDisposition = response.getHeaders().getContentDisposition().toString();
-    Pattern pattern = Pattern.compile("filename=\"analysis_analysis_\\d{8}_\\d{6}\\.pptx\"");
+    Pattern pattern = Pattern.compile("filename=\"analysis_untitled_\\d{8}_\\d{6}\\.pptx\"");
     assertThat(pattern.matcher(contentDisposition).find()).isTrue();
   }
 

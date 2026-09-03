@@ -96,6 +96,8 @@ class MonitoringControllerLogsAndSummaryTest {
 
     assertErrorCode(response, "SESSION_NOT_FOUND");
     assertEquals("유효하지 않은 세션 ID", response.getError().getMessage());
+    // REQ-003: 상위 수준 message도 응답에 함께 남는다(errorInfo.message와 별개).
+    assertEquals("세션을 찾을 수 없습니다.", response.getMessage());
     verify(analysisLogger, never()).getSessionLogs(anyString());
   }
 
@@ -194,6 +196,8 @@ class MonitoringControllerLogsAndSummaryTest {
 
     assertErrorCode(response, "LOG_ERROR");
     assertEquals("로그 오류", response.getError().getMessage());
+    // REQ-003: 상위 수준 message도 응답에 함께 남는다(errorInfo.message와 별개).
+    assertEquals("로그 조회 실패: 로그 오류", response.getMessage());
   }
 
   // ---------- getSessionSummary ----------
@@ -208,6 +212,8 @@ class MonitoringControllerLogsAndSummaryTest {
 
     assertErrorCode(response, "SESSION_NOT_FOUND");
     assertEquals("유효하지 않은 세션 ID", response.getError().getMessage());
+    // REQ-003: 상위 수준 message도 응답에 함께 남는다(errorInfo.message와 별개).
+    assertEquals("세션을 찾을 수 없습니다.", response.getMessage());
   }
 
   @Test
@@ -255,6 +261,8 @@ class MonitoringControllerLogsAndSummaryTest {
 
     assertErrorCode(response, "ACCESS_DENIED");
     assertEquals("본인 세션만 조회할 수 있습니다.", response.getError().getMessage());
+    // REQ-003: 상위 수준 message도 응답에 함께 남는다(errorInfo.message와 별개).
+    assertEquals("접근 권한이 없습니다.", response.getMessage());
   }
 
   @Test
@@ -276,6 +284,8 @@ class MonitoringControllerLogsAndSummaryTest {
 
     assertErrorCode(response, "SESSION_ERROR");
     assertEquals("세션 저장소 오류", response.getError().getMessage());
+    // REQ-003: 상위 수준 message도 응답에 함께 남는다(errorInfo.message와 별개).
+    assertEquals("세션 요약 조회 실패: 세션 저장소 오류", response.getMessage());
   }
 
   @Test

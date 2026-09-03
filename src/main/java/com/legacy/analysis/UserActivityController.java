@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -154,8 +155,9 @@ public class UserActivityController {
     headers.setContentType(new MediaType("application",
         "vnd.openxmlformats-officedocument.presentationml.presentation"));
     headers.setContentLength(content.length);
-    headers.setContentDispositionFormData("attachment",
-        String.format("%s_%s_%s.pptx", type, projectName, timestamp));
+    String filename = String.format("%s_%s_%s.pptx", type, projectName, timestamp);
+    // 폼 필드용 form-data가 아니라 파일 첨부용 attachment 타입으로 지정한다.
+    headers.setContentDisposition(ContentDisposition.attachment().filename(filename).build());
     return new ResponseEntity<>(content, headers, HttpStatus.OK);
   }
 }

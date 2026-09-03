@@ -13,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -303,16 +304,18 @@ public class AdminController {
 
       byte[] pptxContent = presentationGeneratorService.generateAnalysisResultPresentation(history);
 
+      // sourcePath가 없으면 파일명 접두사("analysis_")와 겹치지 않도록 untitled를 기본값으로 쓴다.
       String projectName = history.getSourcePath() != null
-          ? history.getSourcePath().replaceAll(".*[/\\\\]", "") : "analysis";
+          ? history.getSourcePath().replaceAll(".*[/\\\\]", "") : "untitled";
 
       HttpHeaders headers = new HttpHeaders();
       headers.setContentType(new MediaType("application",
           "vnd.openxmlformats-officedocument.presentationml.presentation"));
       headers.setContentLength(pptxContent.length);
       String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-      headers.setContentDispositionFormData("attachment",
-          String.format("analysis_%s_%s.pptx", projectName, timestamp));
+      String filename = String.format("analysis_%s_%s.pptx", projectName, timestamp);
+      // 폼 필드용 form-data가 아니라 파일 첨부용 attachment 타입으로 지정한다.
+      headers.setContentDisposition(ContentDisposition.attachment().filename(filename).build());
 
       return new ResponseEntity<>(pptxContent, headers, HttpStatus.OK);
     } catch (Exception e) {
