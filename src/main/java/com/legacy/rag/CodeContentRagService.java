@@ -3,6 +3,7 @@ package com.legacy.rag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -59,6 +60,7 @@ public class CodeContentRagService {
     // 안전하게 빈 리스트를 반환하는 판단 근거로 쓴다.
     private final Map<String, String> sessionCollections = new ConcurrentHashMap<>();
 
+    @Autowired
     public CodeContentRagService(
             ObjectProvider<VectorStoreClient> vectorStoreClientProvider,
             ObjectProvider<EmbeddingClient> embeddingClientProvider,
