@@ -3,11 +3,13 @@ package com.legacy.admin;
 import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.analysis.llm.LlmProvider;
+import com.legacy.analysis.llm.OllamaModelDiscoveryClient;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -22,11 +24,14 @@ import static org.mockito.Mockito.*;
 class LlmModelAdminControllerTest {
 
   private LlmModelOptionService llmModelOptionService;
+  private OllamaModelDiscoveryClient ollamaModelDiscoveryClient;
   private LlmModelAdminController controller;
 
   private void setUp() {
     llmModelOptionService = mock(LlmModelOptionService.class);
-    controller = new LlmModelAdminController(llmModelOptionService);
+    // 2026-09(REQ-003 절충안): 컨트롤러 생성자에 OllamaModelDiscoveryClient가 추가돼 함께 목킹한다.
+    ollamaModelDiscoveryClient = mock(OllamaModelDiscoveryClient.class);
+    controller = new LlmModelAdminController(llmModelOptionService, ollamaModelDiscoveryClient);
   }
 
   private LlmModelOption fixture(Long id, String modelKey, LlmProvider provider, boolean active, boolean failoverTarget) {
@@ -54,7 +59,9 @@ class LlmModelAdminControllerTest {
   @Test
   void createModel_정상_요청이면_200과_등록된_모델을_반환한다() {
     setUp();
-    when(llmModelOptionService.create("qwen3-32b", "Qwen3", LlmProvider.LOCAL, 3))
+    // 2026-09(REQ-003 절충안): 컨트롤러가 create() 대신 createWithOllamaValidation()을 호출하도록
+    // 바뀌어 목킹 대상도 함께 옮긴다(회귀가 아니라 절충안 채택으로 새로 발생한 의도적 변경).
+    when(llmModelOptionService.createWithOllamaValidation("qwen3-32b", "Qwen3", LlmProvider.LOCAL, 3))
         .thenReturn(fixture(2L, "qwen3-32b", LlmProvider.LOCAL, true, false));
 
     ResponseEntity<?> response = controller.createModel(Map.of(
@@ -69,7 +76,7 @@ class LlmModelAdminControllerTest {
   @Test
   void createModel_이미_존재하는_모델키면_400과_에러메시지를_반환한다() {
     setUp();
-    when(llmModelOptionService.create(any(), any(), any(), anyInt()))
+    when(llmModelOptionService.createWithOllamaValidation(any(), any(), any(), anyInt()))
         .thenThrow(new IllegalStateException("이미 존재하는 모델 키입니다: claude-sonnet-4-6"));
 
     ResponseEntity<?> response = controller.createModel(Map.of(
@@ -160,5 +167,49 @@ class LlmModelAdminControllerTest {
     @SuppressWarnings("unchecked")
     Map<String, Object> body = (Map<String, Object>) response.getBody();
     assertEquals(LlmModelOptionService.MIN_ACTIVE_GUARD_MESSAGE, body.get("message"));
+  }
+
+  // ============ REQ-003(절충안, 2026-09) — Ollama 설치 모델 하드 검증 / 조회 엔드포인트 ============
+
+  @Test
+  void createModel_Ollama_미설치_모델이면_400을_반환한다() {
+    setUp();
+    when(llmModelOptionService.createWithOllamaValidation(any(), any(), any(), anyInt()))
+        .thenThrow(new IllegalStateException(
+            "Ollama에 설치되지 않은 모델입니다: 없는모델:1b (조회된 설치 모델 목록에 없음)"));
+
+    ResponseEntity<?> response = controller.createModel(Map.of(
+        "modelKey", "없는모델:1b", "displayName", "없는 모델", "provider", "local"));
+
+    assertEquals(400, response.getStatusCode().value());
+    @SuppressWarnings("unchecked")
+    Map<String, Object> body = (Map<String, Object>) response.getBody();
+    assertEquals("Ollama에 설치되지 않은 모델입니다: 없는모델:1b (조회된 설치 모델 목록에 없음)", body.get("message"),
+        "관리자 모달이 그대로 노출하는 메시지이므로 서버 메시지가 가공 없이 전달돼야 함");
+  }
+
+  @Test
+  void listOllamaInstalledModels_조회성공이면_available_true와_목록을_반환한다() {
+    setUp();
+    when(ollamaModelDiscoveryClient.listInstalledModels())
+        .thenReturn(Optional.of(List.of("qwen2.5-coder:7b", "llama3:8b")));
+
+    Map<String, Object> result = controller.listOllamaInstalledModels();
+
+    assertEquals(true, result.get("available"));
+    assertEquals(List.of("qwen2.5-coder:7b", "llama3:8b"), result.get("models"));
+  }
+
+  @Test
+  void listOllamaInstalledModels_조회실패면_available_false와_빈_목록을_반환한다() {
+    // Ollama 미기동/비Ollama 백엔드 환경 — 500을 던지지 않고 항상 200으로 응답해야
+    // 관리자 화면이 통째로 깨지지 않는다(프런트는 자동완성만 비우고 자유 입력을 허용).
+    setUp();
+    when(ollamaModelDiscoveryClient.listInstalledModels()).thenReturn(Optional.empty());
+
+    Map<String, Object> result = controller.listOllamaInstalledModels();
+
+    assertEquals(false, result.get("available"));
+    assertEquals(List.of(), result.get("models"));
   }
 }

@@ -81,6 +81,18 @@ class ClaudeServiceImplModelSwitchTest {
   }
 
   @Test
+  void local_모드에서_setModel로_override하면_override값을_반환한다() throws Exception {
+    // REQ-002(2026-09) 회귀 테스트: 과거 getCurrentModel()은 local 모드일 때 세션 오버라이드 맵을
+    // 아예 조회하지 않고 llmLocalModel(env)을 바로 반환해, setModel()로 저장된 사용자의 선택이
+    // 영원히 무시됐다("레이어 A 바이패스"). 이 수정 전이었다면 "qwen3-32b"가 반환돼 실패한다.
+    ClaudeServiceImpl service = newService("local", "qwen3-32b", "claude-sonnet-5");
+
+    service.setModel("/session/a", "다른로컬모델키");
+
+    assertEquals("다른로컬모델키", service.getCurrentModel("/session/a"));
+  }
+
+  @Test
   void sourceFolderPath가_null이면_오버라이드_여부와_무관하게_기본_apiModel을_반환한다() throws Exception {
     // /api/config/llm-provider처럼 특정 세션에 종속되지 않은 조회를 위한 안전장치.
     // ConcurrentHashMap은 null 키 조회 시 예외를 던지므로, null 가드가 없으면 이 호출 자체가 깨진다.

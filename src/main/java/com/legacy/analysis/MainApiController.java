@@ -2,6 +2,7 @@ package com.legacy.analysis;
 
 import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
+import com.legacy.analysis.llm.LlmProvider;
 import com.legacy.auth.JwtTokenProvider;
 import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
@@ -91,6 +92,11 @@ public class MainApiController {
   @Value("${llm.provider:anthropic}")
   private String llmProvider;
 
+  // availableProviders 계산용 — anthropic이 실제로 쓸 수 있는 배포인지 판정한다(REQ-001, 2026-09).
+  // ClaudeServiceImpl의 기존 API 키 가드와 동일 기준(빈 값/MOCK 접두사 제외)을 사용한다.
+  @Value("${anthropic.api.key:}")
+  private String anthropicApiKey;
+
   @Autowired
   public MainApiController(
       ClaudeService claudeService,
@@ -131,8 +137,11 @@ public class MainApiController {
   /**
    * 현재 활성화된 LLM provider와 모델을 프런트엔드에 알려주는 조회 엔드포인트 (scenario_0.md).
    * provider가 local이면 모델 드롭다운을 고정 표시로 바꾸는 등 UI 분기에 사용한다.
-   * 응답은 지금은 이 단순한 스키마로 가고, 사용자별 provider 권한(P2)을 도입하는 시점에
-   * 별도로 확장한다(plan.md P2 설계 참고) — 지금 이 스키마를 미리 키우지 않기로 결정.
+   *
+   * 2026-09(REQ-001) 확장: 기존 필드(provider/model/containerized)는 그대로 두고
+   * {@code availableProviders}(이 배포에서 실제로 선택 가능한 provider 목록)를 추가한다.
+   * 사용자별 provider 권한(P2)은 여전히 이번 스코프 밖이라, 목록은 서버 전역 설정
+   * (anthropic API 키 설정 여부 + DB 활성 LOCAL 모델 존재 여부)만으로 계산한다.
    */
   @GetMapping("/api/config/llm-provider")
   @ResponseBody
@@ -145,7 +154,27 @@ public class MainApiController {
     // (app 컨테이너에 임의 호스트 경로 bind mount가 없어 필연적으로 오류남 — 2026-07 확인).
     // 프런트엔드가 이 값을 보고 해당 UI 섹션을 숨긴다.
     result.put("containerized", isRunningInContainer());
+    // 순서는 ["anthropic", "local"] 고정 — 프런트가 이 순서 그대로 토글 버튼을 렌더링한다.
+    // 결과가 1개 이하면 프런트는 토글을 숨기고 기존 동작을 그대로 유지한다(scenario_1 등).
+    List<String> availableProviders = new ArrayList<>();
+    if (isAnthropicApiKeyConfigured()) {
+      availableProviders.add("anthropic");
+    }
+    if (llmModelOptionService != null && llmModelOptionService.hasActiveLocalModel()) {
+      availableProviders.add("local");
+    }
+    result.put("availableProviders", availableProviders);
     return result;
+  }
+
+  /**
+   * anthropic을 실제 선택지로 제공할 수 있는 배포인지 판정한다.
+   * ClaudeServiceImpl의 기존 API 키 가드와 동일 기준(빈 값 또는 "MOCK" 접두사면 미설정으로 간주).
+   * 두 클래스에 판정 로직이 중복되지만 {@code isAnthropicMode()}도 이미 동일하게 중복돼 있어
+   * 이 프로젝트의 기존 관례를 벗어나지 않는다.
+   */
+  private boolean isAnthropicApiKeyConfigured() {
+    return anthropicApiKey != null && !anthropicApiKey.isBlank() && !anthropicApiKey.startsWith("MOCK");
   }
 
   /**
@@ -155,10 +184,10 @@ public class MainApiController {
    * 달리 이 엔드포인트는 인증만 필요하고 관리자 권한은 요구하지 않는다 — 일반 사용자도 드롭다운을
    * 채워야 하기 때문이다. 활성(active=true) 모델만, 관리자가 지정한 노출 순서(displayOrder)대로 반환한다.
    *
-   * 전역 local 모드({@code isAnthropicMode()==false}) 여부와 무관하게 항상 DB 목록을 그대로 반환한다.
-   * local 모드에서는 프런트(dashboard.js의 initLlmProviderConfig())가 기존과 동일하게
-   * /api/config/llm-provider 응답을 보고 드롭다운을 "로컬 모델: {model}" 단일 표시로 강제 치환하므로,
-   * 이 API가 반환한 목록은 그 경우 화면에 쓰이지 않는다(설계 문서 §3 "전역 local 모드 경로는 그대로 유지").
+   * provider/모드({@code isAnthropicMode()}) 와 무관하게 항상 DB 활성 목록 전체를 반환하며,
+   * 프런트(dashboard.js)가 이를 provider 토글에 맞게 그룹핑해 소비한다(REQ-001, 2026-09).
+   * 즉 백엔드는 provider별 필터링을 하지 않는다 — 목록 크기가 작아 전체 조회 후 클라이언트에서
+   * 필터링하는 편이 왕복 횟수를 늘리지 않아 유리하다는 설계 판단(02-design-v2 §2.2).
    */
   @GetMapping("/api/config/llm-models")
   @ResponseBody
@@ -2751,6 +2780,19 @@ public class MainApiController {
     // 로컬/사내 LLM은 자체 호스팅이라 토큰당 과금이 없음 — scenario_0.md
     if (!isAnthropicMode()) {
       return 0.0;
+    }
+
+    // REQ-002(2026-09): anthropic 모드에서도 DB에 등록된 LOCAL 모델(failover 대상 등)을 세션이
+    // 실제로 쓸 수 있게 됐으므로, 그 경우도 과금 없음으로 처리한다. 이 분기가 없으면 로컬 모델명이
+    // "opus"/"sonnet" 어디에도 걸리지 않아 haiku 단가로 잘못 과금된다.
+    // llmModelOptionService가 없는(구버전 테스트 등) 경우에는 이 분기를 건너뛰어 기존 동작을 보존한다.
+    if (llmModelOptionService != null) {
+      boolean isLocalModel = llmModelOptionService.findByModelKey(modelName)
+          .map(opt -> opt.getProvider() == LlmProvider.LOCAL)
+          .orElse(false);
+      if (isLocalModel) {
+        return 0.0;
+      }
     }
 
     // 모델별 가격 (USD per 1M tokens, 2025 기준)

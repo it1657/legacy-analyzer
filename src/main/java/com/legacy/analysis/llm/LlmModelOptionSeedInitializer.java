@@ -3,6 +3,7 @@ package com.legacy.analysis.llm;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
@@ -24,6 +25,11 @@ public class LlmModelOptionSeedInitializer implements CommandLineRunner {
 
   private final LlmModelOptionService llmModelOptionService;
 
+  // REQ-002(2026-09): .env의 LLM_LOCAL_MODEL이 설정된 배포는 그 모델을 DB에도 1건 자동 등록해,
+  // local provider의 선택지가 0개가 되는 퇴행을 막는다(설계 §1.2). 미설정이면 no-op.
+  @Value("${llm.local.model:}")
+  private String llmLocalModel;
+
   @Autowired
   public LlmModelOptionSeedInitializer(LlmModelOptionService llmModelOptionService) {
     this.llmModelOptionService = llmModelOptionService;
@@ -33,6 +39,7 @@ public class LlmModelOptionSeedInitializer implements CommandLineRunner {
   public void run(String... args) throws Exception {
     log.info("[LLM 모델 기본값 시드] 확인 시작");
     llmModelOptionService.seedDefaultsIfEmpty();
+    llmModelOptionService.seedLocalFromEnvIfConfigured(llmLocalModel);
     log.info("[LLM 모델 기본값 시드] 확인 완료");
   }
 }

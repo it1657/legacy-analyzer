@@ -2,6 +2,8 @@ package com.legacy.analysis.llm;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -21,5 +23,25 @@ class LlmModelOptionSeedInitializerTest {
     initializer.run();
 
     verify(service, times(1)).seedDefaultsIfEmpty();
+  }
+
+  @Test
+  void run은_seedLocalFromEnvIfConfigured도_1회_호출한다() throws Exception {
+    // REQ-002(2026-09): .env의 LLM_LOCAL_MODEL을 DB에 자동 시드하는 호출부가 기동 경로에
+    // 실제로 연결돼 있는지 검증한다(멱등성 로직 자체는 LlmModelOptionServiceTest가 다룬다).
+    // @Value 필드는 순수 단위 테스트에서 주입되지 않으므로 리플렉션으로 직접 설정한다.
+    LlmModelOptionService service = mock(LlmModelOptionService.class);
+    LlmModelOptionSeedInitializer initializer = new LlmModelOptionSeedInitializer(service);
+    setField(initializer, "llmLocalModel", "qwen2.5-coder:7b");
+
+    initializer.run();
+
+    verify(service, times(1)).seedLocalFromEnvIfConfigured("qwen2.5-coder:7b");
+  }
+
+  private void setField(Object target, String name, Object value) throws Exception {
+    Field field = LlmModelOptionSeedInitializer.class.getDeclaredField(name);
+    field.setAccessible(true);
+    field.set(target, value);
   }
 }

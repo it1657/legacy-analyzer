@@ -49,6 +49,16 @@
         </div>
         <div class="card-body">
             <div style="display: flex; flex-direction: column; gap: 15px;">
+                <!-- REQ-001(2026-09): 서버가 실제로 제공 가능한 provider가 2개 이상일 때만 dashboard.js가
+                     이 컨테이너를 노출한다(GET /api/config/llm-provider의 availableProviders 기준).
+                     1개 이하인 배포(scenario_1 경량 배포판 등)에서는 기존과 동일하게 숨겨진 상태로 남아
+                     아래 AI 모델 드롭다운만 보인다 — 기존 UX 무변경.
+                     data-provider 값은 백엔드 응답값("anthropic"/"local")과 정확히 일치해야 한다. -->
+                <div id="llmProviderToggle" class="control-row" style="display: none;">
+                    <label style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">🔀 제공자:</label>
+                    <button type="button" class="provider-toggle-btn" data-provider="anthropic">Anthropic (Claude)</button>
+                    <button type="button" class="provider-toggle-btn" data-provider="local">자체 LLM (Ollama 등)</button>
+                </div>
                 <div class="control-row">
                     <label for="modelSelect" style="font-weight: bold; min-width: 110px; white-space: nowrap; flex-shrink: 0;">🤖 AI 모델:</label>
                     <!-- Phase 3(2026-08-21): 하드코딩된 하이쿠/소넷/오퍼스 <option> 3개를 제거하고,

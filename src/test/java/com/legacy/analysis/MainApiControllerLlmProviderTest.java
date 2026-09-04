@@ -86,6 +86,18 @@ class MainApiControllerLlmProviderTest {
     return controller;
   }
 
+  /** availableProviders 계산에만 쓰이는 @Value 필드를 리플렉션으로 세팅한다(REQ-001, 2026-09). */
+  private void setAnthropicApiKey(MainApiController controller, String apiKey) throws Exception {
+    Field field = MainApiController.class.getDeclaredField("anthropicApiKey");
+    field.setAccessible(true);
+    field.set(controller, apiKey);
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<String> getAvailableProviders(MainApiController controller) throws Exception {
+    return (List<String>) getLlmProviderConfig(controller).get("availableProviders");
+  }
+
   @SuppressWarnings("unchecked")
   private List<Map<String, Object>> getLlmModelOptions(MainApiController controller) throws Exception {
     Method m = MainApiController.class.getDeclaredMethod("getLlmModelOptions");
@@ -136,6 +148,22 @@ class MainApiControllerLlmProviderTest {
   }
 
   @Test
+  void anthropic_모드에서_DB상_LOCAL_모델을_선택했으면_비용이_0이다() throws Exception {
+    // REQ-002(2026-09): 레이어 A 바이패스 제거로 anthropic 모드에서도 DB에 등록된 LOCAL 모델을
+    // 세션이 실제로 쓸 수 있게 됐다. 이 분기가 없으면 로컬 모델명이 "opus"/"sonnet" 어디에도
+    // 걸리지 않아 haiku 단가($0.80/$4)로 잘못 과금된다.
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    LlmModelOption localModel = new LlmModelOption("qwen3-32b", "Qwen3 32B", LlmProvider.LOCAL, 0);
+    when(llmModelOptionService.findByModelKey("qwen3-32b")).thenReturn(java.util.Optional.of(localModel));
+    MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "anthropic",
+        llmModelOptionService);
+
+    double cost = calculateEstimatedCost(controller, 1_000_000, 1_000_000, "qwen3-32b");
+
+    assertEquals(0.0, cost, "DB상 LOCAL provider 모델은 anthropic 모드에서도 과금 대상이 아니어야 함");
+  }
+
+  @Test
   void llm_provider_조회_엔드포인트는_local_모드에서_provider와_현재_모델을_반환한다() throws Exception {
     MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "local");
 
@@ -175,6 +203,57 @@ class MainApiControllerLlmProviderTest {
     boolean result = (boolean) m.invoke(controller);
 
     assertEquals(false, result, "/.dockerenv가 없는 일반 환경(로컬/CI)에서는 false여야 함");
+  }
+
+  @Test
+  void availableProviders는_anthropic_키만_설정돼있으면_anthropic_하나뿐이다() throws Exception {
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.hasActiveLocalModel()).thenReturn(false);
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-5"), "anthropic",
+        llmModelOptionService);
+    setAnthropicApiKey(controller, "sk-ant-real-key");
+
+    assertEquals(List.of("anthropic"), getAvailableProviders(controller));
+  }
+
+  @Test
+  void availableProviders는_anthropic_키가_없고_활성_LOCAL_모델이_있으면_local_하나뿐이다() throws Exception {
+    // scenario_1(경량 배포판) 회귀 가드 — .env.lite.example은 CLAUDE_API_KEY가 빈 값이고
+    // LLM_LOCAL_MODEL이 TASK-002의 env 자동 시드로 DB에 LOCAL 1건으로 들어간다.
+    // 이때 availableProviders가 정확히 ["local"] 하나여야 프런트가 토글을 숨기고
+    // 기존 "선택 여지 없음" UX를 그대로 재현한다(02-design-v2 §2.3).
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.hasActiveLocalModel()).thenReturn(true);
+    MainApiController controller = newController(new FakeClaudeService("qwen2.5-coder:7b"), "local",
+        llmModelOptionService);
+    setAnthropicApiKey(controller, "");
+
+    assertEquals(List.of("local"), getAvailableProviders(controller));
+  }
+
+  @Test
+  void availableProviders는_둘_다_설정돼있으면_anthropic_local_순서로_둘_다_포함한다() throws Exception {
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.hasActiveLocalModel()).thenReturn(true);
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-5"), "anthropic",
+        llmModelOptionService);
+    setAnthropicApiKey(controller, "sk-ant-real-key");
+
+    assertEquals(List.of("anthropic", "local"), getAvailableProviders(controller),
+        "프런트가 이 순서 그대로 토글 버튼을 렌더링하므로 순서가 고정돼야 함");
+  }
+
+  @Test
+  void availableProviders는_MOCK_키를_설정되지_않은_것으로_취급한다() throws Exception {
+    // ClaudeServiceImpl의 기존 API 키 가드와 동일 기준 — MOCK 접두사는 실제 호출이 불가능한
+    // 개발용 더미 값이므로 anthropic을 선택지로 제공하면 안 된다.
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.hasActiveLocalModel()).thenReturn(true);
+    MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "local",
+        llmModelOptionService);
+    setAnthropicApiKey(controller, "MOCK_API_KEY");
+
+    assertEquals(List.of("local"), getAvailableProviders(controller));
   }
 
   @Test

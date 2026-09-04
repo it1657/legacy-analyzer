@@ -119,3 +119,29 @@ span.badge-green { background-color: #1cc88a; }
         transform: rotate(360deg);
     }
 }
+
+/* ===================================================================
+   provider 토글 버튼 (REQ-001, 2026-09)
+   서버가 제공 가능한 provider가 2개 이상일 때만 #llmProviderToggle이 노출되고,
+   그 안의 버튼 중 현재 선택된 쪽에 .active가 붙는다(dashboard.js).
+   =================================================================== */
+.provider-toggle-btn {
+    background: #1e2a3a;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+.provider-toggle-btn:hover {
+    color: #e6edf3;
+    border-color: #4e73df;
+}
+.provider-toggle-btn.active {
+    background: #4e73df;
+    color: #ffffff;
+    border-color: #4e73df;
+    font-weight: bold;
+}

@@ -899,14 +899,20 @@
                 </div>
                 <div class="form-group">
                     <label for="llmModelKey">모델 키 <span style="color:#999;font-size:12px;">(실제 LLM 호출 시 전달되는 식별자, 등록 후 변경 불가)</span></label>
-                    <input type="text" id="llmModelKey" required placeholder="예: claude-sonnet-4-6, qwen3-32b">
+                    <!-- provider=LOCAL이면 Ollama에 실제 설치된 모델 목록을 자동완성으로 제안한다(REQ-003, 2026-09).
+                         datalist는 자유 입력을 막지 않으므로, Ollama 조회가 실패하는 배포(비Ollama LOCAL 백엔드 등)에서도
+                         기존처럼 임의 모델명을 직접 입력할 수 있다. 실제 등록 가능 여부는 서버가 최종 판정한다. -->
+                    <input type="text" id="llmModelKey" required placeholder="예: claude-sonnet-4-6, qwen3-32b"
+                           list="ollamaInstalledModelsDatalist" autocomplete="off">
+                    <datalist id="ollamaInstalledModelsDatalist"></datalist>
                 </div>
                 <div class="form-group">
                     <label for="llmModelProvider">provider</label>
-                    <select id="llmModelProvider" required>
+                    <select id="llmModelProvider" required onchange="loadOllamaInstalledModelsDatalist()">
                         <option value="ANTHROPIC">ANTHROPIC (Claude API)</option>
                         <option value="LOCAL">LOCAL (자체 호스팅)</option>
                     </select>
+                    <div id="ollamaInstalledModelsHint" style="color:#999;font-size:12px;margin-top:4px;"></div>
                 </div>
                 <div class="form-group">
                     <label for="llmModelDisplayOrder">노출 순서 <span style="color:#999;font-size:12px;">(작을수록 먼저 노출)</span></label>
@@ -1785,6 +1791,47 @@
             `).join('');
         }
 
+        // Ollama에 실제 설치된 모델 목록으로 모델 키 입력란의 자동완성(datalist)을 채운다 (REQ-003, 2026-09).
+        // provider가 LOCAL일 때만 조회하고, ANTHROPIC이면 호출 없이 datalist를 비운다.
+        // 조회가 실패해도(Ollama 미기동/비Ollama 백엔드) 폼 제출 자체는 막지 않는다 — 자동완성만 비고,
+        // 그 경우 서버도 하드 검증을 건너뛰어 자유 입력을 허용한다(설계 §3.2-bis 절충안).
+        async function loadOllamaInstalledModelsDatalist() {
+            const datalist = document.getElementById('ollamaInstalledModelsDatalist');
+            const hint = document.getElementById('ollamaInstalledModelsHint');
+            if (!datalist) return;
+            datalist.innerHTML = '';
+            if (hint) hint.textContent = '';
+
+            const provider = document.getElementById('llmModelProvider').value;
+            if (provider !== 'LOCAL') return;
+
+            try {
+                const response = await fetch('/api/admin/llm-models/ollama-installed', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!response.ok) return;
+                const data = await response.json();
+                if (!data.available) {
+                    if (hint) hint.textContent = 'Ollama 설치 모델 목록을 가져오지 못했습니다 — 모델 키를 직접 입력하세요.';
+                    return;
+                }
+                (data.models || []).forEach(name => {
+                    const option = document.createElement('option');
+                    // 저장형 XSS 방지: innerHTML 대신 value 속성으로만 설정(기존 populateModelSelectOptions 관례와 동일)
+                    option.value = name;
+                    datalist.appendChild(option);
+                });
+                if (hint) {
+                    hint.textContent = data.models && data.models.length > 0
+                        ? `Ollama 설치 모델 ${data.models.length}개를 자동완성으로 제안합니다.`
+                        : 'Ollama에 설치된 모델이 없습니다 — 먼저 ollama pull로 모델을 받아주세요.';
+                }
+            } catch (error) {
+                // 조회 실패는 정상 흐름의 일부다(Ollama 미기동 등) — 콘솔 경고만 남기고 자유 입력을 유지한다.
+                console.warn('[Ollama 설치 모델 조회 실패]', error);
+            }
+        }
+
         // 모델 추가 모달 열기
         function openAddLlmModelModal() {
             document.getElementById('llmModelForm').reset();
@@ -1794,6 +1841,8 @@
             document.getElementById('llmModelDisplayOrder').value = 0;
             document.getElementById('llmModelModalSubmitBtn').textContent = '추가';
             document.getElementById('llmModelModal').classList.add('active');
+            // 폼 reset 직후의 기본 provider 값에 맞춰 자동완성을 미리 채워둔다(기본값이 LOCAL인 경우 대비).
+            loadOllamaInstalledModelsDatalist();
         }
 
         // 모델 수정 모달 열기 (모델 키는 등록 후 불변 — 입력란 비활성화)
@@ -1816,6 +1865,8 @@
             document.getElementById('llmModelModalAlert').className = 'alert';
             document.getElementById('llmModelKey').disabled = false;
             document.getElementById('llmModelProvider').disabled = false;
+            document.getElementById('ollamaInstalledModelsDatalist').innerHTML = '';
+            document.getElementById('ollamaInstalledModelsHint').textContent = '';
         }
 
         // 모델 저장 (추가 또는 수정)

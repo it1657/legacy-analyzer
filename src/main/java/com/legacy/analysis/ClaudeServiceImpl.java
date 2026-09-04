@@ -139,23 +139,30 @@ public class ClaudeServiceImpl implements ClaudeService {
     /**
      * 호출에 쓸 modelKey를 기준으로 실제 LlmClient 구현체를 고른다.
      *
-     * "레이어 A"(전역 {@code llm.provider=local} 스위치)는 이번 변경과 무관하게 그대로 유지한다 —
-     * !isAnthropicMode()이면 세션 선택과 무관하게 항상 로컬 클라이언트로 고정(기존 동작 100% 보존,
-     * DB(llm_model_options) 조회조차 하지 않음 — 전역 local 모드는 애초에 DB에 등록되지 않은
-     * llmLocalModel 설정값을 그대로 쓰므로 DB 조회 대상이 아니다).
+     * "레이어 A"(전역 {@code llm.provider=local} 스위치)도 2026-09(REQ-002)부터 DB 기반 오버라이드를
+     * 따른다 — 과거에는 !isAnthropicMode()이면 DB(llm_model_options) 조회조차 하지 않고 무조건 로컬
+     * 클라이언트로 고정했으나, 그 바이패스 때문에 local 모드에서는 사용자가 화면에서 고른 모델이
+     * 무시됐다. 이제 모드와 무관하게 modelKey로 llm_model_options를 조회해 provider(ANTHROPIC/LOCAL)를
+     * 확인한다 — 크레딧소진 컨펌 수락 후 setModel()로 로컬 failover 모델이 세션에 지정되면, 같은
+     * 세션의 이후 호출은 이 조회를 통해 자동으로 로컬 클라이언트로 전환된다.
      *
-     * isAnthropicMode()==true(기본값, 대다수 배포)일 때만 modelKey로 llm_model_options를 조회해
-     * provider(ANTHROPIC/LOCAL)를 확인한다 — 크레딧소진 컨펌 수락 후 setModel()로 로컬 failover
-     * 모델이 세션에 지정되면, 같은 세션의 이후 호출은 이 조회를 통해 자동으로 로컬 클라이언트로 전환된다.
-     * DB에 없는 modelKey(비정상 상황에 대한 안전망)는 기존 기본값과 동일하게 ANTHROPIC으로 처리한다.
+     * DB에 없는 modelKey(비정상 상황에 대한 안전망)만 모드별 기본값으로 폴백한다 — anthropic 모드는
+     * ANTHROPIC(기존과 동일), local 모드는 LOCAL(기존 바이패스와 동일한 결과).
+     *
+     * llmModelOptionService가 null인 인스턴스(구버전 테스트가 이 협력자를 null로 넘겨 생성한 경우)는
+     * DB 조회 자체를 건너뛰고 모드별 기본값을 쓴다 — 위 codeContentRagService와 동일한 기존 관례다.
+     * 과거에는 local 고정 테스트가 !isAnthropicMode() 조기 반환 덕에 이 조회에 도달하지 않았는데,
+     * 바이패스를 제거하면서 도달하게 됐으므로 명시적 null 가드가 필요해졌다(프로덕션에서는 Spring이
+     * 항상 주입하므로 이 분기를 타지 않는다).
      */
     private LlmClient resolveLlmClient(String modelKey) {
-        if (!isAnthropicMode()) {
-            return llmClientResolver.resolve(LlmProvider.LOCAL);
+        LlmProvider fallback = isAnthropicMode() ? LlmProvider.ANTHROPIC : LlmProvider.LOCAL;
+        if (llmModelOptionService == null) {
+            return llmClientResolver.resolve(fallback);
         }
         LlmProvider provider = llmModelOptionService.findByModelKey(modelKey)
             .map(LlmModelOption::getProvider)
-            .orElse(LlmProvider.ANTHROPIC);
+            .orElse(fallback);
         return llmClientResolver.resolve(provider);
     }
 
@@ -188,19 +195,23 @@ public class ClaudeServiceImpl implements ClaudeService {
 
     @Override
     public String getCurrentModel(String sourceFolderPath) {
-        // local 모드에서는 Anthropic 모델명을 반환하면 안 됨 — llmClient.call()에 그대로 넘어가
-        // 자체 LLM 서버로 "claude-sonnet-4-6" 같은 존재하지 않는 모델명이 전송되는 버그를 방지
-        if (!isAnthropicMode()) {
-            return llmLocalModel;
-        }
         // sourceFolderPath가 없는 호출(예: 세션 무관 설정 조회 API)은 오버라이드를 조회할 대상이
-        // 없으므로 기본 모델을 그대로 반환한다. ConcurrentHashMap은 null 키를 허용하지 않으므로
+        // 없으므로 모드별 기본 모델을 그대로 반환한다. ConcurrentHashMap은 null 키를 허용하지 않으므로
         // 조회 전에 반드시 걸러내야 한다.
         if (sourceFolderPath == null) {
-            return apiModel;
+            return isAnthropicMode() ? apiModel : llmLocalModel;
         }
+        // REQ-002(2026-09): 세션 오버라이드를 모드와 무관하게 먼저 조회한다. 과거에는 local 모드에서
+        // 이 맵을 아예 읽지 않고 llmLocalModel(env)을 바로 반환해, setModel()로 저장된 사용자의
+        // 선택이 영원히 무시되는 구조적 버그가 있었다. 오버라이드 값은 setModel()에서 이미
+        // llmModelOptionService.isActiveModel()로 검증된 값이므로 그대로 신뢰한다.
         String override = sessionModelOverrides.get(sourceFolderPath);
-        return override != null ? override : apiModel;
+        if (override != null) {
+            return override;
+        }
+        // 오버라이드가 없을 때만 모드별 기본값으로 폴백한다 — local 모드에서 Anthropic 모델명이
+        // 자체 LLM 서버로 전송되는 것을 막던 기존 가드는 이 폴백으로 그대로 유지된다.
+        return isAnthropicMode() ? apiModel : llmLocalModel;
     }
 
     @Override

@@ -1,6 +1,7 @@
 package com.legacy.analysis.llm;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.Optional;
 
@@ -283,5 +284,158 @@ class LlmModelOptionServiceTest {
     service.seedDefaultsIfEmpty();
 
     verify(repository, never()).save(any());
+  }
+
+  // ============ createWithOllamaValidation (REQ-003 절충안, 2026-09) ============
+
+  /** OllamaModelDiscoveryClient를 목킹해 주입한 서비스(2-인자 생성자) — 하드 검증 경로 검증용. */
+  private LlmModelOptionService newServiceWithDiscovery(OllamaModelDiscoveryClient discoveryClient) {
+    repository = mock(LlmModelOptionRepository.class);
+    when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+    return new LlmModelOptionService(repository, discoveryClient);
+  }
+
+  @Test
+  void createWithOllamaValidation_LOCAL이고_조회성공_목록에있으면_등록된다() {
+    OllamaModelDiscoveryClient discoveryClient = mock(OllamaModelDiscoveryClient.class);
+    when(discoveryClient.listInstalledModels())
+        .thenReturn(Optional.of(java.util.List.of("qwen2.5-coder:7b", "llama3:8b")));
+    service = newServiceWithDiscovery(discoveryClient);
+    when(repository.existsByModelKey("qwen2.5-coder:7b")).thenReturn(false);
+
+    LlmModelOption saved = service.createWithOllamaValidation(
+        "qwen2.5-coder:7b", "Qwen2.5 Coder 7B", LlmProvider.LOCAL, 3);
+
+    assertEquals("qwen2.5-coder:7b", saved.getModelKey());
+    verify(repository).save(any());
+  }
+
+  @Test
+  void createWithOllamaValidation_LOCAL이고_조회성공_목록에없으면_거부된다() {
+    // 게이트1 사람 결정(절충안): 조회가 성공한 배포(= Ollama 확실히 연결됨)에서는
+    // 설치되지 않은 모델명을 등록조차 못하게 하드 차단한다.
+    OllamaModelDiscoveryClient discoveryClient = mock(OllamaModelDiscoveryClient.class);
+    when(discoveryClient.listInstalledModels())
+        .thenReturn(Optional.of(java.util.List.of("qwen2.5-coder:7b")));
+    service = newServiceWithDiscovery(discoveryClient);
+
+    IllegalStateException e = assertThrows(IllegalStateException.class,
+        () -> service.createWithOllamaValidation("없는모델:1b", "없는 모델", LlmProvider.LOCAL, 3));
+
+    assertTrue(e.getMessage().contains("Ollama에 설치되지 않은 모델입니다"));
+    verify(repository, never()).save(any());
+  }
+
+  @Test
+  void createWithOllamaValidation_LOCAL이고_조회실패면_자유입력이_허용된다() {
+    // 비Ollama LOCAL 백엔드(vLLM/LocalAI 등)나 Ollama 미기동 환경에서는 검증 자체가 불가능하므로
+    // 기존처럼 자유 텍스트 입력을 허용한다(경고 로그만 남김).
+    OllamaModelDiscoveryClient discoveryClient = mock(OllamaModelDiscoveryClient.class);
+    when(discoveryClient.listInstalledModels()).thenReturn(Optional.empty());
+    service = newServiceWithDiscovery(discoveryClient);
+    when(repository.existsByModelKey("임의모델:1b")).thenReturn(false);
+
+    LlmModelOption saved = service.createWithOllamaValidation("임의모델:1b", "임의 모델", LlmProvider.LOCAL, 3);
+
+    assertEquals("임의모델:1b", saved.getModelKey());
+    verify(repository).save(any());
+  }
+
+  @Test
+  void createWithOllamaValidation_ANTHROPIC이면_discovery를_호출하지_않는다() {
+    OllamaModelDiscoveryClient discoveryClient = mock(OllamaModelDiscoveryClient.class);
+    service = newServiceWithDiscovery(discoveryClient);
+    when(repository.existsByModelKey("claude-sonnet-4-6")).thenReturn(false);
+
+    service.createWithOllamaValidation("claude-sonnet-4-6", "Claude Sonnet", LlmProvider.ANTHROPIC, 0);
+
+    verify(discoveryClient, never()).listInstalledModels();
+    verify(repository).save(any());
+  }
+
+  @Test
+  void createWithOllamaValidation_discoveryClient가_없으면_검증없이_통과한다() {
+    // 1-인자(테스트 편의) 생성자로 만든 인스턴스 — "조회 실패"와 동일 취급이어야 한다.
+    service = newService();
+    when(repository.existsByModelKey("임의모델:1b")).thenReturn(false);
+
+    LlmModelOption saved = service.createWithOllamaValidation("임의모델:1b", "임의 모델", LlmProvider.LOCAL, 3);
+
+    assertEquals("임의모델:1b", saved.getModelKey());
+  }
+
+  // ===================== hasActiveLocalModel (REQ-001, 2026-09) =====================
+
+  @Test
+  void hasActiveLocalModel_활성_LOCAL_모델이_있으면_true다() {
+    service = newService();
+    when(repository.findByActiveTrueOrderByDisplayOrderAsc()).thenReturn(java.util.List.of(
+        fixture(1L, "claude-sonnet-4-6", LlmProvider.ANTHROPIC, true, false),
+        fixture(2L, "qwen2.5-coder:7b", LlmProvider.LOCAL, true, false)));
+
+    assertTrue(service.hasActiveLocalModel());
+  }
+
+  @Test
+  void hasActiveLocalModel_활성_LOCAL_모델이_없으면_false다() {
+    service = newService();
+    when(repository.findByActiveTrueOrderByDisplayOrderAsc()).thenReturn(java.util.List.of(
+        fixture(1L, "claude-sonnet-4-6", LlmProvider.ANTHROPIC, true, false)));
+
+    assertFalse(service.hasActiveLocalModel());
+  }
+
+  // ===================== seedLocalFromEnvIfConfigured (REQ-002, 2026-09) =====================
+
+  @Test
+  void seedLocalFromEnvIfConfigured_설정값이_있고_미등록이면_LOCAL로_등록한다() {
+    service = newService();
+    when(repository.existsByModelKey("qwen2.5-coder:7b")).thenReturn(false);
+    when(repository.count()).thenReturn(3L);
+
+    service.seedLocalFromEnvIfConfigured("qwen2.5-coder:7b");
+
+    ArgumentCaptor<LlmModelOption> captor = ArgumentCaptor.forClass(LlmModelOption.class);
+    verify(repository).save(captor.capture());
+    assertEquals("qwen2.5-coder:7b", captor.getValue().getModelKey());
+    assertEquals(LlmProvider.LOCAL, captor.getValue().getProvider());
+    // displayOrder는 기존 행 수(count) 뒤에 붙는다.
+    assertEquals(3, captor.getValue().getDisplayOrder());
+  }
+
+  @Test
+  void seedLocalFromEnvIfConfigured_이미_등록된_modelKey면_중복등록하지_않는다() {
+    service = newService();
+    when(repository.existsByModelKey("qwen2.5-coder:7b")).thenReturn(true);
+
+    service.seedLocalFromEnvIfConfigured("qwen2.5-coder:7b");
+
+    verify(repository, never()).save(any());
+  }
+
+  @Test
+  void seedLocalFromEnvIfConfigured_값이_비어있으면_아무것도_하지_않는다() {
+    service = newService();
+
+    service.seedLocalFromEnvIfConfigured(null);
+    service.seedLocalFromEnvIfConfigured("");
+    service.seedLocalFromEnvIfConfigured("   ");
+
+    verify(repository, never()).save(any());
+    verify(repository, never()).existsByModelKey(any());
+  }
+
+  @Test
+  void seedLocalFromEnvIfConfigured_등록된_모델은_failoverTarget이_false다() {
+    // failover 대상 지정은 관리자의 명시적 행위여야 하므로 자동 시드가 이를 대신하면 안 된다(설계 §1.3).
+    service = newService();
+    when(repository.existsByModelKey("qwen2.5-coder:7b")).thenReturn(false);
+    when(repository.count()).thenReturn(0L);
+
+    service.seedLocalFromEnvIfConfigured("qwen2.5-coder:7b");
+
+    ArgumentCaptor<LlmModelOption> captor = ArgumentCaptor.forClass(LlmModelOption.class);
+    verify(repository).save(captor.capture());
+    assertFalse(captor.getValue().isFailoverTarget());
   }
 }

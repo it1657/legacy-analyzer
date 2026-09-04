@@ -602,6 +602,11 @@ function populateModelSelectOptions(models) {
 // scenario_0.md: 현재 활성화된 LLM provider를 물어봐서, local이면 모델 드롭다운을
 // "로컬 모델: {model} (무료·자체 호스팅)" 단일 표시로 바꾼다. anthropic(기본값)이면 DB에 등록된
 // 활성 모델 목록(GET /api/config/llm-models)으로 드롭다운을 채운다(Phase 3, 2026-08-21).
+//
+// REQ-001(2026-09): 서버가 제공 가능한 provider가 2개인 배포에서는 위 두 분기 대신 상위
+// provider 토글을 노출하고, 선택된 provider에 속한 모델만 드롭다운에 채운다.
+// availableProviders가 1개 이하이면(scenario_1 경량 배포판, anthropic 키 미설정 등) 기존 두 분기를
+// 그대로 타서 기존 UX가 100% 보존된다 — 이게 이 변경의 회귀 방지 핵심이다.
 async function initLlmProviderConfig() {
   const select = document.getElementById('modelSelect');
   const hint = document.getElementById('modelSelectHint');
@@ -615,7 +620,14 @@ async function initLlmProviderConfig() {
     }
     const config = await resp.json();
 
-    if (select && config.provider === 'local') {
+    // availableProviders는 2026-09에 추가된 필드다. 구버전 서버 응답(필드 없음)에서도 깨지지 않도록
+    // 배열이 아닌 값은 빈 배열로 취급해 기존 분기로 자연스럽게 떨어지게 한다.
+    const availableProviders = Array.isArray(config.availableProviders) ? config.availableProviders : [];
+
+    if (select && availableProviders.length >= 2) {
+      initLlmProviderToggle(availableProviders, config.provider);
+      await loadModelOptionsForProvider(config.provider);
+    } else if (select && config.provider === 'local') {
       const modelName = config.model || '(모델명 미설정)';
       select.innerHTML = `<option value="${modelName}" selected>로컬 모델: ${modelName} (무료 · 자체 호스팅)</option>`;
       select.disabled = true; // 선택지가 하나뿐이라 조작 불가로 표시
@@ -638,6 +650,110 @@ async function initLlmProviderConfig() {
     console.warn('[LLM provider 조회 실패]', e);
     populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
   }
+}
+
+/**
+ * provider 토글(#llmProviderToggle)을 노출하고 클릭 리스너를 1회 연결한다 (REQ-001, 2026-09).
+ * 서버가 준 순서(availableProviders)에 없는 버튼은 숨겨서, 응답 스키마가 늘어나도 마크업을
+ * 고치지 않고 그대로 대응할 수 있게 한다.
+ *
+ * @param {Array<string>} availableProviders - 서버가 제공 가능한 provider 목록(["anthropic","local"] 순서 고정)
+ * @param {string} currentProvider - 초기 선택 상태로 표시할 provider
+ */
+function initLlmProviderToggle(availableProviders, currentProvider) {
+  const container = document.getElementById('llmProviderToggle');
+  if (!container) return;
+
+  const buttons = container.querySelectorAll('.provider-toggle-btn');
+  // 서버가 제공하지 않는 provider의 버튼은 아예 감춘다(잘못 눌러 빈 목록을 보게 되는 상황 방지).
+  buttons.forEach(btn => {
+    btn.style.display = availableProviders.includes(btn.dataset.provider) ? '' : 'none';
+  });
+
+  // 초기 선택 탭 — 서버가 준 현재 provider가 목록에 없으면 첫 번째 항목으로 떨어뜨린다.
+  const initialProvider = availableProviders.includes(currentProvider) ? currentProvider : availableProviders[0];
+  setActiveProviderToggle(initialProvider);
+
+  buttons.forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider;
+      setActiveProviderToggle(provider);
+      await loadModelOptionsForProvider(provider);
+    });
+  });
+
+  container.style.display = '';
+}
+
+/** 토글 버튼들 중 선택된 provider에만 .active 클래스를 남긴다. */
+function setActiveProviderToggle(provider) {
+  const container = document.getElementById('llmProviderToggle');
+  if (!container) return;
+  container.querySelectorAll('.provider-toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.provider === provider);
+  });
+}
+
+/**
+ * 선택된 provider에 속한 모델만으로 AI 모델 드롭다운을 채운다 (REQ-001, 2026-09).
+ * 백엔드에 provider 필터 파라미터를 새로 만들지 않고 기존 GET /api/config/llm-models(전체 활성 목록)를
+ * 그대로 호출한 뒤 클라이언트에서 거른다 — 목록 크기가 작아 왕복 1회로 유지하는 편이 낫다는 설계 판단.
+ *
+ * @param {string} provider - 'anthropic' 또는 'local'(백엔드 응답의 provider 값은 대문자 ANTHROPIC/LOCAL)
+ */
+async function loadModelOptionsForProvider(provider) {
+  const select = document.getElementById('modelSelect');
+  const hint = document.getElementById('modelSelectHint');
+  const target = String(provider || '').toUpperCase();
+
+  let models = [];
+  try {
+    const resp = await fetch('/api/config/llm-models');
+    if (resp.ok) {
+      const all = await resp.json();
+      models = Array.isArray(all) ? all.filter(m => String(m.provider || '').toUpperCase() === target) : [];
+    } else {
+      console.warn('[LLM 모델 목록 조회 실패] status=', resp.status);
+    }
+  } catch (e) {
+    console.warn('[LLM 모델 목록 조회 실패]', e);
+  }
+
+  if (models.length > 0) {
+    populateModelSelectOptions(models);
+    if (hint) {
+      hint.textContent = target === 'LOCAL' ? '자체 호스팅 LLM · 과금 없음' : '입력/출력 토큰 기준';
+    }
+    return;
+  }
+
+  // 필터 결과가 0건인 경우의 폴백. anthropic은 기존과 동일하게 하드코딩 3종으로 되돌리고,
+  // local은 폴백할 값 자체가 없으므로(모델명은 배포마다 다름) 안내 문구 + 비활성화로 처리한다.
+  if (target === 'LOCAL') {
+    if (select) {
+      select.innerHTML = '<option value="" selected>등록된 로컬 모델 없음</option>';
+      select.disabled = true;
+    }
+    if (hint) hint.textContent = '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.';
+  } else {
+    populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
+    if (hint) hint.textContent = '입력/출력 토큰 기준';
+  }
+}
+
+/**
+ * "분석 시작" 계열 진입점(로컬 경로 분석 `runBatchAnalysis()` / 업로드 분석
+ * `runUploadAnalysis()`)에서 공통으로 쓰는 가드. loadModelOptionsForProvider(provider)의
+ * LOCAL 0건 폴백 분기가 남긴 상태(#modelSelect가 disabled=true이면서 value=''인 경우)를
+ * 감지해, 화면 안내("등록된 로컬 모델 없음")와 실제 분석 요청이 어긋나지 않도록 한다
+ * (TASK-009, bug-suspects.md 2026-09-03 "provider 토글에서 local을 고른 상태로..." 항목).
+ * 기존 `|| 'claude-sonnet-4-6'` 폴백 코드는 그대로 두되, 이 가드가 그 폴백에 도달하기 전에
+ * 먼저 분석 시작 자체를 막는다.
+ * @returns {boolean} true면 분석을 시작해서는 안 되는 상태(호출부는 알럿 후 return해야 함)
+ */
+function isModelSelectUnavailable() {
+  const select = document.getElementById('modelSelect');
+  return !!select && select.disabled && select.value === '';
 }
 
 /**
@@ -716,6 +832,11 @@ async function runBatchAnalysis() {
   const progressPanel = document.getElementById('progressPanel');
   const step1Btn = document.querySelector("button[onclick='loadDashboard()']");
   const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
+
+  if (isModelSelectUnavailable()) {
+    alert('선택 가능한 로컬 모델이 없습니다. 관리자에게 문의하거나 다른 provider를 선택해 주세요.');
+    return;
+  }
 
   if (!sourcePath.trim()) { alert('원본 소스 경로를 지정해 주세요!'); return; }
   if (fileTreeTotalCount > 0 && selectedFilePaths.size === 0) {
@@ -1478,6 +1599,11 @@ async function collectFilesFromDirectoryHandle(dirHandle, prefix = '') {
 }
 
 async function runUploadAnalysis() {
+  if (isModelSelectUnavailable()) {
+    alert('선택 가능한 로컬 모델이 없습니다. 관리자에게 문의하거나 다른 provider를 선택해 주세요.');
+    return;
+  }
+
   if (!uploadSourceHandle) { alert('분석할 폴더를 먼저 선택해 주세요!'); return; }
   if (fileTreeTotalCount > 0 && selectedFilePaths.size === 0) {
     alert('트리에서 분석할 파일을 하나 이상 선택해 주세요! (전체 분석을 원하면 [전체 선택] 버튼을 눌러주세요)');
