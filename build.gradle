@@ -81,6 +81,21 @@ test {
     // 초록/빨강 막대와 클래스별·메서드별 통과 여부를 시각적으로 볼 수 있음
 }
 
+tasks.register('qaTest', Test) {
+    description = 'QA 검증 전용 - test와 동일한 테스트 세트를 실행하되 결과 리포트를 별도 디렉터리에 남겨 dev/qa 동시 실행 시 결과 오염을 방지한다.'
+    group = 'verification'
+    useJUnitPlatform {
+        excludeTags 'manual'
+    }
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+        showStandardStreams = false
+    }
+    reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/qaTest')
+    reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/qaTest')
+}
+
 // 로컬 RAG 검증 전용 태스크 — 실제 Ollama+Chroma 컨테이너가 떠 있는 환경(docker-compose.yml +
 // docker-compose.local-smoke.override.yml 조합, README/주석 참고)에서만 수동 실행한다.
 // `./gradlew localSmokeTest`로 실행하며, 기본 `test` 태스크(CI 포함)에는 절대 섞이지 않는다.

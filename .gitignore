@@ -65,5 +65,6 @@ data/*.trace.db
 ### HTTPS 자체 서명 인증서 (머신별로 재생성 필요, 개인키 포함) ###
 nginx/certs/*.crt
 nginx/certs/*.key
-### Claude Code 로컬 설정 ###
-.claude/
+### Claude Code 로컬 설정 (권한/경로 등 머신별 설정만 무시, 에이전트 지침은 추적) ###
+.claude/settings.json
+.claude/settings.local.json
