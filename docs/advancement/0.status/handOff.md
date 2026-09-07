@@ -1,4 +1,4 @@
-# 진행 현황 핸드오프 (2026-09-01 기준, 41차 갱신)
+# 진행 현황 핸드오프 (2026-09-07 기준, 42차 갱신)
 
 이 문서는 `legacy-analyzer`를 "Claude API ↔ 로컬/사내 LLM 설정만으로 전환" 가능하게 만드는 작업의 현재까지 진행 상황을 정리한다. 새 세션/다른 담당자가 이어받을 때 이 문서만 읽고 바로 이어갈 수 있도록 작성한다.
 
@@ -1683,3 +1683,121 @@ dev가 qa에게 직접 요청을 보낼 수 있게 된 데 따른 부작용을 �
 - 목표2 착수 여부·순서는 analyzer-plan 쪽에서 별도 논의 후 신호 예정.
 - 기존 후속 과제(RAG B안 대형 프로젝트 성능/REQ-8 실서버 검증, failover 다중 탭 `failoverModalShown`,
   scenario_1/2 hold, scenario_3 PGX 권한 대기)는 40차 기록 그대로 유효하다.
+
+## 목표2 사이클 6건 연속 완료 + 파이프라인 프로세스 개선 (42차, 2026-09-02~07)
+
+41차가 목표1(레거시 전체 단위 테스트 커버리지)을 종결한 뒤, 그때 확정된 버그 6건 수정을 시작으로
+목표2 사이클이 연속 6건 진행돼 전부 `master`에 병합·push됐다. 이 기간의 특징은 **실제 `src/main`을
+고치는 사이클로 넘어왔다는 것**과, 그 과정에서 **파이프라인 자체의 결함이 여러 건 드러나 함께
+고쳐졌다는 것**이다. 후자가 이 항목의 절반을 차지한다 — 코드 변경보다 오래 남을 내용이라 상세히 남긴다.
+
+### 한눈에 보기
+
+| 커밋 | 날짜 | 사이클 | TASK | 회귀 |
+|---|---|---|---|---|
+| `4fa387f` | 09-02 | `2026-09-security-fixes` | 001~009 | 555 |
+| `6d96291` | 09-03 | `2026-09-remaining-bugfixes` | 001~005, 008~015 | 563 |
+| `d1b7fcd` | 09-03 | `2026-09-rag-service-boot-fix` | 001~003 | 564 |
+| `44914f0` | 09-04 | `2026-09-llm-provider-ux-redesign` | 001~009 | 589 |
+| `84419a8` | 09-04 | `2026-09-gradle-qatest-task-separation` | 001~002 | 589 |
+| `08a9435` | 09-07 | `2026-09-anthropic-guard-bypass-fixes` | 001~002 | 603 |
+
+테스트는 549건(41차 시점) → **603건**으로 늘었고 감소는 전 구간 0건이다. 모든 수치는 dev·QA·메인
+세션이 각각 독립 실측해 3자 일치를 확인한 값이다.
+
+### 각 사이클 요약
+
+**`4fa387f` 보안 수정** — `MonitoringController`의 인가 우회(세션이 null이면 `&&` 단락평가로 소유자
+검사가 호출조차 되지 않던 3개 메서드), `DataInitializer` 로그 평문 비밀번호 제거 + 시딩/비밀번호
+환경변수화, `SecurityConfig` CSRF 저장소를 쿠키 기반으로 전환. **CSRF는 설계 전제가 실측과 달라
+work-order가 v3까지 갔다** — Spring Security 6 기본 핸들러가 `XorCsrfTokenRequestAttributeHandler`라
+쿠키(raw)와 헤더 기대값(마스킹)이 불일치해 더블 서브밋이 성립하지 않았고, dev와 QA가 각각 독립
+프로브로 같은 결과를 재현했다. 공식 SPA 레시피(`CsrfTokenRequestAttributeHandler` +
+`setCsrfRequestAttributeName(null)`)를 채택하면서 **BREACH 대응 XOR 마스킹을 포기하는 트레이드오프**를
+안았다 — 현재 CSRF 검사 대상 운영 경로가 테스트 더미(`/secure/echo`)뿐이라 노출 표면이 없다는 판단
+근거로 사람이 승인했다(구현 전에 설명하고 승인받음).
+
+**`6d96291` 비보안 버그 수정** — `StatisticsController` 언박싱 NPE 6곳, `NotificationService.
+cleanupOldNotifications`가 `createdAt=null` 1건 때문에 정리 대상 전량을 조용히 건너뛰던 문제,
+`AdminController` PPT 다운로드 파일명/`Content-Disposition`, `ApiResponseWrapper`에 최상위 `message`
+필드 신설(에러 메시지가 응답에서 폐기되던 문제). **사이클 도중 dev가 범위 밖에서 같은 버그의 잔여
+경로를 발견**해 TASK-013~015로 편입됐다 — `UserActivityController`에 `AdminController`와 동일한
+`setContentDispositionFormData` 오용이 남아 있었고, 이쪽은 `dashboard.js`가 실제로 호출하는 일반
+사용자 경로라 영향이 더 컸다. 이 패턴(관리자 경로만 고치고 사용자 경로를 놓침)은 이후 사이클에서
+한 번 더 반복된다.
+
+**`d1b7fcd` 기동 장애 긴급 수정** — `CodeContentRagService`에 인자를 받는 생성자가 2개인데 둘 다
+`@Autowired`가 없어 **Spring이 빈 생성에 실패, 앱이 아예 기동하지 못하던 상태**였다. 수정은 2줄
+(import + 애노테이션)이지만 **이 버그가 563건 GREEN을 통과했다는 사실이 본질**이다 — 모든 테스트가
+`new`로 직접 인스턴스를 만들어 Spring 컨테이너를 거치지 않았기 때문이다. 목표1을 네 사이클에 걸쳐
+완수했는데도 "앱이 뜨는가"는 아무도 검증하지 않고 있었다. 재발 방지로 `LegacyAnalyzerApplication
+ContextLoadTest`(`@SpringBootTest` + `@ActiveProfiles("h2")` + 인메모리 datasource)를 상시 스위트에
+추가했고, `@Autowired`를 일시 제거하면 이 테스트가 실제로 FAILED되는 RED→GREEN을 dev·QA가 각각
+실증했다. **이 테스트는 바로 다음 사이클에서 값을 했다** — provider UX 사이클이 신규 빈을 등록하고
+생성자를 2개로 분리했을 때(즉 같은 패턴) DI가 깨지지 않았음이 자동 확인됐다.
+
+**`44914f0` LLM provider UX 개편** — 상위 Ollama/Anthropic 토글 UI, 로컬 모드의 DB 기반 통합,
+관리자 모델 등록 시 Ollama 설치 모델 조회·검증(조회 성공 시 하드 차단 / 실패 시 자유 입력).
+TASK-001에서 **이 기간 유일한 QA Fail**이 났다 — 레이어A 바이패스를 제거하자 work-order의 회귀 목록
+밖 4개 클래스 24건이 NPE로 깨졌다. dev가 **테스트 24건을 고치는 대신 운영 코드에 null 가드 9줄**을
+넣어 해결했고(같은 클래스의 `codeContentRagService` 필드에 이미 명문화돼 있던 관례를 따름), QA는
+GREEN 결과를 보기 **전에** "테스트를 고쳐 통과시킨 것 아닌가"를 diff로 먼저 배제했다. 사이클 중
+발견된 잔여 리크는 TASK-009로 편입됐으나 **부분 해결에 그쳤다**(아래 다음 사이클로 이어짐).
+
+**`84419a8` gradle `qaTest` 태스크 분리** — dev와 qa가 같은 `test` 태스크를 동시에 실행해
+`build/test-results`가 서로 덮어써지던 사고가 **실측 3회 반복**된 끝에, 지시문이 아니라 구조로
+해결했다. `qaTest` 태스크를 신설해 결과 리포트 디렉터리를 물리적으로 분리(`build/reports/tests/qaTest`,
+`build/test-results/qaTest`)했고, dev·QA·메인 세션이 각각 동시 실행 조건(겹침 68초 / 92초 / 두 디렉터리
+공존)을 만들어 상호 침범 0건을 실증했다. 아울러 **`.claude/agents`·`.claude/commands`가 `.gitignore`
+대상이라 이력·롤백이 없던 문제**도 이 사이클에서 함께 해소돼 버전 관리에 편입됐다(`settings*.json`은
+계속 무시).
+
+**`08a9435` Anthropic 유출 경로 차단** — provider UX 사이클에서 등록된 버그 의심 2건(서버측 API 키
+가드 우회 / 클라이언트측 `FALLBACK_MODEL_OPTIONS` 경로)을 **서버·클라이언트 양쪽에서 함께** 막았다.
+원인이 양쪽에 걸쳐 있어 한쪽만 고치면 다른 트리거로 재발하는데, 같은 사이클 TASK-009가 정확히 그
+패턴을 실증했다 — 클라이언트 경로 하나를 막았더니 기존 코드의 다른 경로가 그대로 남았다. 서버는
+API 키 가드를 전역 `llm.provider` 기준에서 **실제 라우팅될 provider** 기준으로 전환했고, 클라이언트는
+조회 실패 fallback도 분석 시작 차단 가드에 포함시켰다.
+
+### 이 기간에 고쳐진 파이프라인 결함
+
+코드보다 이쪽이 오래 남을 내용이다. 전부 실제 사고가 나고 나서야 드러났다.
+
+| 결함 | 증상 | 조치 |
+|---|---|---|
+| gradle 결과 오염 | dev/qa 동시 실행 시 `build/test-results` 상호 덮어쓰기, **3회 반복** | `qaTest` 태스크로 디렉터리 물리 분리(`84419a8`) |
+| dev→qa 요청 유실 | 검증 요청이 도달하지 않아 **미검증 task가 게이트2로 갈 뻔** | `_status.md`의 `🔍 QA 검증중` 정의를 "요청 발송"이 아니라 "수신 확인됨"으로 축소 |
+| `ListAgents` 세션 레벨 비활성 | dev/qa의 18.5절 자동 보고가 **한 번도 작동한 적 없음**(`tools` 선언으로 해결 불가) | 메인 세션이 대신 보고하는 것으로 확정 |
+| 검증 중 산출물 변경 | QA 검증 중인 `dev.md`를 제3자가 수정 → 무고한 Fail 위험 | STRUCTURE.md 19절(검증 중 산출물 동결) 신설 |
+| 승인이 문서보다 앞섬 | 게이트2 승인은 났는데 `08-reschedule` 미발행 상태로 merge 지시 | 분기 C에서도 08 문서 항상 발행 + "먼저 기록 → 그 다음 실행 지시" 순서 확정 |
+| `.claude/` 버전 관리 부재 | 동작 규칙 정의 파일이 이력·롤백 없이 여러 주체에 의해 수정됨 | `.gitignore` 축소로 편입(`84419a8`) |
+
+### 반복해서 나온 실패 유형 — "측정값은 있는데 아무것도 증명하지 않는 경우"
+
+이 기간에 **같은 계열의 함정이 네 번** 나왔다. 전부 겉보기엔 검증이 된 것처럼 보였다.
+
+| 사례 | 겉보기 | 실제 |
+|---|---|---|
+| `Task :test UP-TO-DATE` | BUILD SUCCESSFUL | 테스트 0건 실행 (이전 XML 재사용) |
+| 컨테이너 `Up 7 seconds` | 정상 기동 | 크래시 루프 중 (재시작마다 리셋) |
+| DoD "grep 결과 5곳" | 기계적으로 검증 가능 | 주석 포함 8줄, 카운트 기준 불일치 |
+| 하네스 `fetch 0건` | 가드가 차단함 | 입력이 비어 그 앞 검증에서 멈춤 |
+
+네 번 모두 **아래 단계가 위 단계를 검증해서** 잡혔다(QA가 dev를, 메인 세션이 QA를). 절차가 막은 게
+아니라 개별 주체의 주의력이 잡은 것이므로 재발 가능성이 있다. **"음성 결과(0건·미발생)를 근거로 쓸
+때는 양성 대조군을 함께 제시한다"**는 원칙을 STRUCTURE.md에 넣을 것을 analyzer-plan에 제안해뒀다.
+
+DoD 문구 자체가 부정확했던 경우도 두 번 있었다 — `rag-service-boot-fix`의 "30초 이상 Up 유지"(문자
+그대로 따르면 크래시 루프도 통과)와 `anthropic-guard-bypass-fixes`의 "grep 5곳". 두 경우 모두 dev가
+숫자를 억지로 맞추지 않고 불일치를 그대로 보고해 PL이 해석을 확정했다.
+
+### 남은 과제
+
+- **`bug-suspects.md` 상태 갱신**: `2026-09-anthropic-guard-bypass-fixes`로 해소된 2건(서버측 API 키
+  가드 / 클라이언트측 `FALLBACK_MODEL_OPTIONS`)의 상태 갱신은 PM 권한이라 미처리 상태일 수 있다.
+- **실브라우저 확인**: provider UX 사이클의 TASK-006/007(admin datalist, provider 토글 실동작)은 이
+  개발 환경에 Ollama가 없고 provider 2개 조합을 만들 수 없어 코드 리뷰/단위 테스트로만 검증됐다.
+  PL이 게이트2 선행조건으로 제안했으나 **사람이 2026-09-04에 철회**했다("지금까지 계속 작업하고
+  진행해본 것"). `rag-service-boot-fix`가 "실기동 검증 누락 → 완전 장애" 선례라는 점만 기록해둔다.
+- 41차의 후속 과제(RAG B안 대형 프로젝트 성능/REQ-8 실서버 검증, failover 다중 탭
+  `failoverModalShown`, scenario_1/2 hold, scenario_3 PGX 권한 대기)는 그대로 유효하다.
