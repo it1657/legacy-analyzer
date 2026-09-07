@@ -6,6 +6,8 @@ description: analyzer-plan에서 게이트1 승인된 cycle-slug의 work-order�
 
 ## 진행 순서
 
+0. **analyzer-plan에 먼저 알린다 (2026-09-07 신설)** — 다른 무엇보다 먼저, `ListAgents`로 `analyzer-plan-`으로 시작하는 세션을 찾아 `SendMessage`로 "이 세션 착수했습니다(cycle-slug: {아는 범위까지})"를 보내세요. 못 찾아도(0개) 무시하고 계속 진행하세요 — 이건 analyzer-plan이 "언제 이 세션이 열렸는지"를 빨리 알 수 있게 하는 용도일 뿐, 실패해도 뒤 단계에 영향 없습니다.
+
 1. **cycle-slug 확정**
    - 인자로 받았으면 그대로 사용하세요.
    - 인자가 없으면 `../analyzer-plan/docs/pipeline/cycles/*/_status.md`를 모두 Glob+Read해서 "현재 단계"가 `게이트1 승인, 작업지시 확정` / `개발/QA 진행중` / `재조율 승인, 재진행` 중 하나인 사이클을 찾으세요.
