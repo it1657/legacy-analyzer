@@ -570,6 +570,12 @@ const FALLBACK_MODEL_OPTIONS = [
   { modelKey: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)' }
 ];
 
+// REQ-002(2026-09): GET /api/config/llm-provider 조회 자체가 실패했음을 기록한다.
+// populateModelSelectOptions(FALLBACK_MODEL_OPTIONS)만으로는 select가 disabled=false +
+// 유효한(빈 문자열 아닌) modelKey를 갖게 되어 기존 isModelSelectUnavailable()이 감지하지
+// 못한다 — "provider를 못 물어본 상태"를 별도로 표시해야 한다.
+let llmProviderConfigLoadFailed = false;
+
 /**
  * AI 모델 드롭다운(#modelSelect)을 주어진 옵션 목록으로 채운다.
  * 이전에 선택돼 있던 값이 새 목록에도 있으면 그대로 유지하고, 없으면 첫 항목을 선택한다
@@ -615,6 +621,7 @@ async function initLlmProviderConfig() {
     const resp = await fetch('/api/config/llm-provider');
     if (!resp.ok) {
       // 조회 실패 시에도 드롭다운이 "불러오는 중..." 자리표시자로 비어있지 않도록 안전망을 채운다.
+      llmProviderConfigLoadFailed = true;
       populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
       return;
     }
@@ -648,6 +655,7 @@ async function initLlmProviderConfig() {
   } catch (e) {
     // 네트워크 오류 등으로 조회 실패해도 드롭다운이 비어있지 않도록 안전망으로 채운다
     console.warn('[LLM provider 조회 실패]', e);
+    llmProviderConfigLoadFailed = true;
     populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
   }
 }
@@ -753,7 +761,18 @@ async function loadModelOptionsForProvider(provider) {
  */
 function isModelSelectUnavailable() {
   const select = document.getElementById('modelSelect');
+  // REQ-002(2026-09): provider 설정 조회 자체가 실패해 FALLBACK_MODEL_OPTIONS로 채워진 상태도
+  // "실제로 쓸 수 있는 모델을 모르는 상태"이므로 동일하게 분석 시작을 막는다.
+  if (llmProviderConfigLoadFailed) return true;
   return !!select && select.disabled && select.value === '';
+}
+
+/** isModelSelectUnavailable()이 true일 때 상황에 맞는 안내 문구를 반환한다 (REQ-002). */
+function getModelUnavailableAlertMessage() {
+  if (llmProviderConfigLoadFailed) {
+    return 'AI 모델 설정을 불러오지 못했습니다. 새로고침 후 다시 시도하거나 관리자에게 문의해 주세요.';
+  }
+  return '선택 가능한 로컬 모델이 없습니다. 관리자에게 문의하거나 다른 provider를 선택해 주세요.';
 }
 
 /**
@@ -834,7 +853,7 @@ async function runBatchAnalysis() {
   const step2Btn = document.querySelector("button[onclick='runBatchAnalysis()']");
 
   if (isModelSelectUnavailable()) {
-    alert('선택 가능한 로컬 모델이 없습니다. 관리자에게 문의하거나 다른 provider를 선택해 주세요.');
+    alert(getModelUnavailableAlertMessage());
     return;
   }
 
@@ -1600,7 +1619,7 @@ async function collectFilesFromDirectoryHandle(dirHandle, prefix = '') {
 
 async function runUploadAnalysis() {
   if (isModelSelectUnavailable()) {
-    alert('선택 가능한 로컬 모델이 없습니다. 관리자에게 문의하거나 다른 provider를 선택해 주세요.');
+    alert(getModelUnavailableAlertMessage());
     return;
   }
 

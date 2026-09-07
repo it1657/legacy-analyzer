@@ -137,7 +137,9 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     /**
-     * 호출에 쓸 modelKey를 기준으로 실제 LlmClient 구현체를 고른다.
+     * 호출에 쓸 modelKey가 실제로 어떤 provider(ANTHROPIC/LOCAL)로 라우팅될지 판별한다.
+     * (2026-09 REQ-001: 기존 resolveLlmClient() 내부 로직을 그대로 추출한 것으로 판정 결과는 동일하다 —
+     * API 키 가드(requiresAnthropicApiKey)가 "라우팅 결정"과 완전히 같은 코드 경로를 쓰게 하기 위함.)
      *
      * "레이어 A"(전역 {@code llm.provider=local} 스위치)도 2026-09(REQ-002)부터 DB 기반 오버라이드를
      * 따른다 — 과거에는 !isAnthropicMode()이면 DB(llm_model_options) 조회조차 하지 않고 무조건 로컬
@@ -155,15 +157,31 @@ public class ClaudeServiceImpl implements ClaudeService {
      * 바이패스를 제거하면서 도달하게 됐으므로 명시적 null 가드가 필요해졌다(프로덕션에서는 Spring이
      * 항상 주입하므로 이 분기를 타지 않는다).
      */
-    private LlmClient resolveLlmClient(String modelKey) {
+    private LlmProvider resolveProvider(String modelKey) {
         LlmProvider fallback = isAnthropicMode() ? LlmProvider.ANTHROPIC : LlmProvider.LOCAL;
         if (llmModelOptionService == null) {
-            return llmClientResolver.resolve(fallback);
+            return fallback;
         }
-        LlmProvider provider = llmModelOptionService.findByModelKey(modelKey)
+        return llmModelOptionService.findByModelKey(modelKey)
             .map(LlmModelOption::getProvider)
             .orElse(fallback);
-        return llmClientResolver.resolve(provider);
+    }
+
+    /** 호출에 쓸 modelKey를 기준으로 실제 LlmClient 구현체를 고른다(provider 판별은 resolveProvider()에 위임). */
+    private LlmClient resolveLlmClient(String modelKey) {
+        return llmClientResolver.resolve(resolveProvider(modelKey));
+    }
+
+    /**
+     * 이 요청이 실제로 호출할 provider가 ANTHROPIC인지(=Anthropic API 키가 반드시 필요한지) 판별한다
+     * (2026-09 REQ-001). 기존 가드가 쓰던 isAnthropicMode()는 전역 llm.provider 설정값만 봤기 때문에,
+     * local 모드 서버에서 세션이 setModel()로 ANTHROPIC 모델을 선택하면 API 키 없이도 가드를 통과해
+     * 사용자 코드가 Anthropic으로 나가는 문제가 있었다 — resolveProvider()를 그대로 재사용해
+     * 라우팅 판단과 가드 판단의 기준을 하나로 합친다.
+     */
+    private boolean requiresAnthropicApiKey(String sourceFolderPath) {
+        String modelKey = getCurrentModel(sourceFolderPath);
+        return resolveProvider(modelKey) == LlmProvider.ANTHROPIC;
     }
 
     /**
@@ -265,7 +283,7 @@ public class ClaudeServiceImpl implements ClaudeService {
             return baseTemplate;
         }
 
-        if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
+        if (requiresAnthropicApiKey(sourceFolderPath) && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
             log.warn("[CLAUDE.md 생성] API KEY 미설정으로 표준 템플릿을 그대로 사용합니다.");
             return baseTemplate;
         }
@@ -668,14 +686,14 @@ public class ClaudeServiceImpl implements ClaudeService {
 
         // README.md: Claude AI로 실제 프로젝트 분석 보고서 생성
         if ("README.md".equalsIgnoreCase(fileName) || "README_AI_SUMMARY.md".equalsIgnoreCase(fileName)) {
-            if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
+            if (requiresAnthropicApiKey(sourceFolderPath) && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
                 throw new AnalysisException(ApiErrorHandler.ErrorType.API_AUTHENTICATION,
                     new RuntimeException("Claude API KEY가 설정되지 않았습니다. application.properties를 확인하세요."));
             }
             return generateProjectReadmeWithClaude(sourceCode, sourceFolderPath);
         }
 
-        if (isAnthropicMode() && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
+        if (requiresAnthropicApiKey(sourceFolderPath) && (apiKey == null || "MOCK_KEY_FOR_TEST".equals(apiKey) || apiKey.startsWith("MOCK") || apiKey.trim().isEmpty())) {
             // API KEY 미설정 시 파일을 수정하지 않고 예외 발생 (원본 보호)
             log.warn("[API KEY 미설정] 파일 처리 건너뜀: {}", fileName);
             throw new AnalysisException(ApiErrorHandler.ErrorType.API_AUTHENTICATION,
