@@ -20,7 +20,7 @@ class MainApiControllerAnalysisStatusTest {
   private MainApiController newController(AnalysisSessionManager sessionManager) {
     return new MainApiController(
         null, null, sessionManager, null, null, null,
-        null, null, null, null, null, null, null, mock(LlmModelOptionService.class));
+        null, null, null, null, null, null, null, mock(LlmModelOptionService.class), null);
   }
 
   @Test

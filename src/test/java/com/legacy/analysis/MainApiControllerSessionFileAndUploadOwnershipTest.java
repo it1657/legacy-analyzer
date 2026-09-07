@@ -39,7 +39,7 @@ class MainApiControllerSessionFileAndUploadOwnershipTest {
   private MainApiController newController(AnalysisSessionManager sessionManager) {
     return new MainApiController(
         null, null, sessionManager, null, null, null,
-        null, null, null, null, null, null, null, null);
+        null, null, null, null, null, null, null, null, null);
   }
 
   /** uploadStoragePath(@Value, 기본 ".uploads")는 스프링 컨텍스트 없이는 주입되지 않으므로 리플렉션으로 세팅한다. */

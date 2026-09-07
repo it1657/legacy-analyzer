@@ -41,7 +41,7 @@ class MainApiControllerFailoverConfirmTest {
       LlmModelOptionService llmModelOptionService) throws Exception {
     return new MainApiController(
         claudeService, null, sessionManager, null, null, null,
-        analysisHistoryRepository, null, null, null, null, null, null, llmModelOptionService);
+        analysisHistoryRepository, null, null, null, null, null, null, llmModelOptionService, null);
   }
 
   @SuppressWarnings("unchecked")

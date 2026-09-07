@@ -31,7 +31,7 @@ class MainApiControllerSessionOwnershipTest {
       AnalysisHistoryRepository analysisHistoryRepository) {
     return new MainApiController(
         null, null, sessionManager, null, null, null,
-        analysisHistoryRepository, null, null, null, null, null, null, null);
+        analysisHistoryRepository, null, null, null, null, null, null, null, null);
   }
 
   /** 세션 소유자와 같은 로그인ID를 가진 일반 사용자 인증 객체 */

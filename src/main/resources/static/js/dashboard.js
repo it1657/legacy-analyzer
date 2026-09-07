@@ -635,10 +635,49 @@ async function initLlmProviderConfig() {
       initLlmProviderToggle(availableProviders, config.provider);
       await loadModelOptionsForProvider(config.provider);
     } else if (select && config.provider === 'local') {
-      const modelName = config.model || '(모델명 미설정)';
-      select.innerHTML = `<option value="${modelName}" selected>로컬 모델: ${modelName} (무료 · 자체 호스팅)</option>`;
-      select.disabled = true; // 선택지가 하나뿐이라 조작 불가로 표시
-      if (hint) hint.textContent = '자체 호스팅 LLM · 과금 없음';
+      // REQ-001(2026-09): local 단독 배포(토글 미노출)라도 활성 LOCAL 모델이 2개 이상이면 선택할 수
+      // 있어야 한다. 기존에는 provider 응답의 model 하나만 고정 표시해 나머지를 고를 방법이 없었다.
+      // 활성 LOCAL 모델이 1개인 배포(scenario_1 경량 배포판 등)는 아래 candidates.length === 1
+      // 분기를 타서 기존 고정 표시 UX가 그대로 유지된다 — 이게 이 변경의 회귀 방지 핵심이다.
+      const modelsResp = await fetch('/api/config/llm-models');
+      const all = modelsResp.ok ? await modelsResp.json() : [];
+      const dbLocalModels = Array.isArray(all) ? all.filter(m => String(m.provider || '').toUpperCase() === 'LOCAL') : [];
+
+      if (dbLocalModels.length === 0) {
+        // 이론상 도달하기 어렵다(hasActiveLocalModel()이 true여야 provider === 'local'이 온다) —
+        // 목록 조회 실패까지 포함한 방어적 처리.
+        select.innerHTML = '<option value="" selected>등록된 로컬 모델 없음</option>';
+        select.disabled = true;
+        if (hint) hint.textContent = '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.';
+      } else {
+        // REQ-002: DB 등록 목록을 Ollama에 실제 설치된 모델로 한 번 더 거른다.
+        const { models: candidates, filtered } = await filterInstalledLocalModels(dbLocalModels);
+        if (candidates.length === 0) {
+          select.innerHTML = '<option value="" selected>설치된 로컬 모델 없음</option>';
+          select.disabled = true;
+          if (hint) hint.textContent = 'Ollama에 실제 설치된 모델이 없습니다 — 관리자에게 문의하세요.';
+        } else if (candidates.length === 1) {
+          // 회귀 방지: 기존 고정 표시 UX(옵션 텍스트 포맷 포함)를 그대로 유지한다.
+          const only = candidates[0];
+          select.innerHTML = '';
+          const option = document.createElement('option');
+          option.value = only.modelKey;
+          option.textContent = `로컬 모델: ${only.displayName} (무료 · 자체 호스팅)`;
+          option.selected = true;
+          select.appendChild(option);
+          select.disabled = true; // 선택지가 하나뿐이라 조작 불가로 표시
+          if (hint) hint.textContent = '자체 호스팅 LLM · 과금 없음';
+        } else {
+          // 2개 이상이면 드롭다운으로 전환(REQ-001 신규). populateModelSelectOptions()가
+          // textContent 기반 XSS 안전 삽입 + disabled 해제를 담당한다.
+          populateModelSelectOptions(candidates);
+          if (hint) {
+            hint.textContent = filtered
+              ? '자체 호스팅 LLM · 과금 없음'
+              : '자체 호스팅 LLM · 과금 없음 (설치 여부 확인 불가 — 표시된 모델이 실제로 없을 수 있습니다)';
+          }
+        }
+      }
     } else if (select) {
       // provider === 'anthropic' — 전역 local 모드가 아니므로 DB 기반 모델 목록을 채운다.
       await loadAnthropicModelOptions();
@@ -703,6 +742,44 @@ function setActiveProviderToggle(provider) {
 }
 
 /**
+ * 서버가 캐싱된 discovery 결과를 통해 "지금 이 배포가 접속하는 Ollama에 실제 설치된 모델" 목록을
+ * 조회한다 (REQ-002, 2026-09). 관리자 전용 /api/admin/llm-models/ollama-installed와 달리 일반
+ * 사용자도 호출 가능한 /api/config/llm-models/local-installed를 쓴다.
+ * 조회 자체가 실패하면(네트워크 오류 등) "확인 불가"로 간주해 available=false를 반환한다 —
+ * 서버가 200으로 이미 available=false를 내려주는 경우(Ollama 미기동 등)와 동일하게 취급된다.
+ *
+ * @returns {Promise<{available: boolean, models: Array<string>}>}
+ */
+async function fetchLocalInstalledModelKeys() {
+  try {
+    const resp = await fetch('/api/config/llm-models/local-installed');
+    if (!resp.ok) return { available: false, models: [] };
+    const data = await resp.json();
+    return { available: !!data.available, models: Array.isArray(data.models) ? data.models : [] };
+  } catch (e) {
+    console.warn('[로컬 모델 설치 여부 조회 실패]', e);
+    return { available: false, models: [] };
+  }
+}
+
+/**
+ * DB 활성 LOCAL 모델 목록(dbModels, provider=LOCAL로 이미 필터링된 상태)을 discovery 결과로 다시
+ * 거른다 (REQ-002). discovery 조회 자체가 불가능하면(available=false) "확인 불가" 취지로 DB 목록을
+ * 그대로 반환하되 filtered=false로 표시해 호출부가 경고 문구를 붙일 수 있게 한다.
+ *
+ * @param {Array<{modelKey: string, displayName: string}>} dbModels - DB 활성 LOCAL 모델 목록
+ * @returns {Promise<{models: Array, filtered: boolean}>}
+ */
+async function filterInstalledLocalModels(dbModels) {
+  if (!dbModels || dbModels.length === 0) return { models: [], filtered: true };
+  const { available, models: installedKeys } = await fetchLocalInstalledModelKeys();
+  if (!available) {
+    return { models: dbModels, filtered: false };
+  }
+  return { models: dbModels.filter(m => installedKeys.includes(m.modelKey)), filtered: true };
+}
+
+/**
  * 선택된 provider에 속한 모델만으로 AI 모델 드롭다운을 채운다 (REQ-001, 2026-09).
  * 백엔드에 provider 필터 파라미터를 새로 만들지 않고 기존 GET /api/config/llm-models(전체 활성 목록)를
  * 그대로 호출한 뒤 클라이언트에서 거른다 — 목록 크기가 작아 왕복 1회로 유지하는 편이 낫다는 설계 판단.
@@ -727,22 +804,49 @@ async function loadModelOptionsForProvider(provider) {
     console.warn('[LLM 모델 목록 조회 실패]', e);
   }
 
+  // REQ-002(2026-09): LOCAL을 고른 경우에만 DB 등록 목록을 "실제 설치된 모델"로 한 번 더 거른다.
+  // 토글이 있는 배포(anthropic+local)에서도 토글 없는 배포(initLlmProviderConfig의 local 분기)와
+  // 동일한 필터가 적용되게 하기 위한 것이다. ANTHROPIC 경로는 이 블록에 들어오지 않으므로 영향 없음.
+  const hadDbLocalModels = models.length > 0;
+  let localDiscoveryFiltered = true;
+  if (hadDbLocalModels && target === 'LOCAL') {
+    const { models: candidates, filtered } = await filterInstalledLocalModels(models);
+    models = candidates;
+    localDiscoveryFiltered = filtered;
+  }
+
   if (models.length > 0) {
     populateModelSelectOptions(models);
     if (hint) {
-      hint.textContent = target === 'LOCAL' ? '자체 호스팅 LLM · 과금 없음' : '입력/출력 토큰 기준';
+      if (target !== 'LOCAL') {
+        hint.textContent = '입력/출력 토큰 기준';
+      } else {
+        // 확인 불가(discovery 실패)면 DB 목록을 그대로 노출하되 경고 문구를 부기한다.
+        hint.textContent = localDiscoveryFiltered
+          ? '자체 호스팅 LLM · 과금 없음'
+          : '자체 호스팅 LLM · 과금 없음 (설치 여부 확인 불가 — 표시된 모델이 실제로 없을 수 있습니다)';
+      }
     }
     return;
   }
 
   // 필터 결과가 0건인 경우의 폴백. anthropic은 기존과 동일하게 하드코딩 3종으로 되돌리고,
   // local은 폴백할 값 자체가 없으므로(모델명은 배포마다 다름) 안내 문구 + 비활성화로 처리한다.
+  // 0건 사유가 "DB에 등록 자체가 없음"인지 "등록은 있으나 실제 설치된 게 없음(REQ-002 필터)"인지에
+  // 따라 문구를 나눠, initLlmProviderConfig()의 local 단독 분기와 동일한 안내를 보여준다.
   if (target === 'LOCAL') {
+    const noneInstalled = hadDbLocalModels;
     if (select) {
-      select.innerHTML = '<option value="" selected>등록된 로컬 모델 없음</option>';
+      select.innerHTML = noneInstalled
+        ? '<option value="" selected>설치된 로컬 모델 없음</option>'
+        : '<option value="" selected>등록된 로컬 모델 없음</option>';
       select.disabled = true;
     }
-    if (hint) hint.textContent = '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.';
+    if (hint) {
+      hint.textContent = noneInstalled
+        ? 'Ollama에 실제 설치된 모델이 없습니다 — 관리자에게 문의하세요.'
+        : '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.';
+    }
   } else {
     populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
     if (hint) hint.textContent = '입력/출력 토큰 기준';
@@ -753,7 +857,7 @@ async function loadModelOptionsForProvider(provider) {
  * "분석 시작" 계열 진입점(로컬 경로 분석 `runBatchAnalysis()` / 업로드 분석
  * `runUploadAnalysis()`)에서 공통으로 쓰는 가드. loadModelOptionsForProvider(provider)의
  * LOCAL 0건 폴백 분기가 남긴 상태(#modelSelect가 disabled=true이면서 value=''인 경우)를
- * 감지해, 화면 안내("등록된 로컬 모델 없음")와 실제 분석 요청이 어긋나지 않도록 한다
+ * 감지해, 화면 안내("등록된/설치된 로컬 모델 없음")와 실제 분석 요청이 어긋나지 않도록 한다
  * (TASK-009, bug-suspects.md 2026-09-03 "provider 토글에서 local을 고른 상태로..." 항목).
  * 기존 `|| 'claude-sonnet-4-6'` 폴백 코드는 그대로 두되, 이 가드가 그 폴백에 도달하기 전에
  * 먼저 분석 시작 자체를 막는다.

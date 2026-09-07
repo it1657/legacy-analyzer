@@ -37,7 +37,7 @@ class MainApiControllerCreditExhaustedResumeRegressionTest {
       LlmModelOptionService llmModelOptionService) {
     return new MainApiController(
         null, null, sessionManager, null, null, null,
-        null, null, null, null, null, null, null, llmModelOptionService);
+        null, null, null, null, null, null, null, llmModelOptionService, null);
   }
 
   private void handleCreditExhaustedPause(MainApiController controller, SessionState session,

@@ -3,12 +3,14 @@ package com.legacy.analysis;
 import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.analysis.llm.LlmProvider;
+import com.legacy.analysis.llm.OllamaModelDiscoveryCache;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -77,9 +79,15 @@ class MainApiControllerLlmProviderTest {
 
   private MainApiController newController(ClaudeService claudeService, String llmProvider,
       LlmModelOptionService llmModelOptionService) throws Exception {
+    return newController(claudeService, llmProvider, llmModelOptionService, null);
+  }
+
+  private MainApiController newController(ClaudeService claudeService, String llmProvider,
+      LlmModelOptionService llmModelOptionService,
+      OllamaModelDiscoveryCache ollamaModelDiscoveryCache) throws Exception {
     MainApiController controller = new MainApiController(
         claudeService, null, null, null, null, null, null, null, null, null, null, null, null,
-        llmModelOptionService);
+        llmModelOptionService, ollamaModelDiscoveryCache);
     Field field = MainApiController.class.getDeclaredField("llmProvider");
     field.setAccessible(true);
     field.set(controller, llmProvider);
@@ -310,5 +318,35 @@ class MainApiControllerLlmProviderTest {
 
     assertEquals(maliciousDisplayName, result.get(0).get("displayName"),
         "서버는 sanitize 없이 원문을 그대로 반환해야 하며, XSS 방어 책임은 프런트엔드(textContent)에 있다");
+  }
+
+  @Test
+  void 로컬_설치모델_조회_엔드포인트는_캐시가_준_목록을_available_true로_그대로_반환한다() throws Exception {
+    // REQ-002(2026-09): 프런트가 DB 활성 LOCAL 목록을 이 결과로 다시 거른다. 컨트롤러는 캐시가 준
+    // 결과를 가공 없이 그대로 전달하기만 해야 한다(필터링 책임은 프런트).
+    OllamaModelDiscoveryCache cache = mock(OllamaModelDiscoveryCache.class);
+    when(cache.getInstalledModelsCached()).thenReturn(Optional.of(List.of("qwen3:8b", "qwen2.5-coder:7b")));
+    MainApiController controller = newController(new FakeClaudeService("qwen3:8b"), "local", null, cache);
+
+    Map<String, Object> result = controller.getLocalInstalledModels();
+
+    assertEquals(true, result.get("available"));
+    assertEquals(List.of("qwen3:8b", "qwen2.5-coder:7b"), result.get("models"),
+        "관리자 엔드포인트(/api/admin/llm-models/ollama-installed)와 동일한 스키마·순서로 반환돼야 함");
+  }
+
+  @Test
+  void 로컬_설치모델_조회_엔드포인트는_확인불가면_available_false와_빈_목록을_반환한다() throws Exception {
+    // Optional.empty()는 "설치된 모델이 없음"이 아니라 "확인 불가"(타임아웃/미기동/비Ollama 백엔드)다.
+    // 프런트는 이 경우 DB 목록을 거르지 않고 경고 문구만 붙이므로, 빈 배열과 available=false 조합이
+    // 정확히 전달돼야 한다.
+    OllamaModelDiscoveryCache cache = mock(OllamaModelDiscoveryCache.class);
+    when(cache.getInstalledModelsCached()).thenReturn(Optional.empty());
+    MainApiController controller = newController(new FakeClaudeService("qwen3:8b"), "local", null, cache);
+
+    Map<String, Object> result = controller.getLocalInstalledModels();
+
+    assertEquals(false, result.get("available"));
+    assertEquals(List.of(), result.get("models"));
   }
 }

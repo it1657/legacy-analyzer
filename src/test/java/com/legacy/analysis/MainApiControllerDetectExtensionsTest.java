@@ -27,7 +27,7 @@ class MainApiControllerDetectExtensionsTest {
   }
 
   private MainApiController newController() throws Exception {
-    return new MainApiController(null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    return new MainApiController(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
   }
 
   @Test

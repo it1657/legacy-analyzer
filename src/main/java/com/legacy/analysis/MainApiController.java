@@ -3,6 +3,7 @@ package com.legacy.analysis;
 import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.analysis.llm.LlmProvider;
+import com.legacy.analysis.llm.OllamaModelDiscoveryCache;
 import com.legacy.auth.JwtTokenProvider;
 import com.legacy.auth.User;
 import com.legacy.core.ApiErrorHandler;
@@ -61,6 +62,10 @@ public class MainApiController {
   private final PresentationGeneratorService presentationGeneratorService;
   // 사용자 드롭다운(GET /api/config/llm-models)이 조회할 활성 모델 목록 — Phase 3(2026-08-21).
   private final LlmModelOptionService llmModelOptionService;
+  // 로컬 모델 드롭다운(GET /api/config/llm-models/local-installed)이 "실제 설치 여부"를 확인할 때
+  // 쓰는 discovery 캐시 — REQ-002(2026-09). 관리자 등록 폼과 달리 사용자 화면은 호출 빈도가 높아
+  // OllamaModelDiscoveryClient를 직접 부르지 않고 TTL 캐시를 거친다(02-design-v1 §2.1/§2.4).
+  private final OllamaModelDiscoveryCache ollamaModelDiscoveryCache;
   // rag.enabled=false(기본값)면 이 빈이 아예 등록되지 않으므로 ObjectProvider로 선택 주입한다
   // (일반 생성자 주입이면 빈이 없을 때 컨텍스트 기동 자체가 실패함) — appendJavaStructure()에서
   // getIfAvailable()로 안전하게 사용.
@@ -112,7 +117,8 @@ public class MainApiController {
       PresentationGeneratorService presentationGeneratorService,
       org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider,
       com.legacy.rag.CodeContentRagService codeContentRagService,
-      LlmModelOptionService llmModelOptionService) {
+      LlmModelOptionService llmModelOptionService,
+      OllamaModelDiscoveryCache ollamaModelDiscoveryCache) {
     this.claudeService = claudeService;
     this.applicationTaskExecutor = applicationTaskExecutor;
     this.sessionManager = sessionManager;
@@ -127,6 +133,7 @@ public class MainApiController {
     this.ragServiceProvider = ragServiceProvider;
     this.codeContentRagService = codeContentRagService;
     this.llmModelOptionService = llmModelOptionService;
+    this.ollamaModelDiscoveryCache = ollamaModelDiscoveryCache;
   }
 
   @GetMapping("/")
@@ -195,6 +202,31 @@ public class MainApiController {
     return llmModelOptionService.listActive().stream()
         .map(this::toModelOptionResponse)
         .collect(Collectors.toList());
+  }
+
+  /**
+   * 이 배포가 접속하는 Ollama에 <b>실제로 설치된</b> 모델 목록을 반환한다 (REQ-002, 2026-09).
+   * 프런트(dashboard.js)가 위 {@code /api/config/llm-models}(DB 활성 목록)를 이 결과로 한 번 더
+   * 걸러, 등록 후 환경이 바뀌어 더 이상 설치돼 있지 않은 모델을 드롭다운에서 숨기는 데 쓴다.
+   *
+   * 관리자 전용 {@code /api/admin/llm-models/ollama-installed}와 응답 스키마는 동일하지만
+   * ({@code {available, models}}) 두 가지가 다르다: (1) 이 엔드포인트는 인증만 요구해 일반 사용자도
+   * 호출할 수 있고, (2) 매 화면 진입마다 호출되므로 무캐시 직접 호출 대신 TTL 캐시를 거친다.
+   * 등록 시점 하드 검증(무캐시, 즉시성 우선)과 로드 시점 소프트 필터(캐시, 빈도 우선)는 서로 다른
+   * 시점의 서로 다른 문제를 다루는 보완 관계이며 중복이 아니다(02-design-v1 §2.4).
+   *
+   * {@code available=false}는 "설치된 모델이 없음"이 아니라 <b>"확인 불가"</b>(타임아웃/미기동/
+   * 비Ollama 백엔드)를 뜻하며, 이때 {@code models}는 빈 배열이다 — 프런트는 이 경우 DB 목록을
+   * 거르지 않고 그대로 노출하되 경고 문구를 붙인다.
+   */
+  @GetMapping("/api/config/llm-models/local-installed")
+  @ResponseBody
+  public Map<String, Object> getLocalInstalledModels() {
+    Optional<List<String>> discovered = ollamaModelDiscoveryCache.getInstalledModelsCached();
+    Map<String, Object> result = new HashMap<>();
+    result.put("available", discovered.isPresent());
+    result.put("models", discovered.orElse(List.of()));
+    return result;
   }
 
   private Map<String, Object> toModelOptionResponse(LlmModelOption option) {
