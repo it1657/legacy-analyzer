@@ -15,6 +15,9 @@ public class AnalysisStatusDto {
   private int failedCount;
   private int alreadyCount;
   private List<String> recentLogs;
+  // 이번 세션에서 분석 실패로 끝난 파일의 상대경로 목록 (COMPLETED/FAILED 시점에만 채워짐).
+  // 프런트가 완료 처리 시 실패 파일을 "패치완료"로 덮어쓰지 않도록 구분하는 데 사용한다.
+  private List<String> failedFiles = new java.util.ArrayList<>();
   private boolean completed;
   private String errorMessage;
 
@@ -53,6 +56,9 @@ public class AnalysisStatusDto {
 
   public List<String> getRecentLogs() { return recentLogs; }
   public void setRecentLogs(List<String> recentLogs) { this.recentLogs = recentLogs; }
+
+  public List<String> getFailedFiles() { return failedFiles; }
+  public void setFailedFiles(List<String> failedFiles) { this.failedFiles = failedFiles; }
 
   public boolean isCompleted() { return completed; }
   public void setCompleted(boolean completed) { this.completed = completed; }

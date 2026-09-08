@@ -288,9 +288,13 @@ function renderDividedGrid(filesArray) {
     nameSpan.style.wordBreak = "break-all";
     nameSpan.style.paddingRight = "10px";
 
+    // 분석에 실패한 파일(handleAnalysisCompletion이 서버 failedFiles로 마킹)은 단순 "대기중"과
+    // 구분해 별도 배지로 보여준다. 재분석 대상이라는 점은 대기 파일과 같으므로 그리드 위치는
+    // 그대로 waitGrid다(isCompleted = false → 아래 분기에서 waitGrid로 들어감).
+    const isFailed = file.status === 'FAILED';
     const badgeSpan = document.createElement('span');
-    badgeSpan.className = `status-badge ${file.isCompleted ? 'badge-green' : 'badge-red'}`;
-    badgeSpan.textContent = file.isCompleted ? "패치완료" : "대기중";
+    badgeSpan.className = `status-badge ${isFailed ? 'badge-orange' : (file.isCompleted ? 'badge-green' : 'badge-red')}`;
+    badgeSpan.textContent = isFailed ? "처리실패" : (file.isCompleted ? "패치완료" : "대기중");
 
     // 배지 + (완료 파일만) 경로 복사 아이콘을 한 그룹으로 묶어 file-box의 flex space-between 레이아웃을 유지
     const rightGroup = document.createElement('div');
@@ -1356,9 +1360,25 @@ function handleAnalysisCompletion(finalData) {
   if (overlay) overlay.style.display = "none";
   if (sessionControlPanel) sessionControlPanel.style.display = "none";
 
-  // 모든 파일 완료 표시
+  // 파일별 완료/실패 표시.
+  // 예전에는 여기서 무조건 전부 isCompleted = true로 덮어써서, 분석에 실패한 파일까지 "패치완료"로
+  // 보였다(REQ-002). 서버가 내려주는 finalData.failedFiles(TASK-003, 소스 폴더 기준 상대경로)에
+  // 들어있는 파일만 실패로 남기고 나머지는 기존과 동일하게 완료 처리한다.
+  // failedFiles가 없는 구버전 응답(또는 phase가 COMPLETED/FAILED가 아닌 예외 경로)에서는 빈 배열로
+  // 폴백하므로 예외 없이 기존과 완전히 동일하게 동작한다.
   if (globalFilesCache && Array.isArray(globalFilesCache)) {
-    globalFilesCache.forEach(file => { file.isCompleted = true; });
+    const failedList = (finalData && Array.isArray(finalData.failedFiles)) ? finalData.failedFiles : [];
+    const failedPathSet = new Set(failedList.map(p => normalizeFilePath(p)));
+    globalFilesCache.forEach(file => {
+      if (failedPathSet.has(normalizeFilePath(file.fileName))) {
+        file.isCompleted = false;
+        file.status = 'FAILED';
+      } else {
+        file.isCompleted = true;
+        // 재분석으로 성공한 파일에 이전 실행의 실패 마킹이 남아 계속 "처리실패"로 보이지 않게 지운다.
+        if (file.status === 'FAILED') delete file.status;
+      }
+    });
     renderDividedGrid(globalFilesCache);
   }
   // 이번 실행의 선택 범위는 소멸되었으므로 트리는 숨긴다 (다음 1단계 조회/미리보기에서 다시 빌드됨)

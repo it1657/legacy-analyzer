@@ -706,6 +706,18 @@ public class MainApiController {
       dto.setFailoverModelKey(session.getFailoverModelKey());
     }
 
+    // 분석이 끝난 시점(정상 완료/치명적 실패)에만 파일별 실패 목록을 내려준다.
+    // 프런트(handleAnalysisCompletion)가 완료 처리 시 실패 파일을 "패치완료"로 덮어쓰지 않게 하기 위한 것이라
+    // 진행 중(ANALYZING 등) 폴링 응답에는 넣지 않는다.
+    if ("COMPLETED".equals(phase) || "FAILED".equals(phase)) {
+      Path analysisRoot = resolveFailedFilesRoot(session);
+      List<String> failedFiles = new ArrayList<>();
+      for (String abs : session.getFailedFilePaths()) {
+        failedFiles.add(toDisplayPath(analysisRoot, abs));
+      }
+      dto.setFailedFiles(failedFiles);
+    }
+
     if ("COMPLETED".equals(phase)) {
       dto.setAvgTimePerFile((String) session.getMetadata().get("avgTimePerFile"));
       dto.setFinalSummary((String) session.getMetadata().get("finalSummary"));
@@ -739,12 +751,7 @@ public class MainApiController {
       return result;
     }
 
-    String sourcePath = session.getSourcePath();
-    String outputPath = session.getOutputPath();
-    boolean isCopyMode = outputPath != null && !outputPath.isBlank() && !outputPath.equals(sourcePath);
-    Path analysisRoot = isCopyMode
-        ? Path.of(outputPath).resolve(Path.of(sourcePath).getFileName())
-        : Path.of(sourcePath);
+    Path analysisRoot = resolveAnalysisRoot(session);
 
     List<Map<String, Object>> files = new ArrayList<>();
     for (String abs : session.getPatchedFilePaths()) {
@@ -758,14 +765,54 @@ public class MainApiController {
     return result;
   }
 
+  /**
+   * 세션의 분석 기준 루트 경로. 복사 모드(outputPath != sourcePath)면 출력 폴더 아래 프로젝트 폴더가,
+   * 아니면 sourcePath 자체가 기준이 된다. 분석 루프의 지역변수가 아니라 세션에 저장된 값만 사용하므로
+   * 분석 종료 후(폴링 완료 시점)에도 동일하게 계산할 수 있다.
+   */
+  private Path resolveAnalysisRoot(SessionState session) {
+    String sourcePath = session.getSourcePath();
+    String outputPath = session.getOutputPath();
+    boolean isCopyMode = outputPath != null && !outputPath.isBlank() && !outputPath.equals(sourcePath);
+    return isCopyMode
+        ? Path.of(outputPath).resolve(Path.of(sourcePath).getFileName())
+        : Path.of(sourcePath);
+  }
+
+  /**
+   * 폴링 DTO의 failedFiles 전용 analysisRoot 계산. resolveAnalysisRoot()(getSessionFileList()가
+   * 쓰는 기존 공식)와 달리 계정별 분리 세그먼트({username})까지 포함한다 — runAnalysis()의 실제
+   * 파일 저장 경로(finalProjectOutputPath, 1252-1254행)와 정확히 일치시켜야 실패 파일의 상대경로가
+   * 프런트 globalFilesCache.fileName(소스 폴더 기준 상대경로)과 매칭된다.
+   * resolveAnalysisRoot()는 getSessionFileList()의 기존 동작 보존을 위해 의도적으로 건드리지 않는다.
+   */
+  private Path resolveFailedFilesRoot(SessionState session) {
+    String sourcePath = session.getSourcePath();
+    String outputPath = session.getOutputPath();
+    boolean isCopyMode = outputPath != null && !outputPath.isBlank() && !outputPath.trim().equals(sourcePath);
+    if (!isCopyMode) {
+      return Path.of(sourcePath);
+    }
+    // runAnalysis() 1244-1245행과 완전히 동일한 sanitize 규칙 — 반드시 이 정규식을 그대로 복제한다.
+    String username = session.getUsername();
+    String safeUsername = (username != null && !username.isBlank())
+        ? username.replaceAll("[^a-zA-Z0-9_\\-]", "_") : "unknown";
+    // runAnalysis() 1252-1254행 finalProjectOutputPath와 동일한 공식.
+    return Path.of(outputPath.trim()).resolve(safeUsername).resolve(Path.of(sourcePath).getFileName());
+  }
+
+  /** 절대경로를 analysisRoot 기준 상대경로('/' 구분자)로 변환한다. relativize 실패 시 절대경로로 폴백. */
+  private String toDisplayPath(Path analysisRoot, String absPathStr) {
+    try {
+      return analysisRoot.relativize(Path.of(absPathStr)).toString().replace("\\", "/");
+    } catch (Exception e) {
+      return absPathStr;
+    }
+  }
+
   private Map<String, Object> toSessionFileEntry(Path analysisRoot, String absPathStr, boolean isCompleted) {
     Map<String, Object> entry = new HashMap<>();
-    String display;
-    try {
-      display = analysisRoot.relativize(Path.of(absPathStr)).toString().replace("\\", "/");
-    } catch (Exception e) {
-      display = absPathStr;
-    }
+    String display = toDisplayPath(analysisRoot, absPathStr);
     entry.put("fileName", display);
     entry.put("isCompleted", isCompleted);
     return entry;
@@ -1391,6 +1438,8 @@ public class MainApiController {
                 skipCount.incrementAndGet();
               }
             } else if ("FAILED".equals(fileState.getStatus())) {
+              // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
+              session.addFailedFilePath(filePath.toString());
               int fc = session.getStatistics().getFailureCount() + 1;
               session.getStatistics().setFailureCount(fc);
               // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
@@ -1637,6 +1686,12 @@ public class MainApiController {
             FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
                 sourceRootPath, isForceActive, finalOutPath);
 
+            // 재개 시도 결과가 이번에 새로 나왔으므로, 이전 시도(들)의 실패 기록을 먼저 걷어낸다.
+            // FAILED로 다시 끝나면 바로 아래 FAILED 분기가 즉시 재등록한다 — "failedFilePaths = 가장
+            // 최근 시도 결과"라는 불변식이 SUCCESS/SKIPPED(ALREADY_PATCHED/OVERSIZE)/FAILED 네 경우
+            // 모두에서 조건 분기 없이 항상 성립하도록 한다(02-design-v4.md §3.4 근거).
+            session.removeFailedFilePath(filePath.toString());
+
             if ("SUCCESS".equals(fileState.getStatus())) {
               completedFilePaths.add(filePath.toString());
               session.getStatistics().setSuccessCount(successCount.incrementAndGet());
@@ -1646,6 +1701,8 @@ public class MainApiController {
                 session.getStatistics().setSkipCount(alreadyProcessedCount.incrementAndGet());
               } else { skipCount.incrementAndGet(); }
             } else if ("FAILED".equals(fileState.getStatus())) {
+              // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
+              session.addFailedFilePath(filePath.toString());
               session.getStatistics().setFailureCount(session.getStatistics().getFailureCount() + 1);
               // 2026-08-21(Phase 4, failover 컨펌): runAnalysis()와 동일한 이유로 session.cancel()
               // 호출을 제거한다 — 재개 흐름에서 또다시 isCancelled가 영구화되는 것을 막기 위함.

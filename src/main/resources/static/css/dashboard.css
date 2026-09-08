@@ -61,6 +61,8 @@ div.status-completed { color: #0f5132; background-color: #f0fdf4; border-color: 
 span.status-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; color: white; font-weight: bold; white-space: nowrap; }
 span.badge-red { background-color: #e74a3b; }
 span.badge-green { background-color: #1cc88a; }
+/* 분석 실패 파일 전용 배지("처리실패") — 대기중(red)/패치완료(green)와 구분되는 경고색 */
+span.badge-orange { background-color: #f6c23e; }
 
 /* ===================================================================
    5. 부분 분석: 파일 트리 선택 UI

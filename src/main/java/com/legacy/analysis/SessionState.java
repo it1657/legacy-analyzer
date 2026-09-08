@@ -129,6 +129,10 @@ public class SessionState {
   @Transient
   private java.util.Set<String> patchedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+  // 이번 세션에서 분석 실패로 끝난 파일 절대경로 집합 (메모리 전용, 폴링 DTO의 failedFiles 노출용)
+  @Transient
+  private java.util.Set<String> failedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
   /**
    * 완료 파일 미리보기/Diff 기능(1단계, 세션 한정)용 캐시 항목.
    * write-back 직후 원본/결과 전체 텍스트를 그대로 보관하며, 서버가 unified diff를 즉석 생성하는 데 쓰인다.
@@ -337,6 +341,13 @@ public class SessionState {
 
   public java.util.Set<String> getPatchedFilePaths() { return patchedFilePaths; }
   public void setPatchedFilePaths(java.util.Set<String> set) { this.patchedFilePaths = set; }
+
+  // 분석 루프(runAnalysis/runAnalysisResume)의 FAILED 분기에서 호출해 실패 파일을 기록한다.
+  public void addFailedFilePath(String absolutePath) { failedFilePaths.add(absolutePath); }
+  public java.util.Set<String> getFailedFilePaths() { return failedFilePaths; }
+  // 재개(resume) 루프가 같은 파일을 다시 처리할 때, 직전 시도의 실패 기록을 걷어내기 위해 호출한다.
+  // "failedFilePaths = 가장 최근 시도 결과"라는 불변식을 유지하는 용도(02-design-v4.md §3.4).
+  public void removeFailedFilePath(String absolutePath) { failedFilePaths.remove(absolutePath); }
 
   // 완료 파일 미리보기/Diff 캐시 조회·기록
   public void putPreviewEntry(String absPath, String original, String commented) {
