@@ -4,13 +4,18 @@ import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.analysis.llm.LlmProvider;
 import com.legacy.analysis.llm.OllamaModelDiscoveryCache;
+import com.legacy.auth.Role;
+import com.legacy.auth.User;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -101,9 +106,41 @@ class MainApiControllerLlmProviderTest {
     field.set(controller, apiKey);
   }
 
+  /**
+   * ADMIN 권한 사용자 인증 객체 (기존 테스트 호출부용).
+   * REQ-003(2026-09)로 getLlmProviderConfig에 Authentication이 추가됐지만, 기존 테스트들이 검증하려던 것은
+   * "전역 조건(API 키/DB 활성 LOCAL 모델)만으로 availableProviders를 계산한다"이므로 사용자별 조건이
+   * 항상 참이 되는 admin을 넘겨 기존 검증 의도를 그대로 보존한다.
+   * 이 저장소의 기존 인증 픽스처 패턴(MainApiControllerSessionOwnershipTest 등)을 그대로 재사용한다.
+   */
+  private Authentication adminAuth() {
+    User user = new User("admin", "admin@example.com", "hash");
+    user.setSeq(99L);
+    user.setRoles(Set.of(new Role("ADMIN", "관리자 역할")));
+    return new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
+  }
+
+  /** ANTHROPIC_USER 역할이 없는 일반 사용자 인증 객체 (REQ-003). */
+  private Authentication plainUserAuth() {
+    User user = new User("u1", "u1@example.com", "hash");
+    user.setSeq(1L);
+    user.setRoles(Set.of(new Role("USER", "일반 사용자 역할")));
+    return new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
+  }
+
+  /** ANTHROPIC_USER 역할을 보유한 일반 사용자 인증 객체 (REQ-003). */
+  private Authentication anthropicUserAuth() {
+    User user = new User("u2", "u2@example.com", "hash");
+    user.setSeq(2L);
+    user.setRoles(Set.of(new Role("USER", "일반 사용자 역할"),
+        new Role("ANTHROPIC_USER", "Anthropic(Claude API) 사용 권한")));
+    return new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
+  }
+
   @SuppressWarnings("unchecked")
-  private List<String> getAvailableProviders(MainApiController controller) throws Exception {
-    return (List<String>) getLlmProviderConfig(controller).get("availableProviders");
+  private List<String> getAvailableProviders(MainApiController controller, Authentication authentication)
+      throws Exception {
+    return (List<String>) getLlmProviderConfig(controller, authentication).get("availableProviders");
   }
 
   @SuppressWarnings("unchecked")
@@ -122,10 +159,11 @@ class MainApiControllerLlmProviderTest {
   }
 
   @SuppressWarnings("unchecked")
-  private java.util.Map<String, Object> getLlmProviderConfig(MainApiController controller) throws Exception {
-    Method m = MainApiController.class.getDeclaredMethod("getLlmProviderConfig");
+  private java.util.Map<String, Object> getLlmProviderConfig(MainApiController controller,
+      Authentication authentication) throws Exception {
+    Method m = MainApiController.class.getDeclaredMethod("getLlmProviderConfig", Authentication.class);
     m.setAccessible(true);
-    return (java.util.Map<String, Object>) m.invoke(controller);
+    return (java.util.Map<String, Object>) m.invoke(controller, authentication);
   }
 
   @Test
@@ -175,7 +213,7 @@ class MainApiControllerLlmProviderTest {
   void llm_provider_조회_엔드포인트는_local_모드에서_provider와_현재_모델을_반환한다() throws Exception {
     MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "local");
 
-    java.util.Map<String, Object> result = getLlmProviderConfig(controller);
+    java.util.Map<String, Object> result = getLlmProviderConfig(controller, adminAuth());
 
     assertEquals("local", result.get("provider"));
     assertEquals("qwen3-32b", result.get("model"));
@@ -185,7 +223,7 @@ class MainApiControllerLlmProviderTest {
   void llm_provider_조회_엔드포인트는_anthropic_모드에서_provider와_현재_모델을_반환한다() throws Exception {
     MainApiController controller = newController(new FakeClaudeService("claude-sonnet-5"), "anthropic");
 
-    java.util.Map<String, Object> result = getLlmProviderConfig(controller);
+    java.util.Map<String, Object> result = getLlmProviderConfig(controller, adminAuth());
 
     assertEquals("anthropic", result.get("provider"));
     assertEquals("claude-sonnet-5", result.get("model"));
@@ -197,7 +235,7 @@ class MainApiControllerLlmProviderTest {
     // 테스트가 도는 이 환경(Docker 컨테이너 아님)에서는 /.dockerenv가 없으므로 false여야 한다.
     MainApiController controller = newController(new FakeClaudeService("qwen3-32b"), "local");
 
-    java.util.Map<String, Object> result = getLlmProviderConfig(controller);
+    java.util.Map<String, Object> result = getLlmProviderConfig(controller, adminAuth());
 
     assertEquals(false, result.get("containerized"));
   }
@@ -221,7 +259,7 @@ class MainApiControllerLlmProviderTest {
         llmModelOptionService);
     setAnthropicApiKey(controller, "sk-ant-real-key");
 
-    assertEquals(List.of("anthropic"), getAvailableProviders(controller));
+    assertEquals(List.of("anthropic"), getAvailableProviders(controller, adminAuth()));
   }
 
   @Test
@@ -236,7 +274,7 @@ class MainApiControllerLlmProviderTest {
         llmModelOptionService);
     setAnthropicApiKey(controller, "");
 
-    assertEquals(List.of("local"), getAvailableProviders(controller));
+    assertEquals(List.of("local"), getAvailableProviders(controller, adminAuth()));
   }
 
   @Test
@@ -247,7 +285,7 @@ class MainApiControllerLlmProviderTest {
         llmModelOptionService);
     setAnthropicApiKey(controller, "sk-ant-real-key");
 
-    assertEquals(List.of("anthropic", "local"), getAvailableProviders(controller),
+    assertEquals(List.of("anthropic", "local"), getAvailableProviders(controller, adminAuth()),
         "프런트가 이 순서 그대로 토글 버튼을 렌더링하므로 순서가 고정돼야 함");
   }
 
@@ -261,7 +299,54 @@ class MainApiControllerLlmProviderTest {
         llmModelOptionService);
     setAnthropicApiKey(controller, "MOCK_API_KEY");
 
-    assertEquals(List.of("local"), getAvailableProviders(controller));
+    assertEquals(List.of("local"), getAvailableProviders(controller, adminAuth()));
+  }
+
+  // ---------- REQ-003(2026-09): 사용자별 anthropic 권한 반영 ----------
+  // 아래 4개는 "전역 조건(API 키 설정 + 활성 LOCAL 모델)"을 완전히 동일하게 고정해두고
+  // 인증 주체만 바꿔가며 검증한다 — 차이를 만드는 변수가 사용자 권한뿐임을 보장하기 위해서다.
+
+  /** 전역 조건이 anthropic/local 둘 다 가능한 상태로 고정한 컨트롤러. */
+  private MainApiController newBothProvidersAvailableController() throws Exception {
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    when(llmModelOptionService.hasActiveLocalModel()).thenReturn(true);
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-5"), "anthropic",
+        llmModelOptionService);
+    setAnthropicApiKey(controller, "sk-ant-real-key");
+    return controller;
+  }
+
+  @Test
+  void availableProviders는_admin이면_ANTHROPIC_USER_역할이_없어도_anthropic을_포함한다() throws Exception {
+    MainApiController controller = newBothProvidersAvailableController();
+
+    assertEquals(List.of("anthropic", "local"), getAvailableProviders(controller, adminAuth()),
+        "admin은 Role 보유 여부와 무관하게 항상 anthropic을 선택할 수 있어야 함");
+  }
+
+  @Test
+  void availableProviders는_ANTHROPIC_USER가_없는_일반_사용자에게는_anthropic을_제외한다() throws Exception {
+    MainApiController controller = newBothProvidersAvailableController();
+
+    assertEquals(List.of("local"), getAvailableProviders(controller, plainUserAuth()),
+        "전역 API 키가 설정돼 있어도 권한 없는 사용자에게는 anthropic이 노출되면 안 됨");
+  }
+
+  @Test
+  void availableProviders는_ANTHROPIC_USER를_보유한_일반_사용자에게는_anthropic을_포함한다() throws Exception {
+    MainApiController controller = newBothProvidersAvailableController();
+
+    // 양성 대조군 — 위 케이스와 전역 조건이 완전히 같고 역할만 다르다.
+    assertEquals(List.of("anthropic", "local"), getAvailableProviders(controller, anthropicUserAuth()),
+        "ANTHROPIC_USER를 부여받은 사용자에게는 anthropic이 그대로 노출돼야 함");
+  }
+
+  @Test
+  void availableProviders는_authentication이_null이면_anthropic을_제외한다() throws Exception {
+    // 비정상 상황 안전망 — 인증 정보를 못 얻으면 권한 없음으로 본다(fail-safe).
+    MainApiController controller = newBothProvidersAvailableController();
+
+    assertEquals(List.of("local"), getAvailableProviders(controller, null));
   }
 
   @Test

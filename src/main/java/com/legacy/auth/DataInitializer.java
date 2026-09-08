@@ -64,6 +64,15 @@ public class DataInitializer implements CommandLineRunner {
       roleRepository.save(userRole);
       log.info("[역할 생성] USER");
     }
+    // Anthropic(Claude API) 사용 권한 역할 — 관리자가 사용자별로 부여/해제한다(REQ-001, 2026-09).
+    // 기본 계정(admin/test)에는 자동 부여하지 않는다 — "기본값은 권한 없음"이 요구사항이다.
+    if (roleRepository.findByName("ANTHROPIC_USER").isEmpty()) {
+      Role anthropicRole = new Role();
+      anthropicRole.setName("ANTHROPIC_USER");
+      anthropicRole.setDescription("Anthropic(Claude API) 사용 권한");
+      roleRepository.save(anthropicRole);
+      log.info("[역할 생성] ANTHROPIC_USER");
+    }
   }
 
   private void initializeTestUser() {

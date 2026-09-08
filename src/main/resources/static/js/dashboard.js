@@ -34,6 +34,11 @@ let currentHistoryId = null;    // 완료된 분석의 DB historyId (PPT 다운�
 // 크레딧소진 failover 컨펌 모달(Phase 5, 2026-08-25)이 폴링 tick(2초)마다 중복으로 뜨는 것을 막는 가드.
 // startPolling()이 새로 시작될 때마다 false로 초기화된다.
 let failoverModalShown = false;
+// 분석 진행 중 extra controls(모델 드롭다운/provider 토글 등)가 잠겨 있는지 여부.
+// setExtraControlsLocked()가 마지막으로 받은 locked 값을 그대로 반영한다(단일 진실 소스).
+// TASK-007(2026-09): populateModelSelectOptions()가 분석 진행 중 disabled를 무조건
+// 풀어버리던 버그(provider 토글 클릭으로 모델 드롭다운 잠금이 풀림)를 막기 위해 참조한다.
+let extraControlsLocked = false;
 
 // 원격 업로드 분석(File System Access API) 상태
 let uploadSourceHandle = null;      // 분석 대상 폴더 핸들 (write-back 대상 기본값)
@@ -85,8 +90,10 @@ function setUploadControlsDisabled(disabled) {
 // 실행 중인 세션과 화면 상태가 어긋나는 일이 없도록 잠근다. setLocalPathControlsDisabled/
 // setUploadControlsDisabled(모드 전환 버튼)와 짝을 이뤄, 분석 시작/종료 시점에 함께 호출한다.
 function setExtraControlsLocked(locked) {
+  extraControlsLocked = locked;
   const selectors = [
     '#modelSelect',
+    '.provider-toggle-btn',
     '#analysisRequirements',
     'button[onclick="resetDashboard()"]',
     '#fileTreeSection button',
@@ -602,7 +609,9 @@ function populateModelSelectOptions(models) {
 
   const stillExists = models.some(m => m.modelKey === previousValue);
   select.value = stillExists ? previousValue : models[0].modelKey;
-  select.disabled = false;
+  // 분석 진행 중이면 잠금을 유지한다 — 무조건 false로 되돌리면 provider 토글 클릭만으로
+  // 모델 드롭다운 잠금이 풀린다(TASK-007, 2026-09).
+  select.disabled = extraControlsLocked;
 }
 
 // scenario_0.md: 현재 활성화된 LLM provider를 물어봐서, local이면 모델 드롭다운을

@@ -200,7 +200,17 @@ public class UserController {
           return ResponseEntity.badRequest()
               .body(Collections.singletonMap("message", "유효하지 않은 역할입니다."));
         }
-        user.setRoles(new HashSet<>(Collections.singleton(role)));
+        // 역할은 기존과 동일하게 "단일 역할로 교체"하되, Anthropic 사용 권한은 별도 축이므로
+        // 보유 중이었다면 보존한다 — 이름만 수정해도 권한이 조용히 사라지던 문제 대응 (TASK-006, 2026-09).
+        boolean hadAnthropicAccess = user.getRoles().stream()
+            .anyMatch(r -> "ANTHROPIC_USER".equals(r.getName()));
+        Set<Role> newRoles = new HashSet<>();
+        newRoles.add(role);
+        if (hadAnthropicAccess) {
+          // 조회 실패 시 조용히 스킵 — 이 부가 조치의 실패가 updateUser 본 기능을 막지 않는다.
+          roleRepository.findByName("ANTHROPIC_USER").ifPresent(newRoles::add);
+        }
+        user.setRoles(newRoles);
       }
 
       user.setUpdatedAt(LocalDateTime.now());
@@ -214,6 +224,46 @@ public class UserController {
       log.error("[사용자 수정 실패] userSeq={}", userSeq, e);
       return ResponseEntity.status(HttpStatus.BAD_REQUEST)
           .body(Collections.singletonMap("message", "사용자 수정 실패: " + e.getMessage()));
+    }
+  }
+
+  // Anthropic(Claude API) 사용 권한 부여/해제 (관리자만) - REQ-002, 2026-09
+  // updateUser(PUT /api/users/{userSeq})의 role 처리는 "기존 역할 전체를 단일 역할로 교체"하는 계약이라
+  // 여기에 얹으면 기존 USER↔ADMIN 승격/강등 흐름이 깨진다. 그래서 additive 부여/해제는 별도 엔드포인트로 분리한다.
+  @PutMapping("/{userSeq}/anthropic-access")
+  @PreAuthorize("hasRole('ADMIN')")
+  @ResponseBody
+  public ResponseEntity<?> updateAnthropicAccess(@PathVariable Long userSeq,
+      @RequestBody Map<String, Boolean> request, HttpServletRequest httpRequest) {
+    try {
+      User user = userRepository.findById(userSeq)
+          .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+      Role anthropicRole = roleRepository.findByName("ANTHROPIC_USER")
+          .orElseThrow(() -> new RuntimeException("ANTHROPIC_USER 역할이 없습니다."));
+      boolean grant = Boolean.TRUE.equals(request.get("grant"));
+
+      // 기존 역할 방어적 복사 — 원본 Set을 직접 변형하지 않는다.
+      Set<Role> roles = new HashSet<>(user.getRoles());
+      if (grant) {
+        roles.add(anthropicRole);
+      } else {
+        roles.remove(anthropicRole);
+      }
+      user.setRoles(roles);
+      user.setUpdatedAt(LocalDateTime.now());
+      userRepository.save(user);
+
+      auditLogService.logAudit("UPDATE", "USER", user.getSeq(), user.getUserId(), "SUCCESS",
+          Map.of("anthropicAccess", grant), grant ? "Anthropic 권한 부여" : "Anthropic 권한 해제",
+          httpRequest.getRemoteAddr());
+
+      log.info("[Anthropic 권한 변경] userSeq={}, grant={}", userSeq, grant);
+      return ResponseEntity.ok(Collections.singletonMap("message",
+          grant ? "Anthropic 권한이 부여되었습니다." : "Anthropic 권한이 해제되었습니다."));
+    } catch (Exception e) {
+      log.error("[Anthropic 권한 변경 실패] userSeq={}", userSeq, e);
+      return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+          .body(Collections.singletonMap("message", "Anthropic 권한 변경 실패: " + e.getMessage()));
     }
   }
 

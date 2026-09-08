@@ -496,6 +496,7 @@
                                 <th>로그인 ID</th>
                                 <th>이메일</th>
                                 <th>역할</th>
+                                <th>Anthropic 권한</th>
                                 <th>상태</th>
                                 <th>가입일</th>
                                 <th>작업</th>
@@ -503,7 +504,7 @@
                         </thead>
                         <tbody id="usersList">
                             <tr>
-                                <td colspan="7" class="no-data">사용자 정보를 로드 중입니다...</td>
+                                <td colspan="8" class="no-data">사용자 정보를 로드 중입니다...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -1029,13 +1030,17 @@
                     <td>${user.email}</td>
                     <td>${user.roles.join(', ')}</td>
                     <td>
+                        <input type="checkbox" ${user.roles.includes('ANTHROPIC_USER') ? 'checked' : ''}
+                            onchange="toggleAnthropicAccess(${user.seq}, this.checked)">
+                    </td>
+                    <td>
                         <span class="badge ${user.isActive ? 'badge-active' : 'badge-inactive'}">
                             ${user.isActive ? '활성' : '비활성'}
                         </span>
                     </td>
                     <td>${new Date(user.createdAt).toLocaleDateString('ko-KR')}</td>
                     <td>
-                        <button class="btn-sm btn-edit" onclick="openEditUserModal(${user.seq}, '${(user.displayName||user.userId).replace(/'/g,"\\'")}', '${user.userId}', '${user.email}', '${user.roles[0]||"USER"}')">수정</button>
+                        <button class="btn-sm btn-edit" onclick="openEditUserModal(${user.seq}, '${(user.displayName||user.userId).replace(/'/g,"\\'")}', '${user.userId}', '${user.email}', '${user.roles.includes('ADMIN') ? 'ADMIN' : 'USER'}', ${user.roles.includes('ANTHROPIC_USER')})">수정</button>
                         <button class="btn-sm" style="background:#6c757d;color:white;" onclick="toggleUserStatus(${user.seq}, ${!user.isActive})">
                             ${user.isActive ? '비활성화' : '활성화'}
                         </button>
@@ -1592,10 +1597,16 @@
             return name;
         }
 
+        // 편집 대상 사용자가 모달을 열던 시점에 ANTHROPIC_USER를 보유하고 있었는지 기억한다 (REQ-005 v2, 2026-09).
+        // updateUser(PUT /api/users/{seq})는 role을 "기존 역할 전체 → 단일 역할"로 통째 교체하므로,
+        // 이름만 바꿔 저장해도 ANTHROPIC_USER가 조용히 사라진다. 저장 성공 후 이 값이 true면 권한을 재적용한다.
+        let editingUserHadAnthropicAccess = false;
+
         // 사용자 추가 모달 열기
         function openAddUserModal() {
             document.getElementById('userForm').reset();
             document.getElementById('editingUserSeq').value = '';
+            editingUserHadAnthropicAccess = false;
             document.getElementById('modalHeader').textContent = '새 사용자 추가';
             document.getElementById('newUserId').disabled = false;
             document.getElementById('password').required = true;
@@ -1606,9 +1617,10 @@
         }
 
         // 사용자 수정 모달 열기
-        function openEditUserModal(seq, displayName, userId, email, role) {
+        function openEditUserModal(seq, displayName, userId, email, role, hasAnthropicAccess) {
             document.getElementById('userForm').reset();
             document.getElementById('editingUserSeq').value = seq;
+            editingUserHadAnthropicAccess = hasAnthropicAccess === true;
             document.getElementById('modalHeader').textContent = '사용자 정보 수정';
             document.getElementById('displayName').value = displayName;
             document.getElementById('newUserId').value = userId;
@@ -1670,6 +1682,30 @@
                 const data = await response.json();
 
                 if (response.ok) {
+                    // (REQ-005 v2) updateUser의 role 통째 교체로 날아간 ANTHROPIC_USER를 되돌린다.
+                    // TASK-002의 anthropic-access 엔드포인트는 멱등이라 재호출해도 중복되지 않는다.
+                    // 1차 저장은 이미 성공했으므로 이 후속 호출이 실패해도 저장 자체를 실패로 되돌리지 않고,
+                    // 사용자에게 알린 뒤 목록을 다시 불러 실제 권한 상태를 보여준다.
+                    if (isEdit && editingUserHadAnthropicAccess) {
+                        try {
+                            const reapplyResponse = await fetch(`/api/users/${editingSeq}/anthropic-access`, {
+                                method: 'PUT',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${token}`
+                                },
+                                body: JSON.stringify({ grant: true })
+                            });
+                            if (!reapplyResponse.ok) {
+                                alert('사용자 정보는 저장됐지만 Anthropic 권한 재적용에 실패했습니다. 목록에서 권한 상태를 확인해 주세요.');
+                                loadUsers();
+                            }
+                        } catch (reapplyError) {
+                            console.error('[Anthropic 권한 재적용 오류]', reapplyError);
+                            alert('사용자 정보는 저장됐지만 Anthropic 권한 재적용에 실패했습니다. 목록에서 권한 상태를 확인해 주세요.');
+                            loadUsers();
+                        }
+                    }
                     showAlert('modalAlert', isEdit ? '사용자 정보가 수정되었습니다.' : '사용자가 추가되었습니다.', 'success');
                     setTimeout(() => {
                         closeModal();
@@ -1709,6 +1745,34 @@
             } catch (error) {
                 console.error('[상태 변경 오류]', error);
                 showAlert('usersAlert', '서버 연결 실패', 'error');
+            }
+        }
+
+        // Anthropic(Claude API) 사용 권한 부여/해제 (REQ-005, 2026-09)
+        // 실패 시에는 체크박스가 사용자가 클릭한 상태로 남아 서버 실제 값과 어긋나므로
+        // loadUsers()로 목록을 다시 불러 서버 값으로 되돌린다.
+        async function toggleAnthropicAccess(userSeq, grant) {
+            try {
+                const response = await fetch(`/api/users/${userSeq}/anthropic-access`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ grant })
+                });
+
+                if (response.ok) {
+                    showAlert('usersAlert', `Anthropic 권한이 ${grant ? '부여' : '해제'}되었습니다.`, 'success');
+                } else {
+                    const data = await response.json();
+                    showAlert('usersAlert', data.message || 'Anthropic 권한 변경 실패', 'error');
+                    loadUsers();
+                }
+            } catch (error) {
+                console.error('[Anthropic 권한 변경 오류]', error);
+                showAlert('usersAlert', '서버 연결 실패', 'error');
+                loadUsers();
             }
         }
 

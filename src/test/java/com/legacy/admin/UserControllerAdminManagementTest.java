@@ -305,4 +305,72 @@ class UserControllerAdminManagementTest {
     assertEquals("사용자 수정 실패: 사용자를 찾을 수 없습니다.",
         ((Map<?, ?>) response.getBody()).get("message"));
   }
+
+  // ---------- TASK-006(2026-09): updateUser의 역할 교체가 ANTHROPIC_USER를 보존해야 한다 ----------
+  // 기존 계약("role이 오면 기존 역할 전체를 단일 역할로 교체")은 그대로 두되, Anthropic 사용 권한은
+  // 별도 축이므로 보유 중이었다면 살려둔다. 화면(TASK-005)뿐 아니라 API 직접 호출 경로도 닫는 조치다.
+
+  /** {USER, ANTHROPIC_USER}를 보유한 사용자 — 권한 보존 검증용. */
+  private User newUserWithAnthropicAccess() {
+    Role userRole = AdminTestFixtures.newRole("USER");
+    Role anthropicRole = AdminTestFixtures.newRole("ANTHROPIC_USER");
+    return AdminTestFixtures.newUser(1L, "u1", "u1@example.com", true,
+        new HashSet<>(Set.of(userRole, anthropicRole)));
+  }
+
+  @Test
+  void updateUser_이름만_수정해도_ANTHROPIC_USER_권한이_유지된다() {
+    // 사람이 실제로 겪던 흐름 — 편집 모달에서 role은 현재값(USER) 그대로 두고 이름만 바꿔 저장.
+    User managed = newUserWithAnthropicAccess();
+    when(userRepository.findById(1L)).thenReturn(Optional.of(managed));
+    when(roleRepository.findByName("USER")).thenReturn(Optional.of(AdminTestFixtures.newRole("USER")));
+    when(roleRepository.findByName("ANTHROPIC_USER"))
+        .thenReturn(Optional.of(AdminTestFixtures.newRole("ANTHROPIC_USER")));
+
+    Map<String, String> request = new HashMap<>();
+    request.put("displayName", "새이름");
+    request.put("role", "USER");
+
+    ResponseEntity<?> response = userController.updateUser(1L, request, httpRequest);
+
+    assertEquals(HttpStatus.OK, response.getStatusCode());
+    assertThat(managed.getRoles()).extracting(Role::getName)
+        .containsExactlyInAnyOrder("USER", "ANTHROPIC_USER");
+  }
+
+  @Test
+  void updateUser_USER에서_ADMIN으로_승격해도_ANTHROPIC_USER_권한이_유지된다() {
+    User managed = newUserWithAnthropicAccess();
+    when(userRepository.findById(1L)).thenReturn(Optional.of(managed));
+    when(roleRepository.findByName("ADMIN")).thenReturn(Optional.of(AdminTestFixtures.newRole("ADMIN")));
+    when(roleRepository.findByName("ANTHROPIC_USER"))
+        .thenReturn(Optional.of(AdminTestFixtures.newRole("ANTHROPIC_USER")));
+
+    Map<String, String> request = new HashMap<>();
+    request.put("role", "ADMIN");
+
+    ResponseEntity<?> response = userController.updateUser(1L, request, httpRequest);
+
+    assertEquals(HttpStatus.OK, response.getStatusCode());
+    // 역할 승격(USER 제거 + ADMIN 부여)과 Anthropic 권한 보존이 동시에 성립해야 한다.
+    assertThat(managed.getRoles()).extracting(Role::getName)
+        .containsExactlyInAnyOrder("ADMIN", "ANTHROPIC_USER");
+  }
+
+  @Test
+  void updateUser_ANTHROPIC_USER_역할이_DB에_없으면_보존을_건너뛰고_정상_완료된다() {
+    // 방어 케이스 — 부가 조치(권한 보존)의 실패가 updateUser 본 기능을 막으면 안 된다.
+    User managed = newUserWithAnthropicAccess();
+    when(userRepository.findById(1L)).thenReturn(Optional.of(managed));
+    when(roleRepository.findByName("ADMIN")).thenReturn(Optional.of(AdminTestFixtures.newRole("ADMIN")));
+    when(roleRepository.findByName("ANTHROPIC_USER")).thenReturn(Optional.empty());
+
+    Map<String, String> request = new HashMap<>();
+    request.put("role", "ADMIN");
+
+    ResponseEntity<?> response = userController.updateUser(1L, request, httpRequest);
+
+    assertEquals(HttpStatus.OK, response.getStatusCode(), "400이 아니라 정상 완료여야 한다");
+    assertThat(managed.getRoles()).extracting(Role::getName).containsExactly("ADMIN");
+  }
 }

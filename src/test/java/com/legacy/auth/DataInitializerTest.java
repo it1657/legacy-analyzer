@@ -55,10 +55,12 @@ class DataInitializerTest {
         true, "admin", "1");
   }
 
-  /** 두 역할이 모두 존재하고 두 계정이 아직 없는 "정상 시딩" 상태로 stub한다. */
+  /** 세 역할이 모두 존재하고 두 계정이 아직 없는 "정상 시딩" 상태로 stub한다. */
   private void stubRolesExistAndUsersMissing() {
     when(roleRepository.findByName("ADMIN")).thenReturn(Optional.of(AuthTestFixtures.newRole("ADMIN")));
     when(roleRepository.findByName("USER")).thenReturn(Optional.of(AuthTestFixtures.newRole("USER")));
+    when(roleRepository.findByName("ANTHROPIC_USER"))
+        .thenReturn(Optional.of(AuthTestFixtures.newRole("ANTHROPIC_USER")));
     when(userRepository.existsByUserId("admin")).thenReturn(false);
     when(userRepository.existsByUserId("test")).thenReturn(false);
   }
@@ -79,13 +81,18 @@ class DataInitializerTest {
     dataInitializer.run();
 
     ArgumentCaptor<Role> roleCaptor = ArgumentCaptor.forClass(Role.class);
-    verify(roleRepository, times(2)).save(roleCaptor.capture());
+    // 2026-09-anthropic-access-control(REQ-001): 생성 대상 역할이 ADMIN/USER 2개 → +ANTHROPIC_USER 3개로 늘었다.
+    // 기존 ADMIN/USER 검증은 그대로 유지하고 세 번째 역할 검증만 덧붙인다.
+    verify(roleRepository, times(3)).save(roleCaptor.capture());
     Role savedAdminRole = roleCaptor.getAllValues().stream()
         .filter(r -> "ADMIN".equals(r.getName())).findFirst().orElseThrow();
     assertEquals("관리자 역할", savedAdminRole.getDescription());
     Role savedUserRole = roleCaptor.getAllValues().stream()
         .filter(r -> "USER".equals(r.getName())).findFirst().orElseThrow();
     assertEquals("일반 사용자 역할", savedUserRole.getDescription());
+    Role savedAnthropicRole = roleCaptor.getAllValues().stream()
+        .filter(r -> "ANTHROPIC_USER".equals(r.getName())).findFirst().orElseThrow();
+    assertEquals("Anthropic(Claude API) 사용 권한", savedAnthropicRole.getDescription());
 
     ArgumentCaptor<User> userCaptor = ArgumentCaptor.forClass(User.class);
     verify(userRepository, times(2)).save(userCaptor.capture());
@@ -122,9 +129,13 @@ class DataInitializerTest {
 
     verify(roleRepository, never()).save(argThat(r -> "ADMIN".equals(r.getName())));
     ArgumentCaptor<Role> roleCaptor = ArgumentCaptor.forClass(Role.class);
-    verify(roleRepository, times(1)).save(roleCaptor.capture());
-    assertEquals("USER", roleCaptor.getValue().getName());
-    assertEquals("일반 사용자 역할", roleCaptor.getValue().getDescription());
+    // 2026-09-anthropic-access-control(REQ-001): ANTHROPIC_USER 역할이 함께 생성되므로 저장 횟수가 2회다.
+    // "ADMIN은 건너뛰고 USER는 생성한다"는 기존 검증 의도는 그대로 유지한다.
+    verify(roleRepository, times(2)).save(roleCaptor.capture());
+    Role savedUserRole = roleCaptor.getAllValues().stream()
+        .filter(r -> "USER".equals(r.getName())).findFirst().orElseThrow();
+    assertEquals("USER", savedUserRole.getName());
+    assertEquals("일반 사용자 역할", savedUserRole.getDescription());
   }
 
   @Test
@@ -239,5 +250,65 @@ class DataInitializerTest {
     verify(passwordEncoder, times(1)).encode("custom-test-pw");
     verify(passwordEncoder, never()).encode("admin");
     verify(passwordEncoder, never()).encode("1");
+  }
+
+  // ---------- 2026-09-anthropic-access-control(REQ-001) ANTHROPIC_USER 역할 신설 ----------
+
+  @Test
+  void ANTHROPIC_USER_역할이_없으면_ADMIN_USER와_함께_생성된다() throws Exception {
+    // 세 역할 모두 최초 조회는 비어 있고, 계정 생성 단계의 재조회에서는 존재하도록 stub한다.
+    when(roleRepository.findByName("ADMIN"))
+        .thenReturn(Optional.empty(), Optional.of(AuthTestFixtures.newRole("ADMIN")));
+    when(roleRepository.findByName("USER"))
+        .thenReturn(Optional.empty(), Optional.of(AuthTestFixtures.newRole("USER")));
+    when(roleRepository.findByName("ANTHROPIC_USER")).thenReturn(Optional.empty());
+    when(userRepository.existsByUserId("admin")).thenReturn(false);
+    when(userRepository.existsByUserId("test")).thenReturn(false);
+
+    dataInitializer.run();
+
+    ArgumentCaptor<Role> roleCaptor = ArgumentCaptor.forClass(Role.class);
+    verify(roleRepository, times(3)).save(roleCaptor.capture());
+    // ADMIN/USER와 병존 생성되는지 확인한다(기존 두 역할을 대체하는 게 아님).
+    List<String> savedRoleNames = roleCaptor.getAllValues().stream().map(Role::getName).toList();
+    assertTrue(savedRoleNames.contains("ADMIN"));
+    assertTrue(savedRoleNames.contains("USER"));
+    assertTrue(savedRoleNames.contains("ANTHROPIC_USER"));
+    Role savedAnthropicRole = roleCaptor.getAllValues().stream()
+        .filter(r -> "ANTHROPIC_USER".equals(r.getName())).findFirst().orElseThrow();
+    assertEquals("Anthropic(Claude API) 사용 권한", savedAnthropicRole.getDescription());
+  }
+
+  @Test
+  void ANTHROPIC_USER_역할이_이미_존재하면_재생성하지_않는다() throws Exception {
+    // 멱등성 확인 — 재기동 시 중복 생성되지 않아야 한다.
+    stubRolesExistAndUsersMissing();
+
+    dataInitializer.run();
+
+    verify(roleRepository, never()).save(argThat(r -> "ANTHROPIC_USER".equals(r.getName())));
+    verify(roleRepository, never()).save(argThat(r -> "ADMIN".equals(r.getName())));
+    verify(roleRepository, never()).save(argThat(r -> "USER".equals(r.getName())));
+  }
+
+  @Test
+  void 기본_계정_admin과_test에는_ANTHROPIC_USER_역할이_부여되지_않는다() throws Exception {
+    // "기본값은 권한 없음" 요구사항 — initializeAdminUser/initializeTestUser는 무변경이어야 한다.
+    stubRolesExistAndUsersMissing();
+
+    dataInitializer.run();
+
+    ArgumentCaptor<User> userCaptor = ArgumentCaptor.forClass(User.class);
+    verify(userRepository, times(2)).save(userCaptor.capture());
+    for (User savedUser : userCaptor.getAllValues()) {
+      assertFalse(savedUser.getRoles().stream().anyMatch(r -> "ANTHROPIC_USER".equals(r.getName())),
+          "기본 계정에 ANTHROPIC_USER가 자동 부여됨: " + savedUser.getUserId());
+    }
+    User savedAdmin = userCaptor.getAllValues().stream()
+        .filter(u -> "admin".equals(u.getUserId())).findFirst().orElseThrow();
+    assertEquals(1, savedAdmin.getRoles().size());
+    User savedTest = userCaptor.getAllValues().stream()
+        .filter(u -> "test".equals(u.getUserId())).findFirst().orElseThrow();
+    assertEquals(1, savedTest.getRoles().size());
   }
 }

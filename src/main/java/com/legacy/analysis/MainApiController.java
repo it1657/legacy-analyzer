@@ -147,12 +147,14 @@ public class MainApiController {
    *
    * 2026-09(REQ-001) 확장: 기존 필드(provider/model/containerized)는 그대로 두고
    * {@code availableProviders}(이 배포에서 실제로 선택 가능한 provider 목록)를 추가한다.
-   * 사용자별 provider 권한(P2)은 여전히 이번 스코프 밖이라, 목록은 서버 전역 설정
-   * (anthropic API 키 설정 여부 + DB 활성 LOCAL 모델 존재 여부)만으로 계산한다.
+   *
+   * 2026-09(REQ-003) 확장: anthropic은 서버 전역 조건(API 키 설정)에 더해 **요청한 사용자별 권한**
+   * (admin이거나 ANTHROPIC_USER Role 보유)까지 만족해야 목록에 포함된다. local은 기존과 동일하게
+   * 전역 조건(DB 활성 LOCAL 모델 존재)만으로 판정한다.
    */
   @GetMapping("/api/config/llm-provider")
   @ResponseBody
-  public Map<String, Object> getLlmProviderConfig() {
+  public Map<String, Object> getLlmProviderConfig(Authentication authentication) {
     Map<String, Object> result = new HashMap<>();
     result.put("provider", isAnthropicMode() ? "anthropic" : "local");
     // 특정 세션에 종속되지 않은 전역 설정 조회이므로 sourceFolderPath 없이(null) 기본 모델을 조회한다.
@@ -164,7 +166,7 @@ public class MainApiController {
     // 순서는 ["anthropic", "local"] 고정 — 프런트가 이 순서 그대로 토글 버튼을 렌더링한다.
     // 결과가 1개 이하면 프런트는 토글을 숨기고 기존 동작을 그대로 유지한다(scenario_1 등).
     List<String> availableProviders = new ArrayList<>();
-    if (isAnthropicApiKeyConfigured()) {
+    if (isAnthropicApiKeyConfigured() && hasAnthropicAccess(authentication)) {
       availableProviders.add("anthropic");
     }
     if (llmModelOptionService != null && llmModelOptionService.hasActiveLocalModel()) {
@@ -182,6 +184,28 @@ public class MainApiController {
    */
   private boolean isAnthropicApiKeyConfigured() {
     return anthropicApiKey != null && !anthropicApiKey.isBlank() && !anthropicApiKey.startsWith("MOCK");
+  }
+
+  /**
+   * 이 요청을 보낸 사용자가 Anthropic(Claude API)을 쓸 수 있는지 판정한다(REQ-003/004, 2026-09).
+   * admin은 Role 보유 여부와 무관하게 무조건 통과하고, 그 외에는 ANTHROPIC_USER Role 보유 여부로 판정한다.
+   * 인증 정보가 없거나 principal이 User가 아니면(비정상 상황 안전망) 권한 없음으로 본다.
+   */
+  private boolean hasAnthropicAccess(Authentication authentication) {
+    if (authentication == null || !(authentication.getPrincipal() instanceof User user)) return false;
+    if (isAdmin(authentication)) return true;
+    return user.getRoles().stream().anyMatch(r -> "ANTHROPIC_USER".equals(r.getName()));
+  }
+
+  /**
+   * ClaudeServiceImpl.resolveProvider()와 동일 판정 기준 — modelKey가 없으면(빈 요청) 이 요청이
+   * 실제로 라우팅될 provider까지 포함해 판정한다 (REQ-004, 2026-09). 두 클래스 간 판정 로직 중복은
+   * isAnthropicMode()와 동일하게 이 코드베이스의 기존 관례다.
+   */
+  private LlmProvider resolveEffectiveProvider(String modelKey) {
+    return llmModelOptionService.findByModelKey(modelKey)
+        .map(LlmModelOption::getProvider)
+        .orElse(isAnthropicMode() ? LlmProvider.ANTHROPIC : LlmProvider.LOCAL);
   }
 
   /**
@@ -290,6 +314,15 @@ public class MainApiController {
     final boolean generateReadme = (generateReadmeParam == null || generateReadmeParam.isBlank())
         ? !isPartialSelection
         : "true".equalsIgnoreCase(generateReadmeParam);
+
+    // Anthropic 사용 권한 가드 (REQ-004, 2026-09) — 부작용이 있는 setModel() 호출 전에 먼저 검증한다
+    // (confirmFailover가 이미 쓰고 있는 관례와 동일). 이 메서드는 위쪽 isAdmin 게이트를 통과한 뒤라
+    // 실행상 no-op이지만, 향후 admin 제한이 완화될 때를 대비한 심층 방어로 유지한다.
+    String effectiveModelKey = !selectedModel.isBlank() ? selectedModel : claudeService.getCurrentModel(sourcePath);
+    if (resolveEffectiveProvider(effectiveModelKey) == LlmProvider.ANTHROPIC && !hasAnthropicAccess(authentication)) {
+      result.put("error", "Anthropic 모델을 사용할 권한이 없습니다. 관리자에게 Anthropic 사용 권한을 요청하세요.");
+      return result;
+    }
 
     // 모델 선택 적용 (2026-08-20 긴급수정: 세션별 격리 — sourcePath를 키로 등록해
     // 동시에 분석 중인 다른 세션의 모델이 함께 바뀌는 레이스 컨디션을 방지)
@@ -480,6 +513,15 @@ public class MainApiController {
     } catch (Exception e) {
       log.error("[업로드 분석] 파일 저장 실패 sessionId={}", sessionId, e);
       result.put("error", "업로드된 파일 저장에 실패했습니다: " + e.getMessage());
+      return result;
+    }
+
+    // Anthropic 사용 권한 가드 (REQ-004, 2026-09) — 모델 전환/분석 스레드 기동 전에 차단한다.
+    // 업로드 파일 저장은 이미 끝난 뒤라 임시 파일이 남지만, 기존 실패 경로들도 동일하게 정리하지 않는다.
+    String effectiveModelKey = (selectedModel != null && !selectedModel.isBlank())
+        ? selectedModel : claudeService.getCurrentModel(uploadRoot.toString());
+    if (resolveEffectiveProvider(effectiveModelKey) == LlmProvider.ANTHROPIC && !hasAnthropicAccess(authentication)) {
+      result.put("error", "Anthropic 모델을 사용할 권한이 없습니다. 관리자에게 Anthropic 사용 권한을 요청하세요.");
       return result;
     }
 
