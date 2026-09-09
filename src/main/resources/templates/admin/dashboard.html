@@ -1471,6 +1471,7 @@
             document.getElementById('myTab-token').style.cssText  += tStyle;
         }
 
+        // 이 함수는 my-activity.html의 renderHistory()와 로직이 중복됨 — 통합 검토는 bug-suspects.md 2026-09-08 항목 참고
         function renderMyHistory(list) {
             const total     = list.length;
             const completed = list.filter(h => h.status === 'COMPLETED').length;
@@ -1494,9 +1495,13 @@
                 const model   = myShortModel(h.modelName);
                 const date    = h.createdAt ? new Date(h.createdAt).toLocaleString('ko-KR') : '-';
                 const stCls   = h.status === 'COMPLETED' ? 'badge-active' : 'badge-inactive';
-                let actionBtns = h.status === 'COMPLETED'
-                    ? `<button class="btn-sm btn-ppt" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📋 보고서 PPT</button>`
-                    : '-';
+                // PAUSED 세션은 sessionId가 있어야 재개 API를 호출할 수 있으므로 두 조건을 함께 검사한다
+                let actionBtns = '-';
+                if (h.status === 'COMPLETED') {
+                    actionBtns = `<button class="btn-sm btn-ppt" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📋 보고서 PPT</button>`;
+                } else if (h.status === 'PAUSED' && h.sessionId) {
+                    actionBtns = `<button class="btn-sm" onclick="resumeMyAnalysis('${h.sessionId}', ${h.id})" style="font-size:11px;padding:3px 8px;background:#2980b9;color:white;border:none;border-radius:4px;cursor:pointer;" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
+                }
                 if (h.hasClaudeMd) {
                     actionBtns += `<button class="btn-sm btn-claudemd" onclick="openMyClaudeMdModal(${h.id})" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기" style="font-size:11px;padding:3px 8px;background:#6c5ce7;color:white;border:none;border-radius:4px;cursor:pointer;">📝 CLAUDE.md</button>`;
                 }
@@ -1564,6 +1569,29 @@
                 document.body.appendChild(a); a.click();
                 URL.revokeObjectURL(a.href); document.body.removeChild(a);
             } catch (e) { alert('PPT 다운로드 중 오류가 발생했습니다.'); }
+        }
+
+        // 내 활동: 이어서 분석 (PAUSED 세션 재개)
+        // my-activity.html:387-389, 449-467과 동일 로직 — 통합 리팩토링 시 함께 정리 필요
+        // dashboard.js의 인자 없는 resumeAnalysis()와 이름이 겹치지 않도록 resumeMyAnalysis로 명명한다
+        async function resumeMyAnalysis(sessionId, historyId) {
+            if (!confirm('중단된 시점부터 이어서 분석을 재개하겠습니까?')) return;
+            try {
+                const res = await fetch('/api/session/resume', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(`분석 재개됨 (남은 파일: ${data.pendingCount}개)\n메인 페이지에서 진행상황을 확인하세요.`);
+                    window.location.href = `/?sessionId=${sessionId}`;
+                } else {
+                    alert('재개 실패: ' + data.message);
+                }
+            } catch (e) {
+                alert('재개 요청 중 오류가 발생했습니다.');
+            }
         }
 
         // 내 활동: 분석에 실제 사용된 CLAUDE.md 내용 조회 및 모달 표시
