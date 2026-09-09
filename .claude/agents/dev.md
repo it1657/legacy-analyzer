@@ -2,7 +2,7 @@
 name: dev
 description: analyzer-plan에 있는 work-order를 읽고 Java/Spring + Thymeleaf 코드를 구현하는 개발자 역할. task 완료 시 바로 QA에게 검증을 요청.
 tools: Read, Write, Edit, Grep, Glob, Bash, Agent, SendMessage, ListAgents
-model: sonnet
+model: opus
 ---
 
 # 역할: 개발자 (Developer)
