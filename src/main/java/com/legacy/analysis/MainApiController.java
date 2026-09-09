@@ -765,40 +765,92 @@ public class MainApiController {
     return result;
   }
 
+  // ===================================================================
+  // 경로 계산 공용 헬퍼 (읽기 측 3곳의 단일 산식 출처)
+  //
+  // 이 산식들의 **정답 출처는 runAnalysis()**다. runAnalysis()가 copy 모드에서 실제로 파일을 쓰는
+  // 위치가 곧 정답이고, 아래 헬퍼들은 그 위치를 세션 저장값만으로 다시 계산해 맞히기 위한 것이다.
+  // 따라서 runAnalysis()의 경로 계산이 바뀌면 **여기도 반드시 함께 바꿔야 한다**(반대 방향이 아니다).
+  // 그 계약은 MainApiControllerCopyModeOutputRootContractTest가 실행 결과로 고정하고 있으므로,
+  // 한쪽만 바뀌면 그 테스트가 RED로 알려준다.
+  // (라인 번호는 이 파일에서 반복적으로 썩어왔으므로 메서드명으로만 참조한다.)
+  // ===================================================================
+
   /**
-   * 세션의 분석 기준 루트 경로. 복사 모드(outputPath != sourcePath)면 출력 폴더 아래 프로젝트 폴더가,
-   * 아니면 sourcePath 자체가 기준이 된다. 분석 루프의 지역변수가 아니라 세션에 저장된 값만 사용하므로
-   * 분석 종료 후(폴링 완료 시점)에도 동일하게 계산할 수 있다.
+   * copy 모드(= 원본을 건드리지 않고 출력 폴더에 복사본을 만들어 분석) 판정.
+   * runAnalysis()의 isCopyMode 판정과 동일하다 — null/blank 가드와 outputPath.trim() 비교까지 같다.
+   * (runAnalysis()는 {@code source.equals(output.trim())} 순서로 쓰지만 동치이며, 이 순서가
+   * sourcePath까지 null인 경우에도 NPE 없이 판정된다.)
    */
-  private Path resolveAnalysisRoot(SessionState session) {
-    String sourcePath = session.getSourcePath();
-    String outputPath = session.getOutputPath();
-    boolean isCopyMode = outputPath != null && !outputPath.isBlank() && !outputPath.equals(sourcePath);
-    return isCopyMode
-        ? Path.of(outputPath).resolve(Path.of(sourcePath).getFileName())
-        : Path.of(sourcePath);
+  private static boolean isCopyModeOutput(String sourcePath, String outputPath) {
+    return outputPath != null && !outputPath.isBlank() && !outputPath.trim().equals(sourcePath);
   }
 
   /**
-   * 폴링 DTO의 failedFiles 전용 analysisRoot 계산. resolveAnalysisRoot()(getSessionFileList()가
-   * 쓰는 기존 공식)와 달리 계정별 분리 세그먼트({username})까지 포함한다 — runAnalysis()의 실제
-   * 파일 저장 경로(finalProjectOutputPath, 1252-1254행)와 정확히 일치시켜야 실패 파일의 상대경로가
-   * 프런트 globalFilesCache.fileName(소스 폴더 기준 상대경로)과 매칭된다.
-   * resolveAnalysisRoot()는 getSessionFileList()의 기존 동작 보존을 위해 의도적으로 건드리지 않는다.
+   * 출력 경로의 계정별 분리 세그먼트로 쓸 수 있게 사용자명을 정규화한다.
+   * runAnalysis()의 safeUsername 규칙과 동일 — 이 정규식을 그대로 복제해야 실제 저장 경로와 일치한다.
+   */
+  private static String sanitizeUsername(String username) {
+    return (username != null && !username.isBlank())
+        ? username.replaceAll("[^a-zA-Z0-9_\\-]", "_") : "unknown";
+  }
+
+  /**
+   * 계정 루트({@code {outputPath}/{safeUsername}}) — runAnalysis()의 finalOutputPath와 동일하다.
+   * <b>추적 파일({@code .ai-analysis-done.txt})의 기준 경로</b>이자 loadTrackerIntoSession()/analyzeFile()에
+   * 넘어가는 outputRoot다. 비-copy 모드면 sourcePath 자체가 기준이 된다.
+   */
+  private static String resolveUserOutputRoot(String sourcePath, String outputPath, String username) {
+    return isCopyModeOutput(sourcePath, outputPath)
+        ? Path.of(outputPath.trim()).resolve(sanitizeUsername(username)).toString().replace("\\", "/")
+        : sourcePath;
+  }
+
+  /**
+   * 프로젝트 루트({@code {outputPath}/{safeUsername}/{sourceFolderName}}) — runAnalysis()의
+   * finalProjectOutputPath와 동일하다. <b>분석 대상 파일이 실제로 놓이는 루트</b>이며,
+   * 화면 표시용 상대경로(relativize)의 기준도 이 값이어야 프런트 파일명과 매칭된다.
+   */
+  private static Path resolveProjectOutputRoot(String sourcePath, String outputPath, String username) {
+    Path sourceRootPath = Path.of(sourcePath);
+    return isCopyModeOutput(sourcePath, outputPath)
+        ? Path.of(resolveUserOutputRoot(sourcePath, outputPath, username))
+            .resolve(sourceRootPath.getFileName().toString())
+        : sourceRootPath;
+  }
+
+  /**
+   * 세션에 저장된 값으로 프로젝트 루트를 계산하는 편의 오버로드.
+   * 분석 루프의 지역변수가 아니라 세션 저장값만 쓰므로 분석 종료 후(폴링 시점)에도 동일하게 계산된다.
+   */
+  private static Path resolveProjectOutputRoot(SessionState session) {
+    return resolveProjectOutputRoot(
+        session.getSourcePath(), session.getOutputPath(), session.getUsername());
+  }
+
+  /**
+   * getSessionFileList()가 그리드 파일명(상대경로)을 만들 때 쓰는 기준 루트.
+   * 분석 루프의 지역변수가 아니라 세션에 저장된 값만 사용하므로 분석 종료 후(폴링 시점)에도 동일하게 계산된다.
+   *
+   * <p>예전에는 여기서 계정 분리 세그먼트({username})를 빼고 {@code {out}/{srcName}}으로 계산해,
+   * copy 모드 재개 화면의 파일명이 {@code ../{username}/{srcName}/...} 형태로 내려왔다. 그러면
+   * 폴링 응답의 failedFiles(= resolveFailedFilesRoot 기준)와 <b>한 건도 매칭되지 않아</b>
+   * 프런트(dashboard.js)가 실패 파일을 "패치완료"로 덮어쓴다 — 표시상의 어색함이 아니라 기능 결함이었다.
+   * 이제 failedFiles와 같은 산식(resolveProjectOutputRoot)을 쓰므로 두 값이 항상 같은 문자열이 된다.
+   */
+  private Path resolveAnalysisRoot(SessionState session) {
+    return resolveProjectOutputRoot(session);
+  }
+
+  /**
+   * 폴링 DTO의 failedFiles 전용 analysisRoot 계산. 계정별 분리 세그먼트({username})까지 포함해
+   * runAnalysis()의 실제 파일 저장 경로(finalProjectOutputPath)와 정확히 일치해야, 실패 파일의
+   * 상대경로가 프런트 globalFilesCache.fileName(소스 폴더 기준 상대경로)과 매칭된다.
+   * 산식 자체는 resolveProjectOutputRoot()에 단일 출처로 모여 있고, resolveAnalysisRoot()도
+   * 같은 산식을 쓴다(그래서 두 API의 상대경로가 문자열로 일치한다).
    */
   private Path resolveFailedFilesRoot(SessionState session) {
-    String sourcePath = session.getSourcePath();
-    String outputPath = session.getOutputPath();
-    boolean isCopyMode = outputPath != null && !outputPath.isBlank() && !outputPath.trim().equals(sourcePath);
-    if (!isCopyMode) {
-      return Path.of(sourcePath);
-    }
-    // runAnalysis() 1244-1245행과 완전히 동일한 sanitize 규칙 — 반드시 이 정규식을 그대로 복제한다.
-    String username = session.getUsername();
-    String safeUsername = (username != null && !username.isBlank())
-        ? username.replaceAll("[^a-zA-Z0-9_\\-]", "_") : "unknown";
-    // runAnalysis() 1252-1254행 finalProjectOutputPath와 동일한 공식.
-    return Path.of(outputPath.trim()).resolve(safeUsername).resolve(Path.of(sourcePath).getFileName());
+    return resolveProjectOutputRoot(session);
   }
 
   /** 절대경로를 analysisRoot 기준 상대경로('/' 구분자)로 변환한다. relativize 실패 시 절대경로로 폴백. */
@@ -1621,12 +1673,22 @@ public class MainApiController {
       // README 생성 여부는 최초 분석 시작 시 정한 값을 재개 시에도 그대로 유지한다.
       boolean generateReadme = session.isGenerateReadme();
 
-      boolean isCopyMode = !normalizedSourcePath.equals(normalizedOutputPath);
+      // 경로 계산은 쓰기 측 정답(runAnalysis())과 같은 산식을 쓰는 공용 헬퍼에 위임한다.
+      // 예전에는 여기서 직접 계산하면서 세 가지가 어긋나 있었다:
+      //   (1) isCopyMode 판정에 null/blank/trim 가드가 없어 후행 공백·빈 문자열 outputPath를 copy 모드로 오판,
+      //   (2) finalProjectOutputPath에 계정 분리 세그먼트({safeUsername})가 빠져 재개 대상 파일이
+      //       {out}/{src}/../{user}/{src}/... 라는 존재하지 않는 중간 경로로 쓰였고(리눅스에서 전량 실패),
+      //   (3) finalOutPath가 raw outputPath라 추적 파일(.ai-analysis-done.txt)이 최초 분석과 다른
+      //       위치에 기록돼, 재시작 후 이미 처리한 파일을 다시 LLM에 태우는 중복 비용이 발생했다.
+      // outputPath가 null/blank면 헬퍼가 비-copy 모드(원본 직접 수정)로 폴백하므로 runAnalysis()와 동일하게
+      // 동작한다(심층 방어 — DB 복원 경로로 그런 세션이 들어와도 NPE 없이 흘러간다).
+      String resumeUsername = session.getUsername();
+      boolean isCopyMode = isCopyModeOutput(normalizedSourcePath, normalizedOutputPath);
       Path sourceRootPath = Path.of(normalizedSourcePath);
-      Path finalProjectOutputPath = isCopyMode
-          ? Path.of(normalizedOutputPath).resolve(sourceRootPath.getFileName())
-          : sourceRootPath;
-      String finalOutPath = normalizedOutputPath;
+      Path finalProjectOutputPath =
+          resolveProjectOutputRoot(normalizedSourcePath, normalizedOutputPath, resumeUsername);
+      String finalOutPath =
+          resolveUserOutputRoot(normalizedSourcePath, normalizedOutputPath, resumeUsername);
 
       AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
       if (history != null) {

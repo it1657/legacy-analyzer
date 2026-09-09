@@ -166,12 +166,14 @@ class MainApiControllerFailedFilesStatusTest {
   }
 
   @Test
-  void getSessionFileList의_기존_analysisRoot_공식은_이번_변경의_영향을_받지_않는다() {
-    // 회귀 확인: resolveAnalysisRoot()(= {out}/{srcName})는 그대로 유지되므로,
-    // 재개 그리드 복원용 파일 목록은 종전과 동일한 상대경로 계산 결과를 유지해야 한다.
+  void getSessionFileList의_파일명은_실제_저장루트_기준_상대경로다() {
+    // 회귀 확인: getSessionFileList()는 resolveAnalysisRoot()를 통해
+    // 실제 저장 루트({out}/{username}/{srcName})를 기준으로 잡으므로,
+    // 재개 그리드 복원용 파일 목록의 fileName은 소스 폴더 기준 상대경로로 내려와야 한다.
+    // (픽스처 경로는 runAnalysis()가 copy 모드에서 실제로 파일을 놓는 위치와 동일하게 둔다.)
     SessionState session = new SessionState("sid", "/tmp/src/myproj", "/tmp/out");
     session.setUsername("jhjung");
-    session.getPatchedFilePaths().add("/tmp/out/myproj/com/z/C.java");
+    session.getPatchedFilePaths().add("/tmp/out/jhjung/myproj/com/z/C.java");
 
     AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
     when(sessionManager.getSession("sid")).thenReturn(session);
@@ -184,6 +186,7 @@ class MainApiControllerFailedFilesStatusTest {
     assertNotNull(files, "세션 소유자 본인 호출은 기존 동작 그대로 성공해야 한다");
     assertEquals(1, files.size());
     assertEquals("com/z/C.java", files.get(0).get("fileName"),
-        "getSessionFileList()는 여전히 resolveAnalysisRoot()({out}/{srcName})를 쓰며 무변경이어야 한다");
+        "getSessionFileList()는 resolveAnalysisRoot()({out}/{username}/{srcName})를 기준으로"
+            + " 소스 폴더 상대경로를 내려줘야 한다");
   }
 }
