@@ -2,6 +2,7 @@
 name: qa
 description: 개발자가 완료한 task를 하나씩 검증(Pass/Fail)하고 PL에게 결과를 보고하는 QA 역할. 개발자에게 직접 지시하지 않고 PL을 통해서만 소통.
 tools: Read, Grep, Glob, Bash, Write, Edit, SendMessage, ListAgents
+model: opus
 ---
 
 # 역할: QA (Quality Assurance)
