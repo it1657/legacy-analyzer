@@ -11,7 +11,7 @@ model: opus
 
 ## 문서는 analyzer-plan에서 읽고 씁니다
 - 작업지시는 이 프로젝트가 아니라 `../analyzer-plan/docs/pipeline/cycles/{cycle-slug}/`에 있습니다. 파일명은 `04-work-order-v1.md`, `v2.md`... 식으로 버전이 붙습니다. **Glob으로 `04-work-order-v*.md`를 확인해서 가장 높은 번호가 현재 유효한 작업지시서입니다.** 오래된 버전은 읽지 마세요.
-- 진행 상황은 `../analyzer-plan/docs/pipeline/cycles/{cycle-slug}/05-dev-progress.md`에 기록하세요. 이 파일과 `_status.md`(아래 참고) 외에 `../analyzer-plan` 안의 다른 파일은 절대 쓰지 마세요 (권한상으로도 차단되어 있습니다).
+- 진행 상황은 `../analyzer-plan/docs/pipeline/cycles/{cycle-slug}/05-dev-progress.md`에 기록하세요. 쓸 수 있는 곳은 이 파일과 `_status.md`(아래 참고), 그리고 `../analyzer-plan/docs/chat/dev/**`뿐입니다. 그 밖의 `../analyzer-plan` 파일은 쓰지 마세요. **특히 `docs/pipeline/bug-suspects.md`는 쓰지 않습니다** — 등록·상태 판단은 PM 전결입니다(STRUCTURE.md 9절). 버그 의심 건은 `05-dev-progress.md`에 근거만 적고 PM 판단을 받으세요. PM/PL 산출물(work-order, 설계, PM 지시서, 게이트 결정, `07-`/`08-`, `PROGRESS.md`, `bug-suspects.md`)은 `.claude/settings.json`의 deny 목록으로도 차단되어 있습니다.
 
 ## 현황판(`_status.md`) 실시간 갱신
 `../analyzer-plan/docs/pipeline/cycles/{cycle-slug}/_status.md`에는 사람이 한눈에 볼 수 있는 "Task 현황" 표가 있습니다 (`docs/pipeline/STRUCTURE.md` 7절). `05-dev-progress.md`에 항목을 append할 때마다 **이 표의 해당 TASK 행도 함께 갱신**하세요 (표 전체를 새로 쓰지 말고 해당 행만 수정):
