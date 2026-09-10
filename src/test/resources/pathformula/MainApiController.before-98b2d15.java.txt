@@ -980,22 +980,22 @@ public class MainApiController {
       outputPathStr = folderPathStr;
     }
 
-    // 요청 파라미터 경로 구분자 정규화 — startAnalysis()가 분석 본체에 넘기기 전에 적용하는 규칙과 같다.
-    // 아래 헬퍼가 copy 모드 여부를 두 경로의 "문자열 비교"로 판정하므로, 사용자가 같은 경로를
-    // 한쪽은 \, 다른쪽은 / 로 입력하면 정규화 없이는 실제 분석과 정반대의 모드로 판정된다.
-    folderPathStr = folderPathStr.replace("\\", "/");
-    outputPathStr = outputPathStr.replace("\\", "/");
-
-    // 계정별 출력 경로의 산식은 공용 헬퍼가 단일 출처다 — 이 메서드는 산식을 따로 갖지 않고 위임한다.
-    // (과거 이 자리에 인라인 사본이 있었고, 거기엔 outputPath.trim()과 구분자 정규화가 빠져 있어
-    //  실제 저장 위치와 어긋났다. 완료 판정이 절대경로 문자열 비교라 한 글자만 달라도 전부 미완료가 된다.)
-    // 1단계 스캔 시점이라 세션이 아직 없으므로 SessionState 오버로드가 아닌 3-arg 오버로드를 쓴다.
-    String requestUsername = (authentication != null
-        && authentication.getPrincipal() instanceof User u) ? u.getUserId() : null;
-    String userOutputPathStr = resolveUserOutputRoot(folderPathStr, outputPathStr, requestUsername);
-    Path outputRootPath = resolveProjectOutputRoot(folderPathStr, outputPathStr, requestUsername);
+    // 계정별 출력 경로 계산 (runAnalysis와 동일한 규칙)
+    String safeUsername = "unknown";
+    if (authentication != null && authentication.getPrincipal() instanceof User u) {
+      safeUsername = u.getUserId().replaceAll("[^a-zA-Z0-9_\\-]", "_");
+    }
+    boolean isCopyMode = !outputPathStr.equals(folderPathStr);
+    String userOutputPathStr = isCopyMode
+        ? Path.of(outputPathStr).resolve(safeUsername).toString()
+        : outputPathStr;
 
     Path folderPath = Path.of(folderPathStr);
+    String sourceFolderName = folderPath.getFileName().toString();
+    // 파일이 실제로 복사된 위치: {outputPath}/{username}/{sourceFolderName}/
+    Path outputRootPath = isCopyMode
+        ? Path.of(userOutputPathStr).resolve(sourceFolderName)
+        : Path.of(outputPathStr);
 
     try (Stream<Path> stream = Files.walk(folderPath)) {
       List<Path> fileList = stream
