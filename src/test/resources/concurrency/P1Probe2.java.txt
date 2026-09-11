@@ -1,0 +1,40 @@
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class P1Probe2 {
+  static int field;
+  static void set(int v) { field = v; }
+  static int get() { return field; }
+
+  static void run(String label, int n, int trials, boolean gap) throws Exception {
+    int lossy = 0, worst = 0;
+    ExecutorService pool = Executors.newFixedThreadPool(Math.min(n, 16));
+    for (int t = 0; t < trials; t++) {
+      field = 0;
+      AtomicInteger ext = new AtomicInteger(0);
+      CountDownLatch start = new CountDownLatch(1);
+      CountDownLatch done  = new CountDownLatch(n);
+      for (int i = 0; i < n; i++) {
+        pool.submit(() -> {
+          try { start.await(); } catch (InterruptedException e) {}
+          int v = ext.incrementAndGet();
+          if (gap) Thread.onSpinWait();   // 증가와 대입 사이의 실제 작업(getStatistics() 호출 등)을 흉내
+          set(v);
+          done.countDown();
+        });
+      }
+      start.countDown();
+      done.await();
+      int fin = get();
+      if (fin != n) { lossy++; worst = Math.max(worst, n - fin); }
+    }
+    pool.shutdown();
+    System.out.printf("%-22s files=%-3d trials=%-7d 손실=%d회 (%.4f%%) 최대손실=%d%n",
+        label, n, trials, lossy, 100.0 * lossy / trials, worst);
+  }
+
+  public static void main(String[] a) throws Exception {
+    for (int n : new int[]{2,3,5,8}) run("[간격없음]", n, 100000, false);
+    for (int n : new int[]{2,3,5,8}) run("[증가-대입 사이 작업]", n, 100000, true);
+  }
+}

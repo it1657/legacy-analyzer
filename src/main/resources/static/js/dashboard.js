@@ -39,6 +39,13 @@ let failoverModalShown = false;
 // TASK-007(2026-09): populateModelSelectOptions()가 분석 진행 중 disabled를 무조건
 // 풀어버리던 버그(provider 토글 클릭으로 모델 드롭다운 잠금이 풀림)를 막기 위해 참조한다.
 let extraControlsLocked = false;
+// 업로드 분석 섹션(폴더 선택/분석 시작 등)이 잠겨 있는지 여부.
+// setUploadControlsDisabled()가 마지막으로 받은 disabled 값을 그대로 반영한다(단일 진실 소스).
+// 이 변수에 대입하는 곳은 setUploadControlsDisabled() 한 곳뿐이며, 다른 함수는 읽기만 한다.
+// TASK-001(2026-09): index.html의 폴더명 span(#uploadSourceFolderName/#uploadOutputFolderName)이
+// onclick으로 pick 함수를 직접 호출해, 잠금 상태에서도 폴더 선택창이 떠서 핸들이 교체되고
+// runUploadBtn.disabled가 풀리던 우회 경로를 막기 위해 참조한다.
+let uploadControlsLocked = false;
 
 // 원격 업로드 분석(File System Access API) 상태
 let uploadSourceHandle = null;      // 분석 대상 폴더 핸들 (write-back 대상 기본값)
@@ -70,6 +77,9 @@ function setLocalPathControlsDisabled(disabled) {
 }
 
 function setUploadControlsDisabled(disabled) {
+  // 조기 반환보다 먼저 갱신한다. 업로드 섹션이 없는 페이지에서도 잠금 상태 자체는
+  // 항상 최신이어야 pick 함수의 가드가 올바르게 동작한다.
+  uploadControlsLocked = disabled;
   const section = document.getElementById('uploadAnalysisSection');
   if (!section) return;
   section.querySelectorAll('button').forEach(btn => {
@@ -84,6 +94,15 @@ function setUploadControlsDisabled(disabled) {
     runBtn.style.opacity = disabled ? "0.5" : "1";
     runBtn.style.cursor = disabled ? "not-allowed" : "pointer";
   }
+  // 폴더명 span은 <button>이 아니라 onclick이 달린 <span>이라 disabled 속성이 먹지 않는다.
+  // 클릭 자체를 막으려면 pointer-events로 히트 대상에서 제외해야 한다(시각 피드백은 opacity/cursor).
+  ['uploadSourceFolderName', 'uploadOutputFolderName'].forEach(id => {
+    const span = document.getElementById(id);
+    if (!span) return;
+    span.style.pointerEvents = disabled ? "none" : "auto";
+    span.style.opacity = disabled ? "0.5" : "1";
+    span.style.cursor = disabled ? "not-allowed" : "pointer";
+  });
 }
 
 // 분석 실행 중에는 일시정지/재개/취소(sessionControlPanel) 외 다른 설정 변경 컨트롤을 눌러
@@ -1715,6 +1734,12 @@ async function previewUploadFolder() {
 }
 
 async function pickUploadSourceFolder() {
+  // 분석 진행 중에는 선택창 자체를 띄우지 않는다. 여기서 막지 않으면 uploadSourceHandle이
+  // 교체되어 진행 중 세션의 결과물이 다른 폴더에 기록될 수 있고, runUploadBtn 잠금도 풀린다.
+  if (uploadControlsLocked) {
+    alert('분석이 진행 중입니다. 분석이 끝난 뒤에 폴더를 다시 선택해 주세요.');
+    return;
+  }
   try {
     uploadSourceHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
     document.getElementById('uploadSourceFolderName').textContent = `📂 ${uploadSourceHandle.name}`;
@@ -1726,6 +1751,12 @@ async function pickUploadSourceFolder() {
 }
 
 async function pickUploadOutputFolder() {
+  // 분석 진행 중에는 선택창 자체를 띄우지 않는다. uploadOutputHandle은 write-back 대상
+  // 우선순위가 더 높아(targetHandle = uploadOutputHandle || uploadSourceHandle) 영향이 직접적이다.
+  if (uploadControlsLocked) {
+    alert('분석이 진행 중입니다. 분석이 끝난 뒤에 폴더를 다시 선택해 주세요.');
+    return;
+  }
   try {
     uploadOutputHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
     document.getElementById('uploadOutputFolderName').textContent = `🎯 ${uploadOutputHandle.name}`;

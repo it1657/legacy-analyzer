@@ -1,0 +1,40 @@
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/** 실제 runAnalysis() 경로 모델: 파일 1개 = 태스크 1개 = 증가→대입 1회 (루프 아님) */
+public class P1Probe {
+  static int field;                                  // AnalysisStatistics의 plain int 필드
+  static void set(int v) { field = v; }
+  static int get() { return field; }
+
+  public static void main(String[] a) throws Exception {
+    System.out.println("cores=" + Runtime.getRuntime().availableProcessors());
+    int[] fileCounts = {2, 3, 5, 8, 16, 30};
+    int trials = 20000;
+    for (int n : fileCounts) {
+      int lossy = 0, worst = 0;
+      for (int t = 0; t < trials; t++) {
+        field = 0;
+        AtomicInteger ext = new AtomicInteger(0);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done  = new CountDownLatch(n);
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(n, 16));
+        for (int i = 0; i < n; i++) {
+          pool.submit(() -> {
+            try { start.await(); } catch (InterruptedException e) {}
+            int v = ext.incrementAndGet();       // 원자적 증가
+            set(v);                              // 비원자적 대입  ← 실소스 1482-1483 패턴
+            done.countDown();
+          });
+        }
+        start.countDown();
+        done.await();
+        pool.shutdown();
+        int fin = get();
+        if (fin != n) { lossy++; worst = Math.max(worst, n - fin); }
+      }
+      System.out.printf("files=%-3d trials=%d  손실발생=%d회 (%.2f%%)  최대손실=%d%n",
+          n, trials, lossy, 100.0 * lossy / trials, worst);
+    }
+  }
+}

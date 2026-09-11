@@ -7,6 +7,27 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * 분석 작업의 종합 통계 정보
+ *
+ * <p><b>successCount / failureCount / skipCount 세 카운터의 동시성 계약</b>
+ * (2026-09-quick-fixes-batch REQ-003, 설계 §4.2 B안):
+ * <ul>
+ *   <li>분석 루프는 파일 하나를 끝낼 때마다 <b>여러 스레드에서 동시에</b> 이 세 값을 올린다
+ *       (운영 기본 스레드 수 16 — {@code app.analysis.thread-pool-size}).
+ *       그래서 <b>증가 전용 메서드</b> {@code incrementSuccessCount()} /
+ *       {@code incrementSkipCount()} / {@code incrementFailureCount()}를 두고,
+ *       <b>병렬 루프 안에서는 반드시 이 메서드만 쓴다.</b></li>
+ *   <li>증가 메서드와 <b>대응 getter가 같은 락(this)</b>에 묶여 있다. 증가만 원자화하고 getter를
+ *       빼면, 필드가 plain {@code int}(volatile 아님)이라 <b>진행률을 폴링하는 스레드가 뒤로 가는
+ *       값을 읽는다</b>. 즉 getter의 {@code synchronized}는 장식이 아니라 계약의 일부다.</li>
+ *   <li><b>기존 setter는 남겨 두되 병렬 루프에서 쓰지 않는다.</b> setter는 Jackson 역직렬화와
+ *       {@code AnalysisSessionManager.updateStatistics()}가 쓰는 단일 스레드 경로용이고,
+ *       "읽어서 +1 해서 되쓰기" 형태로 쓰면 원자성이 깨진다.
+ *       루프 안에 setter 직접 호출이 다시 생기지 않는지는
+ *       {@code MainApiControllerCounterIncrementSingleSourceTest}가 감시한다.</li>
+ *   <li>필드 타입은 {@code int} 그대로다. {@code @JsonProperty}가 필드에 붙어 있고 이 객체가
+ *       {@code SessionDetailDto.statistics}로 API 응답에 실리므로 <b>직렬화 형태를 바꾸지 않는다</b>
+ *       (설계 §4.2 A안 = {@code AtomicInteger} 전환은 이 이유로 기각됐다).</li>
+ * </ul>
  */
 public class AnalysisStatistics {
 
@@ -63,7 +84,10 @@ public class AnalysisStatistics {
     this.totalFiles = totalFiles;
   }
 
-  public int getSuccessCount() {
+  // successCount / failureCount / skipCount — 증가 메서드와 getter가 같은 락(this)에 묶여 있다.
+  // 클래스 Javadoc의 "동시성 계약" 참고. setter는 남겨 두되 병렬 루프에서는 쓰지 않는다.
+
+  public synchronized int getSuccessCount() {
     return successCount;
   }
 
@@ -71,7 +95,15 @@ public class AnalysisStatistics {
     this.successCount = successCount;
   }
 
-  public int getFailureCount() {
+  /**
+   * 성공 건수를 1 올린다. <b>병렬 분석 루프는 이 메서드를 쓴다</b>
+   * ({@code setSuccessCount(외부카운터값)} 형태로 대입하면 늦게 도착한 낮은 값이 큰 값을 덮어쓴다).
+   */
+  public synchronized void incrementSuccessCount() {
+    this.successCount++;
+  }
+
+  public synchronized int getFailureCount() {
     return failureCount;
   }
 
@@ -79,12 +111,27 @@ public class AnalysisStatistics {
     this.failureCount = failureCount;
   }
 
-  public int getSkipCount() {
+  /**
+   * 실패 건수를 1 올린다. <b>병렬 분석 루프는 이 메서드를 쓴다</b>
+   * ({@code setFailureCount(getFailureCount() + 1)} 형태는 읽기·계산·쓰기가 전부 갈라져 손실이 크다).
+   */
+  public synchronized void incrementFailureCount() {
+    this.failureCount++;
+  }
+
+  public synchronized int getSkipCount() {
     return skipCount;
   }
 
   public void setSkipCount(int skipCount) {
     this.skipCount = skipCount;
+  }
+
+  /**
+   * 스킵(이미 처리됨) 건수를 1 올린다. <b>병렬 분석 루프는 이 메서드를 쓴다.</b>
+   */
+  public synchronized void incrementSkipCount() {
+    this.skipCount++;
   }
 
   public int getOversizeCount() {

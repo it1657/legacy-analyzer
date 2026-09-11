@@ -1502,7 +1502,11 @@
                 } else if (h.status === 'PAUSED' && h.sessionId) {
                     actionBtns = `<button class="btn-sm" onclick="resumeMyAnalysis('${h.sessionId}', ${h.id})" style="font-size:11px;padding:3px 8px;background:#2980b9;color:white;border:none;border-radius:4px;cursor:pointer;" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
                 }
-                if (h.hasClaudeMd) {
+                // CANCELLED/FAILED는 파일 분석이 실제로 진행되지 못했을 수 있어 다운로드할 의미 있는 결과물이
+                // 없다 - CLAUDE.md는 파일 처리 시작 전(취소돼도 이미 저장됨)에 생성되므로 상태와 별개로
+                // hasClaudeMd만 보고 버튼을 띄우면 취소된 항목에도 노출되던 문제가 있었다.
+                // my-activity.html의 renderHistory()(390~393행)와 같은 조건이다 - 한쪽만 고쳐 다시 벌어지지 않게 함께 유지한다.
+                if (h.hasClaudeMd && (h.status === 'COMPLETED' || h.status === 'PAUSED')) {
                     actionBtns += `<button class="btn-sm btn-claudemd" onclick="openMyClaudeMdModal(${h.id})" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기" style="font-size:11px;padding:3px 8px;background:#6c5ce7;color:white;border:none;border-radius:4px;cursor:pointer;">📝 CLAUDE.md</button>`;
                 }
                 return `<tr>

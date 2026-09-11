@@ -37,7 +37,6 @@ import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
@@ -844,33 +843,6 @@ public class MainApiController {
   }
 
   /**
-   * 문자열이 {@link Path}로 <b>파싱 가능한지</b>만 확인한다(존재 여부·권한은 보지 않는다).
-   *
-   * <p>왜 필요한가: {@code new File(path).exists() && isDirectory()} 가드와 {@code Path.of(path)}는
-   * <b>받아들이는 문자열이 다르다.</b> Windows 파일 API는 경로 컴포넌트의 후행 공백을 스스로 잘라내
-   * {@code "C:/proj "}를 실디렉터리로 인정하지만, {@code java.nio.file.Path} 파서는 후행 공백을
-   * 불법 문자로 보고 {@link InvalidPathException}을 던진다. 이 비대칭 때문에 "File 가드는 통과했는데
-   * 뒤쪽 {@code Path.of()}에서 터지는" 입력이 실제로 존재했고, 그 예외가 컨트롤러 밖으로 나가
-   * (이 프로젝트에는 {@code @ControllerAdvice}가 없다) 응답 자체가 만들어지지 않았다.
-   *
-   * <p>그래서 <b>진입 가드에서 File 검사와 함께</b> 이 검사를 세워 파싱 불가 경로를 사용자 문구로
-   * 흡수한다. 값을 바꾸지 않는다는 점이 중요하다 — 여기서 {@code trim()} 같은 정규화를 하면
-   * copy 모드 판정(문자열 비교)이 API마다 갈리므로, <b>하류가 실제로 파싱하는 그 문자열</b>을
-   * 그대로 받아 검사만 한다.
-   */
-  private static boolean isParsablePath(String path) {
-    if (path == null) {
-      return false;
-    }
-    try {
-      Path.of(path);
-      return true;
-    } catch (InvalidPathException e) {
-      return false;
-    }
-  }
-
-  /**
    * 폴링 DTO의 failedFiles 전용 analysisRoot 계산. 계정별 분리 세그먼트({username})까지 포함해
    * runAnalysis()의 실제 파일 저장 경로(finalProjectOutputPath)와 정확히 일치해야, 실패 파일의
    * 상대경로가 프런트 globalFilesCache.fileName(소스 폴더 기준 상대경로)과 매칭된다.
@@ -998,11 +970,8 @@ public class MainApiController {
       return resultData;
     }
 
-    // isParsablePath()는 raw 문자열 그대로 검사한다 — 아래 Path.of(folderPathStr)과
-    // resolveProjectOutputRoot()의 Path.of(sourcePath)가 trim 없이 이 값을 그대로 파싱하므로,
-    // 검사 대상과 실제 파싱 대상이 같아야 "가드는 통과시켰는데 뒤에서 터지는" 구멍이 생기지 않는다.
     File folder = new File(folderPathStr);
-    if (!folder.exists() || !folder.isDirectory() || !isParsablePath(folderPathStr)) {
+    if (!folder.exists() || !folder.isDirectory()) {
       resultData.put("error", "올바르지 않은 원본 디렉터리 경로입니다.");
       return resultData;
     }
@@ -1017,91 +986,75 @@ public class MainApiController {
     folderPathStr = folderPathStr.replace("\\", "/");
     outputPathStr = outputPathStr.replace("\\", "/");
 
-    // 출력 경로도 같은 이유로 진입에서 막는다 — 아래 resolveUserOutputRoot()가
-    // Path.of(outputPath.trim())으로 파싱하는데, 그 지점 역시 try 밖이라 예외가 그대로 새어나간다.
-    // 검사 대상이 outputPathStr.trim()인 것은 하류가 파싱하는 문자열이 바로 그 값이기 때문이다
-    // (후행 공백이 붙은 출력 경로는 지금도 정상 동작해야 한다 — 계약 테스트 C2/C3).
-    if (!isParsablePath(outputPathStr.trim())) {
-      resultData.put("error", "올바르지 않은 출력 디렉터리 경로입니다.");
-      return resultData;
-    }
+    // 계정별 출력 경로의 산식은 공용 헬퍼가 단일 출처다 — 이 메서드는 산식을 따로 갖지 않고 위임한다.
+    // (과거 이 자리에 인라인 사본이 있었고, 거기엔 outputPath.trim()과 구분자 정규화가 빠져 있어
+    //  실제 저장 위치와 어긋났다. 완료 판정이 절대경로 문자열 비교라 한 글자만 달라도 전부 미완료가 된다.)
+    // 1단계 스캔 시점이라 세션이 아직 없으므로 SessionState 오버로드가 아닌 3-arg 오버로드를 쓴다.
+    String requestUsername = (authentication != null
+        && authentication.getPrincipal() instanceof User u) ? u.getUserId() : null;
+    String userOutputPathStr = resolveUserOutputRoot(folderPathStr, outputPathStr, requestUsername);
+    Path outputRootPath = resolveProjectOutputRoot(folderPathStr, outputPathStr, requestUsername);
 
-    // (게이트1 ⑧(a), 심층 방어) try 범위를 위임 호출 앞까지 끌어올린다 —
-    // resolveUserOutputRoot()/resolveProjectOutputRoot()/Path.of(folderPathStr)는 전부
-    // 요청 파라미터를 그대로 파싱하므로, 진입 가드가 미처 거르지 못한 형태(예: 파일시스템 루트 경로는
-    // getFileName()이 null이라 NPE)가 남는다. 이 프로젝트에는 전역 예외 처리기가 없어 그 예외는
-    // 응답 없이 그대로 빠져나간다(HTTP 500). 아래 catch (Exception e)가 흡수하게 한다.
-    try {
-      // 계정별 출력 경로의 산식은 공용 헬퍼가 단일 출처다 — 이 메서드는 산식을 따로 갖지 않고 위임한다.
-      // (과거 이 자리에 인라인 사본이 있었고, 거기엔 outputPath.trim()과 구분자 정규화가 빠져 있어
-      //  실제 저장 위치와 어긋났다. 완료 판정이 절대경로 문자열 비교라 한 글자만 달라도 전부 미완료가 된다.)
-      // 1단계 스캔 시점이라 세션이 아직 없으므로 SessionState 오버로드가 아닌 3-arg 오버로드를 쓴다.
-      String requestUsername = (authentication != null
-          && authentication.getPrincipal() instanceof User u) ? u.getUserId() : null;
-      String userOutputPathStr = resolveUserOutputRoot(folderPathStr, outputPathStr, requestUsername);
-      Path outputRootPath = resolveProjectOutputRoot(folderPathStr, outputPathStr, requestUsername);
+    Path folderPath = Path.of(folderPathStr);
 
-      Path folderPath = Path.of(folderPathStr);
+    try (Stream<Path> stream = Files.walk(folderPath)) {
+      List<Path> fileList = stream
+          .filter(Files::isRegularFile)
+          .filter(this::isSupportedFile)
+          .toList();
 
-      try (Stream<Path> stream = Files.walk(folderPath)) {
-        List<Path> fileList = stream
-            .filter(Files::isRegularFile)
-            .filter(this::isSupportedFile)
-            .toList();
-
-        // 추적 파일 로드 (완료 여부 확인용) - 계정별 경로 기준
-        java.util.Set<String> trackedPaths = new java.util.HashSet<>();
-        Path trackerFile = getTrackerFilePath(userOutputPathStr);
-        if (Files.exists(trackerFile)) {
-          try {
-            Files.readAllLines(trackerFile, StandardCharsets.UTF_8).stream()
-                .map(String::trim).filter(l -> !l.isEmpty())
-                .forEach(trackedPaths::add);
-          } catch (Exception ignored) {}
-        }
-
-        List<Map<String, Object>> fileStatusList = new ArrayList<>();
-        int completeCount = 0;
-        int waitCount = 0;
-
-        for (Path path : fileList) {
-          Map<String, Object> fileMap = new HashMap<>();
-          boolean isCompleted = false;
-
-          Path relativeSubPath = folderPath.relativize(path);
-          Path targetPath = outputRootPath.resolve(relativeSubPath);
-
-          // 추적 파일 기반 완료 여부 확인
-          String absTarget = targetPath.toAbsolutePath().normalize().toString();
-          if (trackedPaths.contains(absTarget)) {
-            isCompleted = true;
-          } else if (targetPath.toFile().exists()) {
-            // 하위 호환: 이전 마커 문자열 체크
-            String targetContent = readFileStrictSafely(targetPath);
-            if (targetContent.contains("[AI 한글 주석 보완 완료]") ||
-                targetContent.contains("[AI 한글 주석 가상 시뮬레이션 완료]")) {
-              isCompleted = true;
-            }
-          }
-
-          fileMap.put("fileName", relativeSubPath.toString());
-          fileMap.put("isCompleted", isCompleted);
-          fileStatusList.add(fileMap);
-
-          if (isCompleted) completeCount++;
-          else waitCount++;
-        }
-
-        resultData.put("totalCount", fileList.size());
-        resultData.put("completeCount", completeCount);
-        resultData.put("waitCount", waitCount);
-        resultData.put("files", fileStatusList);
-        resultData.put("outputPath", userOutputPathStr);
-        resultData.put("consoleLog",
-            "[안내] 원본 레거시 구조 스캔 완료.\n- 실시간 검증 대상 위치: [" + userOutputPathStr + "]");
-
-        return resultData;
+      // 추적 파일 로드 (완료 여부 확인용) - 계정별 경로 기준
+      java.util.Set<String> trackedPaths = new java.util.HashSet<>();
+      Path trackerFile = getTrackerFilePath(userOutputPathStr);
+      if (Files.exists(trackerFile)) {
+        try {
+          Files.readAllLines(trackerFile, StandardCharsets.UTF_8).stream()
+              .map(String::trim).filter(l -> !l.isEmpty())
+              .forEach(trackedPaths::add);
+        } catch (Exception ignored) {}
       }
+
+      List<Map<String, Object>> fileStatusList = new ArrayList<>();
+      int completeCount = 0;
+      int waitCount = 0;
+
+      for (Path path : fileList) {
+        Map<String, Object> fileMap = new HashMap<>();
+        boolean isCompleted = false;
+
+        Path relativeSubPath = folderPath.relativize(path);
+        Path targetPath = outputRootPath.resolve(relativeSubPath);
+
+        // 추적 파일 기반 완료 여부 확인
+        String absTarget = targetPath.toAbsolutePath().normalize().toString();
+        if (trackedPaths.contains(absTarget)) {
+          isCompleted = true;
+        } else if (targetPath.toFile().exists()) {
+          // 하위 호환: 이전 마커 문자열 체크
+          String targetContent = readFileStrictSafely(targetPath);
+          if (targetContent.contains("[AI 한글 주석 보완 완료]") ||
+              targetContent.contains("[AI 한글 주석 가상 시뮬레이션 완료]")) {
+            isCompleted = true;
+          }
+        }
+
+        fileMap.put("fileName", relativeSubPath.toString());
+        fileMap.put("isCompleted", isCompleted);
+        fileStatusList.add(fileMap);
+
+        if (isCompleted) completeCount++;
+        else waitCount++;
+      }
+
+      resultData.put("totalCount", fileList.size());
+      resultData.put("completeCount", completeCount);
+      resultData.put("waitCount", waitCount);
+      resultData.put("files", fileStatusList);
+      resultData.put("outputPath", userOutputPathStr);
+      resultData.put("consoleLog",
+          "[안내] 원본 레거시 구조 스캔 완료.\n- 실시간 검증 대상 위치: [" + userOutputPathStr + "]");
+
+      return resultData;
     } catch (Exception e) {
       resultData.put("error", e.getMessage());
       return resultData;
@@ -1526,23 +1479,21 @@ public class MainApiController {
             // FAILED는 여기 포함시키지 않는다 (포함시키면 실패한 파일이 재개 대상에서 빠짐).
             if ("SUCCESS".equals(fileState.getStatus())) {
               completedFilePaths.add(filePath.toString());
-              // 세션 통계는 증가 전용 메서드로 올린다 — 외부 카운터 값을 대입하면 늦게 도착한
-              // 낮은 값이 큰 값을 덮어쓴다(REQ-003). 외부 AtomicInteger는 루프 종료 후 로그와
-              // 재개 초기값에 쓰이므로 그대로 둔다.
-              successCount.incrementAndGet();
-              session.getStatistics().incrementSuccessCount();
+              int sc = successCount.incrementAndGet();
+              session.getStatistics().setSuccessCount(sc);
             } else if ("SKIPPED".equals(fileState.getStatus())) {
               completedFilePaths.add(filePath.toString());
               if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
-                alreadyProcessedCount.incrementAndGet();
-                session.getStatistics().incrementSkipCount();
+                int ac = alreadyProcessedCount.incrementAndGet();
+                session.getStatistics().setSkipCount(ac);
               } else if ("OVERSIZE".equals(fileState.getErrorType())) {
                 skipCount.incrementAndGet();
               }
             } else if ("FAILED".equals(fileState.getStatus())) {
               // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
               session.addFailedFilePath(filePath.toString());
-              session.getStatistics().incrementFailureCount();
+              int fc = session.getStatistics().getFailureCount() + 1;
+              session.getStatistics().setFailureCount(fc);
               // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
               // 병렬 처리 중이라 여러 스레드가 동시에 크레딧 소진을 만날 수 있으므로,
               // 로그/에러기록은 가장 먼저 발견한 스레드 1회만 남긴다.
@@ -1805,20 +1756,16 @@ public class MainApiController {
 
             if ("SUCCESS".equals(fileState.getStatus())) {
               completedFilePaths.add(filePath.toString());
-              // runAnalysis()와 같은 이유로 증가 전용 메서드를 쓴다(REQ-003).
-              // 외부 카운터는 1718-1719행에서 세션 통계값으로 초기화되므로 산식은 그대로다.
-              successCount.incrementAndGet();
-              session.getStatistics().incrementSuccessCount();
+              session.getStatistics().setSuccessCount(successCount.incrementAndGet());
             } else if ("SKIPPED".equals(fileState.getStatus())) {
               completedFilePaths.add(filePath.toString());
               if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
-                alreadyProcessedCount.incrementAndGet();
-                session.getStatistics().incrementSkipCount();
+                session.getStatistics().setSkipCount(alreadyProcessedCount.incrementAndGet());
               } else { skipCount.incrementAndGet(); }
             } else if ("FAILED".equals(fileState.getStatus())) {
               // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
               session.addFailedFilePath(filePath.toString());
-              session.getStatistics().incrementFailureCount();
+              session.getStatistics().setFailureCount(session.getStatistics().getFailureCount() + 1);
               // 2026-08-21(Phase 4, failover 컨펌): runAnalysis()와 동일한 이유로 session.cancel()
               // 호출을 제거한다 — 재개 흐름에서 또다시 isCancelled가 영구화되는 것을 막기 위함.
               if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
