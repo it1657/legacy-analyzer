@@ -10,7 +10,13 @@
 
 > **트랙 상태 갱신(2026-08-19)**: `scenario_1`/`scenario_2`는 **보류(hold)** 상태로 전환됐다 — 이미 만들어둔 코드/Docker Hub 이미지(`it1657/legacy-analyzer`)/CI 파이프라인(`.github/workflows/docker-publish.yml`)/compose 파일(`docker-compose.gpu.yml` 등)은 전부 그대로 두고(삭제·비활성화 없음, 재개 시 즉시 이어갈 수 있는 상태 유지), 문서 상태 표기만 보류로 바꿨다. **`scenario_3`이 현재 유일한 활성 트랙**이다. 경위는 `docs/advancement/0.status/handOff.md` 26차 참고.
 
-- **`scenario_0.md`** — **가장 먼저.** 설정 프로퍼티 하나만 바꾸면 Anthropic ↔ 다른 LLM(사내/로컬 LLM 서버 등)으로 전환할 수 있게 앱 코드를 분리하는 작업. 다른 시나리오는 전부 이 작업이 끝난 뒤 시작한다. (완료됨)
+> **현재 상태(2026-09 기준)** — 위 트랙 상태 갱신 이후 진행된 것(아래 P2 절의 "구현 결과" 표기와 같은 사실관계):
+> 1. **모델 목록 DB화 + 런타임 리졸버 완료(2026-08-21)** — 모델 목록은 DB(`llm_model_options`, 엔티티 `LlmModelOption`)로 관리되고 관리자 CRUD(`LlmModelAdminController`, `/api/admin/llm-models`)로 추가·수정한다. `AnthropicLlmClient`/`OpenAiCompatibleLlmClient`의 `@ConditionalOnProperty`는 제거돼 두 빈이 항상 등록되고, `LlmClientResolver`가 매 호출마다 선택된 모델의 provider로 구현체를 고른다(`llm.provider`는 DB에 없는 모델명의 폴백 기본값).
+> 2. **Anthropic 허가제(`ANTHROPIC_USER` Role) 도입** — P2의 권한 모델이 **방향이 반대로** 구현됐다: 관리자가 부여하는 권한은 로컬이 아니라 Anthropic 사용 허가이고, 로컬은 DB에 활성 로컬 모델이 있으면 기본 개방이다. `LOCAL_LLM_USER` Role은 구현되지 않았다.
+> 3. **크레딧소진 failover(컨펌형) 구현** — 관리자가 failover 대상 로컬 모델을 지정해 두면 크레딧 소진 시 세션이 `AWAITING_FAILOVER_CONFIRM` 상태로 사용자 컨펌을 기다리고, 수락(`POST /api/session/failover/confirm`)하면 그 모델로 전환해 재개한다(미지정이면 기존처럼 `PAUSED`).
+> 4. **RAG B안(코드 내용 청킹) 신설** — 아래 RAG(Chroma) 절의 A안(패키지 구조 압축, `rag.enabled`)과 별개로, 프로젝트 파일을 청킹·임베딩해 유사 코드를 프롬프트 컨텍스트로 주는 `CodeContentRagService`가 추가됐다. 토글 `rag.content.enabled`는 A안과 **독립**(기본 false).
+
+- **`scenario_0.md`** — **가장 먼저.** 설정 프로퍼티 하나만 바꾸면 Anthropic ↔ 다른 LLM(사내/로컬 LLM 서버 등)으로 전환할 수 있게 앱 코드를 분리하는 작업. 다른 시나리오는 전부 이 작업이 끝난 뒤 시작한다. (완료됨 — 이후 2026-08-21 모델 목록 DB화로 "설정 하나 전환"이 아니라 런타임 선택 구조로 대체됨, 위 "현재 상태" 1번 참고)
 - **`scenario_1.md`** — GPU 없는 노트북에서 `docker-compose pull`만으로 구동 가능한 경량 배포판. **보류(hold, 2026-08-19)**.
 - **`scenario_2.md`** — GPU·디스크는 여유 있지만 인터넷망을 쓸 수 없는 폐쇄망/에어갭 환경. **보류(hold, 2026-08-19)**.
 - **`scenario_3.md`** — 인터넷망도 쓸 수 있고 리소스도 충분해서 Anthropic API와 로컬 LLM을 상황에 따라 선택하는 환경. **유일한 활성 트랙(2026-08-19)**.
@@ -109,23 +115,27 @@ rag.top-k-per-package=${RAG_TOP_K_PER_PACKAGE:30}
 
 ### `scenario_0.md` 아키텍처에 미치는 영향 — 반드시 먼저 반영
 
-`scenario_0.md`는 `@ConditionalOnProperty(name = "llm.provider", havingValue = "...")`로 `AnthropicLlmClient`/`OpenAiCompatibleLlmClient` 중 **정확히 하나만** Spring 빈으로 띄우는 걸 전제했다. 사용자별로 다른 걸 쓸 수 있어야 하므로 이 전제가 깨진다 → **두 클라이언트를 항상 동시에 빈으로 등록**하고, 요청 시점에 어떤 걸 쓸지 골라야 한다. `ClaudeServiceImpl`이 `LlmClient` 하나를 주입받는 대신, `Map<String, LlmClient>`(또는 별도 `LlmClientResolver`)를 주입받아 호출자의 provider 권한에 따라 분기하는 구조로 바뀐다. `llm.provider` 서버 설정은 "기본값/게이트 존재 여부"(로컬 LLM 자체가 연결 안 돼 있으면 아무도 못 씀) 정도의 의미로 남고, 실제 매 요청의 provider는 사용자 권한이 결정한다.
+`scenario_0.md`는 `@ConditionalOnProperty(name = "llm.provider", havingValue = "...")`로 `AnthropicLlmClient`/`OpenAiCompatibleLlmClient` 중 **정확히 하나만** Spring 빈으로 띄우는 걸 전제했다(이 애노테이션은 2026-08-21에 제거됨 — 아래 "구현 결과" 참고). 사용자별로 다른 걸 쓸 수 있어야 하므로 이 전제가 깨진다 → **두 클라이언트를 항상 동시에 빈으로 등록**하고, 요청 시점에 어떤 걸 쓸지 골라야 한다. `ClaudeServiceImpl`이 `LlmClient` 하나를 주입받는 대신, `Map<String, LlmClient>`(또는 별도 `LlmClientResolver`)를 주입받아 호출자의 provider 권한에 따라 분기하는 구조로 바뀐다. `llm.provider` 서버 설정은 "기본값/게이트 존재 여부"(로컬 LLM 자체가 연결 안 돼 있으면 아무도 못 씀) 정도의 의미로 남고, 실제 매 요청의 provider는 사용자 권한이 결정한다.
 
 **결정**: `scenario_0.md`는 이 리팩터링을 미리 하지 않고 단일 빈 구조로 먼저 배포하기로 확정했다(라이브 서비스 첫 배포 diff 최소화 우선) — P2 착수 시점에 별도로 리팩터링한다. 그때 주의할 점: 분석은 `new Thread(() -> runAnalysis(...))`로 도는 별도 스레드에서 실행되므로 Spring Security의 `SecurityContextHolder`(스레드 로컬 기반)가 자동으로 전파되지 않는다 — 리졸버는 `SecurityContextHolder`를 참조하면 안 되고, 컨트롤러가 스레드 진입 전에 이미 세팅해두는 `SessionState.userId`(확인 완료)를 기준으로 사용자를 식별해야 한다.
 
+> **구현 결과(2026-09 현행화)**: 이 리팩터링은 2026-08-21(모델 목록 DB화 + 크레딧소진 failover)에 실제로 이뤄졌다 — 두 클라이언트의 `@ConditionalOnProperty`가 제거돼 항상 동시에 빈으로 등록되고, `LlmClientResolver`가 매 호출마다 구현체를 고른다. 단, 리졸버의 판정 기준은 위 원안의 "호출자의 provider 권한"이 아니라 **선택된 모델의 provider(DB `llm_model_options`의 `provider` 값)**다(`ClaudeServiceImpl.resolveProvider()` → `LlmClientResolver.resolve()`). `llm.provider` 서버 설정은 DB에 없는 모델명에 대한 폴백 기본값으로만 남았다. 세션별 모델 선택은 `ClaudeServiceImpl.setModel(sourceFolderPath, model)`이 소스 경로를 키로 저장한다.
+
 ### 권한 모델 — 기존 Role 체계 재사용
 
-`com.legacy.auth.User`/`Role`/`RoleRepository`가 이미 다대다 권한 구조로 존재하고, `com.legacy.admin.UserController`에 관리자가 사용자 Role을 부여/해제하는 엔드포인트(`@PreAuthorize("hasRole('ADMIN')")`, `roleRepository.findByName(...)`, `user.setRoles(...)`)가 이미 있다(확인 완료). 새 권한 플래그를 따로 만들기보다, 이 체계에 `LOCAL_LLM_USER` 같은 Role을 하나 추가해 재사용하는 게 가장 적은 변경으로 들어맞는다 — 관리자 화면의 기존 "역할 부여" 흐름을 그대로 쓸 수 있다.
+`com.legacy.auth.User`/`Role`/`RoleRepository`가 이미 다대다 권한 구조로 존재하고, `com.legacy.admin.UserController`에 관리자가 사용자 Role을 부여/해제하는 엔드포인트(`@PreAuthorize("hasRole('ADMIN')")`, `roleRepository.findByName(...)`, `user.setRoles(...)`)가 이미 있다(확인 완료). 새 권한 플래그를 따로 만들기보다, 이 체계에 Role을 하나 추가해 재사용하는 게 가장 적은 변경으로 들어맞는다 — 관리자 화면의 기존 "역할 부여" 흐름을 그대로 쓸 수 있다.
+
+> **구현 결과(2026-09 현행화)**: 실제로 추가된 Role은 **`ANTHROPIC_USER`**(Anthropic(Claude API) 사용 권한)다 — `DataInitializer`가 기동 시 생성하고, 기본 계정(admin/test)에는 부여하지 않는다(기본값 = 권한 없음). 관리자가 사용자별로 부여/해제한다. 즉 방향이 원안과 **반대**다: Anthropic이 허가제이고, 로컬은 DB에 활성 로컬 모델이 있으면 사용자별 권한 없이 기본 개방된다(`MainApiController.hasAnthropicAccess()` — admin은 무조건 통과, 그 외 `ANTHROPIC_USER` 보유 여부). 원안에서 가칭으로 적었던 `LOCAL_LLM_USER` Role은 구현되지 않았다(왜 방향이 바뀌었는지는 이 문서의 조사 범위가 아니다 — 구현 결과가 다르다는 사실만 적는다).
 
 ### 관리자 UI (안, `admin/dashboard.html` 확장)
 
-- 사용자 목록에서 "로컬 LLM 권한" 부여/해제(기존 Role 부여 UI와 동일한 패턴).
+- 사용자 목록에서 권한 부여/해제(기존 Role 부여 UI와 동일한 패턴). → **구현됨**: `admin/dashboard.html`의 사용자 목록 토글은 `ANTHROPIC_USER`(Anthropic 사용 허가) 기준이다(원안의 "로컬 LLM 권한"이 아님).
 - 로컬/사내 LLM 헬스 상태 표시("로컬 LLM이 살아있는지" — 관리자 화면에서 먼저 해결하고, 필요하면 사용자 화면에도 노출).
 
 ### 사용자 UI (안)
 
-- `LOCAL_LLM_USER` 권한이 없는 사용자: provider 선택 UI 노출 안 함 — Anthropic 고정, 지금과 동일한 화면/동작(`scenario_0.md`의 "무중단" 원칙과 일관).
-- 권한 있는 사용자: 분석 시작 화면에 provider 선택 옵션 노출. `GET /api/config/llm-provider`를 사용자별 권한을 반영하도록 확장 필요(예: `{available: ["anthropic"], current: "anthropic"}` vs 권한자는 `{available: ["anthropic","local"], current: ...}`).
+- (원안) 권한이 없는 사용자는 provider 선택 UI 노출 안 함 — Anthropic 고정. → **구현 결과는 반대 방향**: `ANTHROPIC_USER`가 없는 사용자는 `availableProviders`에 `anthropic`이 들어가지 않고, 로컬은 활성 로컬 모델이 DB에 있으면 권한 없이 쓸 수 있다.
+- 권한 있는 사용자: 분석 시작 화면에 provider 선택 옵션 노출. → **구현됨**: `GET /api/config/llm-provider`가 `availableProviders` 배열을 반환한다 — `anthropic`은 **API 키 설정 + 사용자 권한(`ANTHROPIC_USER` 또는 admin)** 두 조건을, `local`은 **활성 LOCAL 모델 존재만** 본다(`MainApiController.getLlmProviderConfig()`). 모델 드롭다운은 `GET /api/config/llm-models`가 DB 활성 목록을 반환해 채운다.
 - 세션(분석)마다 사용/선택한 provider를 기록해두면 이후 사용자별·provider별 사용량/비용 비교에도 쓸 수 있다(`AnalysisHistory`에 필드 추가 검토 — 이미 `modelName` 필드가 있으니 자연스럽게 확장 가능).
 
 ### 시나리오별 적용 범위
@@ -135,10 +145,10 @@ rag.top-k-per-package=${RAG_TOP_K_PER_PACKAGE:30}
 
 ### 실행 순서 (P2, 잠정 — 착수하며 구체화)
 
-1. `Role`에 `LOCAL_LLM_USER`(가칭) 추가, 관리자 화면에서 부여/해제 가능하도록 기존 Role 관리 흐름 확장.
-2. `LlmClient` 선택을 정적 빈 하나 → 런타임 리졸버(사용자 권한 기반)로 리팩터링 — `scenario_0.md` 코드에 손을 대는 작업이라 회귀 위험 있으니 별도로 검증.
-3. `GET /api/config/llm-provider`를 사용자별 권한 반영하도록 확장.
-4. 관리자 화면에 권한 토글 + 헬스 상태 UI 추가.
+1. ~~`Role`에 `LOCAL_LLM_USER`(가칭) 추가, 관리자 화면에서 부여/해제 가능하도록 기존 Role 관리 흐름 확장.~~ — **완료, 단 방향 반대로 구현**: 추가된 Role은 `ANTHROPIC_USER`(Anthropic 사용 허가)이며 관리자 화면에서 부여/해제한다. `LOCAL_LLM_USER`는 구현되지 않았다.
+2. ~~`LlmClient` 선택을 정적 빈 하나 → 런타임 리졸버(사용자 권한 기반)로 리팩터링~~ — **완료(2026-08-21)**: `LlmClientResolver` 도입. 단 판정 기준은 사용자 권한이 아니라 **선택된 모델의 provider(DB `llm_model_options`)**다. 이때 모델 목록 DB화(`LlmModelOption`)와 관리자 모델 CRUD(`LlmModelAdminController`, `/api/admin/llm-models`)가 함께 들어갔다(원안 순서에는 없던 항목).
+3. ~~`GET /api/config/llm-provider`를 사용자별 권한 반영하도록 확장.~~ — **완료**: `availableProviders` 배열 반환(위 "사용자 UI" 참고).
+4. 관리자 화면에 권한 토글 + 헬스 상태 UI 추가. — 권한 토글은 **완료**(`ANTHROPIC_USER` 기준, `admin/dashboard.html`); 헬스 상태 UI는 이 현행화(2026-09)에서 확인하지 않음.
 5. 사용자 분석 화면에 조건부 provider 선택 UI 추가.
 6. (선택) `AnalysisHistory`에 실사용 provider 기록 추가.
 
@@ -154,3 +164,4 @@ rag.top-k-per-package=${RAG_TOP_K_PER_PACKAGE:30}
 - `GET /api/config/llm-provider`의 브라우저 캐싱 문제는 Spring Security 기본 설정으로 이미 해결돼 있어 별도 조치 불필요.
 - 롤백은 이미지 재빌드 없이 환경변수(`LLM_PROVIDER`)만으로 가능해야 한다.
 - Provider 선택은 전역 설정이 아니라 **관리자가 개별 사용자에게 열어주는 권한**(P2)이다 — 이 결정으로 `scenario_0.md`의 "빈 하나만 활성화" 구조가 "두 빈 상시 등록 + 런타임 리졸버"로 바뀐다. `scenario_0.md`를 구현할 때 이 점을 미리 감안해두는 게 나중에 다시 뜯어고치는 것보다 낫다.
+  - **구현 결과(2026-09 현행화)**: "두 빈 상시 등록 + 런타임 리졸버(`LlmClientResolver`)"는 2026-08-21에 구현됐다. 다만 관리자가 열어주는 권한은 원안과 반대로 **Anthropic 사용 허가(`ANTHROPIC_USER`)**이고 로컬은 기본 개방이며, 리졸버는 사용자 권한이 아니라 선택된 모델의 provider(DB `llm_model_options`)로 구현체를 고른다. `LOCAL_LLM_USER` Role은 구현되지 않았다.

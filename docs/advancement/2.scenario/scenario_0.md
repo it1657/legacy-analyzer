@@ -29,9 +29,13 @@ public record LlmResult(String text, long inputTokens, long outputTokens,
 
 두 구현 모두 `@ConditionalOnProperty(name = "llm.provider", havingValue = "...")`로 등록해 Spring이 설정값 하나로 정확히 하나의 `LlmClient` 빈만 활성화하도록 한다(`anthropic`이 기본값, `local`이 대안).
 
+> **후속 변경(2026-08-21, 모델 목록 DB화 + 크레딧소진 failover)**: 위 전제는 폐기됐다. 두 구현체의 `@ConditionalOnProperty`가 제거돼 두 빈이 항상 함께 등록되고, `LlmClientResolver`가 매 호출마다 선택된 모델의 provider(DB `llm_model_options`의 `provider` 값)에 맞는 구현체를 고른다. `llm.provider` 설정은 DB에 없는 모델명에 대한 폴백 기본값으로만 남았다.
+
 `ClaudeServiceImpl` 생성자에 `LlmClient llmClient`를 주입받고, 3개 호출 지점에서 WebClient를 직접 만드는 코드를 `llmClient.call(systemPrompt, userContent, getCurrentModel(), maxTokens)` 호출로 교체한다. `extractAndStoreTokenUsage(Map response)`(1198-1239줄)는 원시 응답 Map을 파싱하는 대신 `LlmResult`를 받아 누적하는 형태로 단순화된다. 재시도 루프(486-576줄)와 `ApiErrorHandler` 에러 분류는 provider와 무관하게 이미 HTTP 상태 코드/예외 메시지 기반으로 동작하므로(`ApiErrorHandler.java` 확인 완료) **변경 불필요** — 단, Anthropic 전용 문자열 매칭인 "credit balance"(60-61줄)는 로컬 모드에서는 그냥 매칭되지 않을 뿐 해가 없다.
 
 > **결정 완료**: `@ConditionalOnProperty`로 빈 하나만 활성화하는 지금 이 설계 그대로 간다. P2(관리자 승인형 provider 선택)는 채택 시점에 `ClaudeServiceImpl`을 한 번 더 리팩터링해서 붙인다 — 라이브 서비스에 첫 배포하는 diff를 최소화하는 쪽을 택함. P2로 넘어갈 때 참고할 것: 분석은 `new Thread(() -> runAnalysis(...))`로 도는 별도 스레드라 Spring Security의 `SecurityContextHolder`(스레드 로컬)가 자동으로 안 넘어온다 — `SessionState.userId`가 이미 컨트롤러에서 스레드 진입 전에 세팅되니(확인 완료), P2의 리졸버는 `SecurityContextHolder`가 아니라 `session.getUserId()`를 기준으로 짜야 한다.
+>
+> **후속 변경(2026-08-21)**: 위 결정은 첫 배포 시점의 것이고, 그 뒤 리팩터링이 실제로 이뤄졌다 — `@ConditionalOnProperty`로 빈 하나만 활성화하는 구조는 제거되고 "두 빈 상시 등록 + `LlmClientResolver` 런타임 선택"으로 바뀌었다. 다만 리졸버의 판정 기준은 사용자 권한이 아니라 **선택된 모델의 provider(DB)**로 구현됐다(`ClaudeServiceImpl.resolveProvider()` → `LlmClientResolver.resolve()`; 세션별 모델은 `setModel(sourceFolderPath, model)`이 소스 경로를 키로 저장). 권한 방향 등 자세한 결과는 `../1.plan/plan.md` P2 절의 "구현 결과" 참고.
 
 ## 설정 (`application.properties`)
 
@@ -55,9 +59,10 @@ llm.local.read-timeout-sec=300
 
 ## 모델 목록·가격 로직 처리
 
-- `ClaudeServiceImpl.SUPPORTED_MODELS`(54-59줄)와 `setModel()`의 검증(107-120줄)은 Anthropic 모드 전용으로 유지. 로컬 모드에서는 `SUPPORTED_MODELS` 검증을 건너뛰고 `llm.local.model` 설정값을 그대로 사용(서버가 로컬/사내 인프라에 어떤 모델이 서빙 중인지 알 수 없으므로 화이트리스트 강제 불가).
+- (당시 설계) `ClaudeServiceImpl.SUPPORTED_MODELS`와 `setModel()`의 검증(라인 번호는 당시 기준이라 생략)은 Anthropic 모드 전용으로 유지. 로컬 모드에서는 `SUPPORTED_MODELS` 검증을 건너뛰고 `llm.local.model` 설정값을 그대로 사용(서버가 로컬/사내 인프라에 어떤 모델이 서빙 중인지 알 수 없으므로 화이트리스트 강제 불가).
+  - **후속 변경(2026-08-21)**: 하드코딩 화이트리스트(`SUPPORTED_MODELS`) 대신 **DB(`llm_model_options`) 기준 검증**으로 교체됐다 — `setModel()`은 `LlmModelOptionService.isActiveModel(model)`(DB에 등록된 활성 모델인지)로 검증하고, 모델 목록은 관리자 CRUD(`LlmModelAdminController`, `/api/admin/llm-models`)로 관리한다. 로컬 모델도 같은 DB 목록에 provider `LOCAL`로 등록해 관리하므로 "화이트리스트 강제 불가" 전제는 더 이상 해당하지 않는다.
 - `MainApiController.calculateEstimatedCost()`(2371-2382줄): `llm.provider=local`일 때는 0을 반환하도록 분기 추가(자체 호스팅이라 과금 없음).
-- 프런트엔드(`index.html` 55-57줄 모델 드롭다운, `dashboard.js` 608/918-922/1231줄, `MainApiController`의 가격 라벨과 연동된 `my-activity.html`/`admin/dashboard.html`)는 Claude 3종 모델을 하드코딩하고 있음. 현재 provider를 알려주는 API가 없으므로, 작은 조회 엔드포인트(예: `GET /api/config/llm-provider` → `{provider, model}`)를 추가하고 JS에서 이를 읽어 provider가 `local`이면 드롭다운을 "로컬 모델: {model명} (무료·자체 호스팅)" 형태의 단일 표시로 바꾼다.
+- (당시 기준) 프런트엔드(`index.html` 모델 드롭다운, `dashboard.js`, `MainApiController`의 가격 라벨과 연동된 `my-activity.html`/`admin/dashboard.html` — 라인 번호는 당시 기준이라 생략)는 Claude 3종 모델을 하드코딩하고 있음. → **후속 변경(2026-08-21)**: 현재는 `GET /api/config/llm-models`가 DB(`llm_model_options`)의 활성 모델 목록을 `displayOrder` 순으로 반환해 드롭다운을 채운다(하드코딩 아님). 현재 provider를 알려주는 API가 없으므로, 작은 조회 엔드포인트(예: `GET /api/config/llm-provider` → `{provider, model}`)를 추가하고 JS에서 이를 읽어 provider가 `local`이면 드롭다운을 "로컬 모델: {model명} (무료·자체 호스팅)" 형태의 단일 표시로 바꾼다.
   - (검증 완료) 이 엔드포인트를 브라우저가 캐싱해 provider 전환 후에도 옛 값이 노출될 걱정은 별도 조치가 필요 없다 — `SecurityConfig.java`가 `cacheControl()`을 비활성화하지 않아, Spring Security 기본 설정이 `/api/**` 전체 응답에 `Cache-Control: no-cache, no-store, must-revalidate`를 이미 자동으로 붙인다.
 
 ## 무중단 배포 원칙

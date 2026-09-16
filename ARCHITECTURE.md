@@ -13,7 +13,7 @@
 - **백엔드**: Spring Boot 3.2.5, Java 17, Spring Security(JWT, stateless), Spring Data JPA
 - **프론트엔드**: Thymeleaf 서버 렌더링 + 정적 JS(빌드 도구 없음, `static/js/dashboard.js` 등 순수 JS)
 - **DB**: 로컬 개발 H2(`data/`), 운영 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) — 프로파일로 전환
-- **외부 연동**: `llm.provider`(`anthropic`\|`local`) 설정 하나로 Claude API(Anthropic) ↔ OpenAI 호환 로컬/사내 LLM 서버(Ollama 등) 전환 — 코드 주석 생성, CLAUDE.md 생성, README 생성에 공통 사용
+- **외부 연동**: Claude API(Anthropic)와 OpenAI 호환 로컬/사내 LLM 서버(Ollama 등) — 두 `LlmClient` 구현체가 항상 함께 등록되고, 호출마다 선택된 모델의 provider(DB `llm_model_options`)에 따라 `LlmClientResolver`가 구현체를 고른다. 코드 주석 생성, CLAUDE.md 생성, README 생성에 공통 사용
 - **RAG(선택적)**: `rag.enabled=true`일 때만 활성화(Chroma 벡터 DB) — 대형 Java 프로젝트의 "패키지 구조" 텍스트가 임계값을 넘으면 임베딩 유사도 상위 파일만 남겨 압축
 - **배포**: Docker Compose — 기본 `app` + `postgres` 2개 서비스(8803 포트), `COMPOSE_PROFILES=llm-rag`로 `ollama`+`chroma` 추가 기동 가능(`docker-compose.gpu.yml` 오버레이로 GPU 추론)
 
@@ -37,12 +37,12 @@
                               ┌─────────┴───────────┐
                               │  JDBC (H2/PG)       │  HTTPS
                       ┌───────▼───────┐      ┌──────▼────────────┐
-                      │ PostgreSQL 16 │      │ LlmClient         │
-                      │ (postgres)    │      │ (anthropic|local) │
+                      │ PostgreSQL 16 │      │ LlmClientResolver │
+                      │ (postgres)    │      │ (anthropic+local) │
                       └───────────────┘      └───────────────────┘
 ```
 
-`LlmClient` 박스는 `llm.provider` 설정값에 따라 `AnthropicLlmClient`(기본값, Claude API 호출) 또는 `OpenAiCompatibleLlmClient`(로컬/사내 LLM 서버 호출)로 교체된다 — 자세한 내용은 2-1절.
+`LlmClientResolver` 박스: `AnthropicLlmClient`(Claude API 호출)와 `OpenAiCompatibleLlmClient`(로컬/사내 LLM 서버 호출) 두 구현체가 항상 빈으로 등록되어 있고, `LlmClientResolver`가 호출 시점의 모델 provider(DB `llm_model_options`의 `provider` 값)로 둘 중 하나를 고른다 — 자세한 내용은 2-1절.
 
 로컬 파일시스템에는 두 종류의 소스 경로가 존재한다:
 - **서버 경로 직접 지정**(관리자 전용): 서버가 실행 중인 머신의 실제 경로를 그대로 스캔
@@ -63,8 +63,9 @@
 └──────────┘
 ```
 
-- **LLM Provider 전환**은 `llm.provider`(`anthropic`\|`local`) 설정 하나로 이뤄진다. `com.legacy.analysis.llm.LlmClient` 인터페이스를 `AnthropicLlmClient`/`OpenAiCompatibleLlmClient` 두 구현체가 `@ConditionalOnProperty`로 배타 선택 — 코드 재빌드 없이 전환 가능.
+- **LLM Provider 선택**은 호출 시점에 런타임으로 이뤄진다. `com.legacy.analysis.llm.LlmClient` 인터페이스의 두 구현체 `AnthropicLlmClient`/`OpenAiCompatibleLlmClient`가 항상 함께 빈으로 등록되고, `LlmClientResolver`가 매 호출마다 선택된 모델의 provider(`ANTHROPIC`\|`LOCAL`)에 맞는 구현체를 고른다. 모델 목록은 DB(`llm_model_options`)로 관리되며(관리자 CRUD `/api/admin/llm-models`, 활성 모델 최소 1개 유지), `llm.provider` 설정은 DB에 없는 모델명에 대한 폴백 기본값으로만 남아 있다(2026-08-21 모델 목록 DB화 때 단일 빈 구조 제거). 모델 추가·전환에 코드 재빌드는 필요 없다.
 - **RAG는 `rag.enabled`로 완전히 독립적으로 켜고 끈다**(기본 `false`, `ProjectStructureRagService`/`ChromaClient`/`OpenAiCompatibleEmbeddingClient` 전부 `@ConditionalOnProperty`라 꺼져 있으면 빈 자체가 없음). Java 프로젝트의 "패키지 구조" 텍스트 생성 중, 특정 패키지의 파일 개수가 `rag.top-k-per-package`를 넘고 전체 글자수가 `rag.trigger-threshold-chars`를 넘으면 그 패키지들만 임베딩해 Chroma에 색인 → 쿼리 유사도 상위 `topK`개만 남기고 나머지는 원본 목록에서 제외(요약). 임베딩은 `embedBatch()`로 문서를 한 번에 보내 왕복 횟수를 줄인다. 실패 시(임베딩 서버 다운 등) 로그만 남기고 원본을 그대로 반환 — RAG 실패가 분석 파이프라인 전체를 막지 않는다.
+- **RAG B안(코드 내용 청킹)은 A안과 별개의 기능**이며 토글도 다르다 — `rag.content.enabled`(기본 `false`)로 켠다. `CodeContentRagService`가 프로젝트 파일을 `ChunkerRouter`(확장자별 `JavaAstChunker`/`HtmlChunker`/`JsChunker`, 그 외와 실패 시 `FallbackChunker`)로 청킹해 임베딩·색인하고, 파일 분석 시 유사한 기존 코드를 검색해 프롬프트 컨텍스트로 넣는다. **빈 등록 방식이 A안과 다르다**: A안은 `rag.enabled=false`면 빈 자체가 없지만, B안 서비스는 **항상 빈으로 등록**되고 `VectorStoreClient`/`EmbeddingClient`를 `ObjectProvider`로 선택 주입해 그 빈들이 없으면(=`rag.enabled=false`) 모든 공개 메서드가 조용히 no-op이다. A안 코드는 B안 도입으로 수정되지 않았다.
 
 ---
 
@@ -139,13 +140,15 @@ User (users) ──M:N── Role (roles)                    [조인테이블 us
 | user_id | | |
 | username | 100자 | 재개 시 스레드 재시작에 필요 |
 | source_path / output_path | | |
-| status | | `IN_PROGRESS`\|`PAUSED`\|`CANCELLED` 등 |
+| status | | `IN_PROGRESS`\|`PAUSED`\|`AWAITING_FAILOVER_CONFIRM`\|`CANCELLED`\|`COMPLETED`\|`FAILED` 등. `AWAITING_FAILOVER_CONFIRM`은 크레딧 소진 후 failover 컨펌 대기(종료 상태 아님) |
 | total_files / processed_files | int | |
 | is_cancelled / is_analysis_completed | boolean | |
 | paused_at / resumed_at | | |
 | pending_file_paths_json(TEXT) | | 일시정지 시점 미처리 파일 목록 - 재개 시 이걸로 이어감 |
 | requirements(TEXT) | | 사용자가 입력한 세션별 추가 요구사항(CLAUDE.md 생성 재료) |
 | force_active | boolean | |
+| failover_model_key | 200자 | 크레딧 소진 시 관리자가 지정해 둔 failover 대상 모델 키 — `AWAITING_FAILOVER_CONFIRM` 상태에서 컨펌 수락 시 이 모델로 전환해 재개 |
+| pause_settled | Boolean | 사용자 일시정지 요청이 접수됐지만 처리 루프가 아직 종단에 도달하지 않은 구간에서만 `false`("아직 멈추는 중") |
 
 `currentPhase`, `recentLogs`, `patchedFilePaths`, `statistics` 등 실시간 폴링에 쓰이는 필드들은 `@Transient`(DB 미저장, 메모리 전용)다 — 서버가 재시작되면 진행 중 로그/상세 통계는 사라지고 `pending_file_paths_json` 등 DB에 남은 최소 정보로만 재개 가능하다.
 
@@ -201,10 +204,12 @@ User (users) ──M:N── Role (roles)                    [조인테이블 us
 
 ```
 src/main/java/com/legacy/
-├── admin/          관리자 대시보드·사용자 관리 (AdminController, AdminPageController, UserController)
+├── admin/          관리자 대시보드·사용자 관리·LLM 모델 목록 CRUD (AdminController, AdminPageController, UserController,
+│                    LlmModelAdminController)
 ├── analysis/        핵심 분석 도메인 - LLM 연동, 세션/이력/배치 관리 (MainApiController, ClaudeServiceImpl,
 │                    AnalysisSessionManager, SessionState, AnalysisHistory, UserActivityController)
-│   └── llm/         LLM Provider 추상화 (LlmClient, AnthropicLlmClient, OpenAiCompatibleLlmClient)
+│   └── llm/         LLM Provider 추상화 + 런타임 선택 + 모델 목록 DB (LlmClient, AnthropicLlmClient, OpenAiCompatibleLlmClient,
+│                    LlmClientResolver, LlmModelOption(+Service/Repository/SeedInitializer), OllamaModelDiscoveryClient/Cache)
 ├── api/
 │   ├── monitoring/  세션별 성능 메트릭 수집 (PerformanceMetricsCollector, MonitoringController)
 │   └── usage/       이 앱 자체의 HTTP API 사용량 로깅 (ApiUsageFilter, ApiUsageController)
@@ -213,8 +218,10 @@ src/main/java/com/legacy/
 ├── core/            앱 엔트리포인트, 공통 에러 핸들러, DB 자동 선택, PPT 생성 (PresentationGeneratorService,
 │                    ProjectStructureSnapshot, ProjectTypeDetector)
 ├── notification/    사용자 알림 (NotificationService, NotificationController)
-├── rag/             RAG(Chroma), rag.enabled=true일 때만 활성화 (ProjectStructureRagService, ChromaClient,
-│                    EmbeddingClient, OpenAiCompatibleEmbeddingClient) — 2-1절 참고
+├── rag/             RAG(Chroma) A안: rag.enabled=true일 때만 활성화 (ProjectStructureRagService, ChromaClient,
+│                    EmbeddingClient, OpenAiCompatibleEmbeddingClient) / B안: 코드 내용 청킹, rag.content.enabled
+│                    (CodeContentRagService, ChunkerRouter, JavaAstChunker/HtmlChunker/JsChunker/FallbackChunker,
+│                    CodeChunk, ChunkSplitter, ChunkSizeLimits, VectorStoreClient) — 2-1절 참고
 └── statistics/      시스템/사용자 통계 집계 조회 (StatisticsController)
 ```
 
@@ -288,10 +295,12 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
 
 `@EnableMethodSecurity(prePostEnabled = true)`가 켜져 있어 컨트롤러 메서드에 `@PreAuthorize`도 쓸 수 있지만, 이 프로젝트는 대부분 `SecurityConfig`의 경로 매처와 컨트롤러 내부의 수동 `if (!isAdmin(authentication)) ...` 체크(예: `MainApiController.isAdmin()`, `MonitoringController`의 소유자/ADMIN 체크)를 조합해서 권한을 검사한다.
 
+**LLM provider 사용 권한(`ANTHROPIC_USER` Role)** 도 경로 매처가 아니라 **컨트롤러 내부 판정**이다: `MainApiController.hasAnthropicAccess()`가 admin이면 무조건 통과시키고, 그 외에는 `ANTHROPIC_USER` Role 보유 여부로 판정한다. 그래서 **Anthropic은 허가제**(API 키가 설정돼 있고 이 Role이 있어야 `GET /api/config/llm-provider`의 `availableProviders`에 `anthropic`이 포함), **로컬은 기본 개방**(DB에 활성 LOCAL 모델이 있으면 사용자별 권한 없이 `local` 포함)이다. Role 부여/해제는 관리자 화면의 사용자 목록 토글로 한다.
+
 ### 5-5. 비밀번호/계정 부트스트랩
 
 - 비밀번호는 `BCryptPasswordEncoder`로 해시(`User.passwordHash`), 평문 저장 없음.
-- 최초 기동 시 `DataInitializer`(`CommandLineRunner`)가 `ADMIN`/`USER` 역할과 기본 계정 2개를 존재하지 않을 때만 생성: **`admin`/`admin`**(ROLE_ADMIN), **`test`/`1`**(ROLE_USER). 운영 배포 시 반드시 변경해야 하는 부분.
+- 최초 기동 시 `DataInitializer`(`CommandLineRunner`)가 `ADMIN`/`USER`/`ANTHROPIC_USER` 역할 3개와 기본 계정 2개를 존재하지 않을 때만 생성: **`admin`/`admin`**(ROLE_ADMIN), **`test`/`1`**(ROLE_USER). **기본 계정에는 `ANTHROPIC_USER`를 부여하지 않는다**(기본값 = Anthropic 사용 권한 없음, 관리자가 사용자별로 부여). 운영 배포 시 반드시 변경해야 하는 부분.
 - 계정 활성화 여부는 `User.isActive`(`UserDetails.isEnabled()`에 매핑) — 관리자가 `PUT /api/users/{seq}/activate`로 토글. 비활성 계정은 로그인 시점에 Spring Security가 자동으로 거부한다.
 
 ### 5-6. 왜 서버 경로 직접 지정을 ROLE_ADMIN으로 제한하는가
@@ -396,7 +405,9 @@ CSRF는 `/h2-console/**`, `/auth/**`, `/api/**`에서 무시한다 — 세션 �
 ```
 IN_PROGRESS ──(사용자 일시정지 버튼)──▶ PAUSED ──(이어서 분석)──▶ IN_PROGRESS (runAnalysisResume)
 IN_PROGRESS ──(사용자 취소 버튼)──▶ CANCELLED (재개 불가 - pendingFilePaths 저장 안 함)
-IN_PROGRESS ──(Claude 크레딧 소진 감지)──▶ PAUSED (재시도 가능, "이어서 분석"으로 복구)
+IN_PROGRESS ──(Claude 크레딧 소진 감지, failover 대상 미지정 시)──▶ PAUSED (재시도 가능, "이어서 분석"으로 복구)
+IN_PROGRESS ──(크레딧 소진 + 관리자 지정 failover 대상 있음)──▶ AWAITING_FAILOVER_CONFIRM (사용자 컨펌 대기)
+AWAITING_FAILOVER_CONFIRM ──(컨펌 수락, POST /api/session/failover/confirm)──▶ IN_PROGRESS (failover 모델로 전환 후 runAnalysisResume)
 IN_PROGRESS ──(선택된 파일 전부 실패)──▶ PAUSED (재시도 가능)
 IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 ```
@@ -404,6 +415,8 @@ IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 - 일시정지/취소는 클릭 즉시 `SessionState`(메모리)에 반영되고, `AnalysisHistory`(DB)도 `/api/session/pause`·`/api/session/cancel` 핸들러에서 낙관적으로 먼저 갱신한다. 그 뒤 진행 중이던 파일들(스레드풀 동시 처리분)이 처리를 마치고 `finalizeAnalysis()`가 최종 카운트를 반영해 다시 한번 저장한다.
 - "이어서 분석"(`POST /api/session/resume`)은 `SessionState.pendingFilePathsJson`에 저장된 미처리 파일 목록만 다시 병렬 처리한다(`runAnalysisResume()`) — 전체 파일을 처음부터 다시 스캔하지 않는다.
 - 취소는 `pendingFilePaths`를 저장하지 않으므로 재개할 방법이 없다(의도적 - "그만두겠다"는 의사표시).
+- 크레딧 소진 failover 컨펌 **거절("아니오")에는 전용 API가 없다** — 세션을 `AWAITING_FAILOVER_CONFIRM` 상태 그대로 두는 것으로 처리한다.
+- `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니다** — 상태 폴링(`GET /api/analysis/status/{sessionId}`)의 종료 판정 목록(`COMPLETED`/`FAILED`/`CANCELLED`/`PAUSED`)에 들어가지 않아 폴링이 계속되며, 이 상태일 때만 응답에 `failoverModelKey`가 실린다. 컨펌 수락은 `resume`과 동일한 재개 공통 로직을 탄다.
 
 ### 6-5. PPT 보고서 생성 흐름
 
@@ -427,9 +440,10 @@ IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 | 컨트롤러 | 베이스 경로 | 대표 엔드포인트 |
 |---|---|---|
 | `AuthController` | `/auth` | `GET/POST /auth/login` |
-| `MainApiController` | `/api` | `POST /api/start-analysis`, `POST /api/upload-analysis`, `GET /api/analysis/status/{sessionId}`, `POST /api/session/pause\|resume\|cancel`, `GET /api/session/{sessionId}/preview`(완료 파일 미리보기/Diff), `GET /api/config/llm-provider` |
+| `MainApiController` | `/api` | `POST /api/start-analysis`, `POST /api/upload-analysis`, `GET /api/analysis/status/{sessionId}`, `POST /api/session/pause\|resume\|cancel`, `POST /api/session/failover/confirm`, `GET /api/session/{sessionId}/preview`(완료 파일 미리보기/Diff), `GET /api/config/llm-provider`, `GET /api/config/llm-models`, `GET /api/config/llm-models/local-installed` |
 | `UserActivityController` | `/my-activity`, `/api/my` | `GET /api/my/analysis-history`, `GET /api/my/claude-md/{id}`, `GET /api/my/download/project-report/{id}` |
-| `AdminController` | `/api/admin` | `POST /api/admin/users/register`, `GET /api/admin/analysis-history`, `DELETE /api/admin/analysis-history/{id}` |
+| `AdminController` | `/api/admin` | `POST /api/admin/users/register`, `GET /api/admin/analysis-history`, `DELETE /api/admin/analysis-history/{id}`, `GET /api/admin/download/presentation/{id}`, `GET /api/admin/download/project-report/{id}` |
+| `LlmModelAdminController` | `/api/admin/llm-models` | `GET`(목록) · `POST`(등록) · `PUT /{id}` · `DELETE /{id}` · `GET /ollama-installed` — 클래스 레벨 `@PreAuthorize("hasRole('ADMIN')")`, ADMIN 전용 |
 | `UserController` | `/api/users` | `GET/PUT /api/users/me`, `GET /api/users`(ADMIN), `PUT /api/users/{seq}/activate`(ADMIN) |
 | `ApiUsageController` | `/api/usage` | `GET /api/usage/my-usage`, `GET /api/usage/admin/summary` |
 | `AuditLogController` | `/api/audit-logs` | `GET /api/audit-logs/admin/all`, `GET /api/audit-logs/admin/statistics` |
@@ -460,7 +474,7 @@ IN_PROGRESS ──(정상 종료)──▶ COMPLETED
 | 업로드 분석을 서버 임시 스테이징 폴더 + write-back 구조로 | 브라우저가 로컬 경로 문자열을 서버에 보낼 수 없으므로(보안 모델상), File System Access API로 읽은 바이트만 전송하고 결과는 다시 브라우저가 씀 |
 | 서버 경로 직접 지정을 ROLE_ADMIN으로 제한 | 서버 자신의 파일시스템을 임의로 읽고 쓰는 기능이라 신뢰된 사용자만 |
 | H2/PostgreSQL 프로파일 자동 전환 | 로컬 개발은 별도 인프라 없이 즉시 기동, 운영은 PostgreSQL로 동일 코드베이스 사용 |
-| `LlmClient` 인터페이스로 Provider 추상화(`@ConditionalOnProperty`) | Anthropic ↔ 로컬/사내 LLM을 설정값 하나로 전환하고, 재빌드 없이 배포 환경마다 다른 백엔드를 붙일 수 있게 |
+| `LlmClient` 인터페이스로 Provider 추상화 + 런타임 리졸버(`LlmClientResolver`) + 모델 목록 DB화(`llm_model_options`) | 사용자/세션별로 provider가 달라져야 해서 2026-08-21에 `@ConditionalOnProperty` 단일 빈 구조를 걷어냈다 — 두 구현체를 항상 등록해 두고 호출 시점의 모델 provider로 고르며, 모델 추가·전환에 재빌드가 필요 없다 |
 | RAG(Chroma)를 `rag.enabled`로 완전 opt-in(빈 자체가 안 뜸) | 대부분의 배포(경량/기본)에서는 불필요한 인프라 의존성(Chroma)을 아예 안 지도록, 실패해도 원본 그대로 폴백하는 "있으면 좋고 없어도 되는" 부가 기능으로 설계 |
 | prompt.md를 base(공통 규칙)+role(언어별 예시, 확장자 감지 병합)로 분리 | 분석 대상과 무관한 언어 예시가 매 요청에 실려 토큰이 낭비되는 것을 막음(상세: `docs/advancement/1.plan/2026-07-29-legacy-analyzer-prompt-md-role-split.md`) |
 

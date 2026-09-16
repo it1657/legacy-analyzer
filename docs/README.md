@@ -13,7 +13,7 @@
 
 ```
 docs/
-├── advancement/      ← 진행 중인 작업: Claude API ↔ 로컬/사내 LLM 전환, RAG(Chroma)
+├── advancement/      ← 진행 중인 작업: Claude API ↔ 로컬/사내 LLM 전환, RAG(Chroma — A안 구조 압축·B안 코드 청킹)
 │   ├── 0.status/handOff.md         ← 진행 현황 핸드오프 (세션 간 인계용, 가장 먼저 읽을 문서)
 │   ├── 1.plan/plan.md              ← 인덱스 + 공통 설계
 │   ├── 2.scenario/scenario_0~3.md  ← 배포 시나리오별 설계 워킹 드래프트
@@ -35,6 +35,47 @@ docs/
 
 ## 🏗️ 프로젝트 전체 구조
 
+### 분석 요청 시퀀스 (한눈에 보기)
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant C as MainApiController
+    participant S as SessionState + AnalysisSessionManager
+    participant L as ClaudeServiceImpl + LlmClientResolver + LlmClient
+    participant D as DB AnalysisHistory
+    participant P as PresentationGeneratorService
+    B->>C: POST /api/start-analysis 서버 경로, 관리자 또는 POST /api/upload-analysis 업로드
+    C->>S: createSession - currentPhase STARTING
+    C-->>B: sessionId 즉시 응답
+    Note over C: new Thread runAnalysis - 분석은 비동기로 시작
+    C->>C: performCopy - copy 모드일 때만
+    C->>C: collectFileList
+    C->>D: AnalysisHistory 저장 - IN_PROGRESS
+    C->>L: generateSessionClaudeMd
+    loop 파일별 병렬 처리
+        C->>L: analyzeFile - analyzeCodeWithClaude
+        L->>L: resolveLlmClient modelKey - DB 모델 provider로 구현체 선택
+        L-->>C: LlmResult
+        C->>C: 결과 쓰기 + 추적 파일 기록 markFileAsPatched
+    end
+    loop 2초 폴링
+        B->>C: GET /api/analysis/status/sessionId
+        C-->>B: currentPhase, 진행률, 최근 로그
+    end
+    C->>C: finalizeAnalysis - 상태 확정
+    C->>P: buildStructureSnapshot - COMPLETED일 때
+    C->>D: structureSnapshotJson 저장, COMPLETED
+    opt 업로드 모드
+        B->>C: GET manifest, 파일별 GET, write-back 뒤 cleanup
+    end
+    B->>P: GET /api/my/download/project-report/id - UserActivityController 경유
+    P->>D: 저장된 structureSnapshot 읽기
+    P-->>B: report_프로젝트명_시각.pptx
+```
+
+요청을 받은 컨트롤러는 세션을 만들고 `sessionId`를 바로 돌려준 뒤 별도 스레드에서 분석을 진행하며, 브라우저는 상태 API를 폴링한다. 파일마다 `ClaudeServiceImpl`이 **호출 시점에** 선택된 모델의 provider(DB `llm_model_options`)로 `LlmClientResolver`를 통해 구현체를 고르므로, provider는 서버 전역 설정이 아니라 세션·모델 단위로 결정된다. 완료 시 PPT용 구조 스냅샷을 1회 저장하고, 이후 다운로드는 그 스냅샷으로 렌더만 한다.
+
 `docs/`는 프로젝트 루트(`legacy-analyzer/`)의 하위 디렉터리입니다. 전체 프로젝트는 **Spring Boot 3.2.5 (Java 17)** 기반 백엔드 애플리케이션이며, 다음과 같이 구성되어 있습니다.
 
 ```
@@ -42,7 +83,7 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 ├── src/main/java/com/legacy/
 │   ├── admin/          ← 관리자 대시보드·사용자 관리 컨트롤러
 │   ├── analysis/       ← 핵심 분석 도메인 (LLM 연동, 세션/배치 관리)
-│   │   └── llm/        ← LLM Provider 추상화 (Anthropic ↔ 로컬/사내 LLM 전환)
+│   │   └── llm/        ← LLM Provider 추상화 (모델별 provider 런타임 선택 — Anthropic / 로컬·사내 LLM)
 │   ├── api/
 │   │   ├── monitoring/ ← 성능 메트릭 수집 API
 │   │   └── usage/      ← API 사용량 로깅
@@ -75,30 +116,73 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 
 | 패키지 | 역할 | 주요 클래스 |
 |---|---|---|
-| `admin` | 관리자 페이지 및 사용자 관리 | `AdminController`, `AdminPageController`, `UserController` |
+| `admin` | 관리자 페이지 및 사용자 관리, LLM 모델 목록 관리(CRUD) | `AdminController`, `AdminPageController`, `UserController`, `LlmModelAdminController` |
 | `analysis` | 코드 분석 핵심 로직, LLM 연동, 분석 세션/배치/재시도 처리 | `ClaudeService(Impl)`, `AnalysisSessionManager`, `SessionState`, `RetryHandler`, `CodeCleaner`, `TokenUsage`, `MainApiController` |
-| `analysis.llm` | LLM Provider 추상화 — `llm.provider` 설정 하나로 Anthropic ↔ 로컬/사내 LLM 전환 | `LlmClient`, `LlmResult`, `AnthropicLlmClient`, `OpenAiCompatibleLlmClient` |
+| `analysis.llm` | LLM Provider 추상화 — DB(`llm_model_options`)에 등록된 모델의 provider에 따라 `LlmClientResolver`가 매 호출마다 구현체를 고른다(Anthropic/로컬 두 클라이언트 빈 상시 등록) | `LlmClient`, `LlmResult`, `LlmProvider`, `AnthropicLlmClient`, `OpenAiCompatibleLlmClient`, `LlmClientResolver`, `LlmModelOption`, `LlmModelOptionService`, `LlmModelOptionRepository`, `LlmModelOptionSeedInitializer`, `OllamaModelDiscoveryClient`, `OllamaModelDiscoveryCache` |
 | `api.monitoring` | 애플리케이션 성능 모니터링 | `MonitoringController`, `PerformanceMetricsCollector` |
 | `api.usage` | API 호출 사용량 기록/필터링 | `ApiUsage`, `ApiUsageController`, `ApiUsageFilter`, `ApiUsageRepository` |
 | `audit` | 사용자 행위 감사 로그 | `AuditLog`, `AuditLogController`, `AuditLogService` |
 | `auth` | JWT 인증/인가, 사용자·권한 관리 | `SecurityConfig`, `JwtTokenProvider`, `JwtAuthenticationFilter`, `User`, `Role`, `AuthController` |
 | `core` | 앱 엔트리포인트, 공통 에러 핸들러, DB 소스 자동 선택(H2/PostgreSQL), PPT 리포트 생성 | `LegacyAnalyzerApplication`, `ApiErrorHandler`, `DatasourceAutoSelector`, `PresentationGeneratorService` |
 | `notification` | 사용자 알림 | `Notification`, `NotificationController`, `NotificationService` |
-| `rag` | RAG(Chroma) — `rag.enabled=true`일 때만 빈 등록(기본 비활성), 대형 Java 프로젝트의 "패키지 구조" 텍스트가 임계값을 넘으면 임베딩 유사도 상위 파일만 남겨 압축 | `ProjectStructureRagService`, `ChromaClient`, `EmbeddingClient`, `OpenAiCompatibleEmbeddingClient` |
+| `rag` | RAG(Chroma) 두 계열이 독립 토글로 공존. **A안**(패키지 구조 압축, `rag.enabled`) — `rag.enabled=true`일 때만 빈 등록(기본 비활성), 대형 Java 프로젝트의 "패키지 구조" 텍스트가 임계값을 넘으면 임베딩 유사도 상위 파일만 남겨 압축. **B안**(코드 내용 청킹 + 유사 코드 검색, `rag.content.enabled`, 기본 비활성) — 프로젝트 파일을 확장자별 청커로 잘라 임베딩·색인하고 분석 중인 파일과 유사한 기존 코드를 프롬프트 컨텍스트로 제공. B안 서비스 빈은 항상 등록되며 벡터스토어/임베딩 빈이 없으면 조용히 no-op | A안: `ProjectStructureRagService`, `ChromaClient`, `EmbeddingClient`, `OpenAiCompatibleEmbeddingClient` / B안: `CodeContentRagService`, `ChunkerRouter`, `JavaAstChunker`, `HtmlChunker`, `JsChunker`, `FallbackChunker`, `CodeChunk`, `ChunkSplitter`, `ChunkSizeLimits`, `VectorStoreClient` |
 | `statistics` | 시스템/사용자 통계 대시보드 데이터 | `StatisticsController`, `SystemStatisticsDto`, `UserStatisticsDto` |
+
+### 세션 제어 — 일시정지 / 재개 / 크레딧소진 failover
+
+분석 세션은 `MainApiController`의 아래 4개 엔드포인트로만 제어한다. 전부 **본인 세션이거나 관리자**여야 호출할 수 있다(`isSessionOwnerOrAdmin` 검사).
+
+| 엔드포인트 | 동작 |
+|---|---|
+| `POST /api/session/pause` | 세션을 `PAUSED`로 전환. "아직 멈추는 중" 표식(`pauseSettled=false`)을 세우고 `AnalysisHistory` 상태를 즉시 갱신 |
+| `POST /api/session/resume` | 일시정지 시 저장해 둔 `pendingFilePaths`만 이어서 처리(전체 재스캔 아님) |
+| `POST /api/session/failover/confirm` | 크레딧 소진 컨펌 수락 — 세션 모델을 관리자가 지정한 failover 모델로 바꾼 뒤 `resume`과 **동일한 재개 로직**으로 이어감 |
+| `POST /api/session/cancel` | 세션과 `AnalysisHistory`를 즉시 `CANCELLED`. `pendingFilePaths`를 저장하지 않으므로 **재개 불가** |
+
+```mermaid
+stateDiagram-v2
+    [*] --> STARTING
+    STARTING --> COPYING : 출력 경로가 원본과 다름 - copy 모드
+    STARTING --> ANALYZING : copy 모드 아님
+    COPYING --> ANALYZING : 미러링 복사 완료
+    ANALYZING --> PAUSED : 사용자 일시정지 POST /api/session/pause
+    PAUSED --> ANALYZING : 이어서 분석 POST /api/session/resume - pending 파일만
+    ANALYZING --> CANCELLED : 사용자 취소 POST /api/session/cancel - 재개 불가
+    ANALYZING --> AWAITING_FAILOVER_CONFIRM : 크레딧 소진 + 관리자 지정 failover 대상 있음
+    ANALYZING --> PAUSED : 크레딧 소진 + failover 대상 없음
+    AWAITING_FAILOVER_CONFIRM --> ANALYZING : 컨펌 수락 POST /api/session/failover/confirm - failover 모델로 전환 후 재개
+    AWAITING_FAILOVER_CONFIRM --> AWAITING_FAILOVER_CONFIRM : 컨펌 거절 - 전용 API 없음, 상태 유지
+    ANALYZING --> PAUSED : 선택된 파일 전부 실패 - 재시도 가능
+    ANALYZING --> FINALIZING : 파일 처리 완료
+    FINALIZING --> COMPLETED : README 생성 + PPT 구조 스냅샷 저장
+    ANALYZING --> FAILED : 예외
+    FINALIZING --> FAILED : 예외
+    COMPLETED --> [*]
+    CANCELLED --> [*]
+    FAILED --> [*]
+```
+
+위 그림은 `SessionState.currentPhase` 값 기준의 전이다. `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며 폴링이 계속된다**(컨펌 거절에는 전용 API가 없어 그 상태에 머문다). `PAUSED`와 `AWAITING_FAILOVER_CONFIRM`은 `pendingFilePaths`가 남아 있어 재개할 수 있지만, **취소만 재개 불가**다(`CANCELLED`는 pending을 저장하지 않는다).
+
+- **크레딧 소진 시**: 관리자가 지정해 둔 활성 failover 대상 모델이 있으면 세션이 `AWAITING_FAILOVER_CONFIRM`으로 바뀌어 사용자 컨펌("자체 LLM으로 진행하시겠습니까?")을 기다리고, 없으면 예전처럼 단순 `PAUSED`(수동 재개만 가능)가 된다.
+- **"아니오"(중단 유지)에는 전용 API가 없다** — 그 상태를 그대로 두는 것으로 처리한다.
+- `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며** 상태 폴링(`GET /api/analysis/status/{sessionId}`)이 계속된다. 이 상태일 때만 응답에 `failoverModelKey`가 함께 내려온다.
+- **모델 선택·관리**는 두 API 계열로 나뉜다:
+  - 관리자 CRUD `/api/admin/llm-models`(`LlmModelAdminController`, **ADMIN 전용**) — 모델 등록/수정/삭제, Ollama 설치 모델 조회(`/ollama-installed`). 모델 목록은 DB(`llm_model_options`)에 있고, 활성 모델은 최소 1개, failover 대상은 0개 또는 1개만 허용된다.
+  - 사용자 조회 `GET /api/config/llm-models`(활성 모델을 표시 순서대로 반환, 인증만 필요) / `GET /api/config/llm-models/local-installed`(로컬 서버에 실제 설치된 모델을 TTL 캐시 경유로 조회). `local-installed`의 `available=false`는 "설치 모델 없음"이 아니라 **"확인 불가"**(타임아웃·미기동 등)를 뜻한다.
 
 ### 배포 구성 참고
 - **Dockerfile**: Debian 기반 이미지 사용 (ARM64/PGX 서버 호환을 위해 Alpine에서 전환)
 - **docker-compose.yml**: 기본 `postgres`(16-alpine, DB) + `app`(Spring Boot, 8803 포트) 2개 서비스. `COMPOSE_PROFILES=llm-rag`로 `ollama`(로컬 LLM+임베딩) + `chroma`(RAG 벡터 DB) 2개 서비스 추가 기동(선택적, `docker-compose.gpu.yml` 오버레이로 GPU 추론 가능)
 - **DB**: 로컬 개발은 H2(`data/`), 운영 배포는 PostgreSQL(`SPRING_PROFILES_ACTIVE=postgres`) 프로파일 사용
-- **LLM Provider**: `llm.provider`(`anthropic`\|`local`) 설정 하나로 Anthropic Claude API ↔ OpenAI 호환 로컬/사내 LLM 서버(Ollama 등) 전환. 재빌드 불필요
+- **LLM Provider**: 모델 목록은 DB(`llm_model_options`)로 관리되고, 호출에 쓸 provider(Anthropic Claude API / OpenAI 호환 로컬·사내 LLM 서버(Ollama 등))는 선택된 모델의 `provider` 값으로 매 호출마다 결정된다(`LlmClientResolver`). `llm.provider`는 DB에 없는 모델명에 대한 폴백 기본값으로만 남아 있다. 모델 추가·전환에 재빌드 불필요
 
 ---
 
 ## 🔄 advancement/ - 진행 중인 작업 (Claude API ↔ 로컬/사내 LLM 전환, RAG)
 
-- **목표**: 설정 프로퍼티(`llm.provider`) 하나만 바꾸면 재빌드 없이 Anthropic API ↔ 로컬/사내 LLM으로 전환되도록 리팩터링. 이후 경량(`scenario_1`)/폐쇄망(`scenario_2`)/선택형(`scenario_3`) 배포판 순으로 진행.
-- **현재 상태(2026-08-11 기준)**: `LlmClient` 추상화 + provider 전환 API/UI는 완료. `scenario_1`(경량 배포판)은 Docker Compose 구성·RAG(Chroma) 구현·prompt.md base/role 분리까지 끝났고, 로컬 소형 모델(`qwen2.5-coder:7b`)의 품질이 Anthropic Haiku 대비 아직 미달로 확인되어(GPU 미보유로 14b 비교 대기) 실사용 채택 여부는 보류 중. `scenario_2`/`scenario_3`은 여전히 조건부(착수 전 인프라 확인 대기). 상세 진행 상황은 항상 `0.status/handOff.md`가 최신.
+- **목표**: 설정 프로퍼티(`llm.provider`) 하나만 바꾸면 재빌드 없이 Anthropic API ↔ 로컬/사내 LLM으로 전환되도록 리팩터링. 이후 경량(`scenario_1`)/폐쇄망(`scenario_2`)/선택형(`scenario_3`) 배포판 순으로 진행. (scenario_0 단계의 목표. 2026-08-21 모델 DB화 이후 런타임 선택 구조로 대체됨 — 위 "백엔드 패키지 상세" 표의 `analysis.llm` 행 참고)
+- **현재 상태(2026-09-16 기준)**: `LlmClient` 추상화(scenario_0)는 완료됐고, 2026-08-21 모델 목록 DB화(`llm_model_options`, 관리자 CRUD) + 런타임 리졸버(`LlmClientResolver`)로 바뀌어 같은 서버 안에서 세션별로 Anthropic/로컬 모델을 골라 쓸 수 있다. Anthropic은 **허가제**(API 키가 설정돼 있고 관리자가 부여한 `ANTHROPIC_USER` Role을 가진 사용자만 선택 가능, admin은 항상 통과)이고, 로컬은 DB에 활성 로컬 모델이 있으면 **기본 개방**. RAG는 기존 A안(패키지 구조 압축, `rag.enabled`) 외에 B안(코드 내용 청킹 + 유사 코드 검색, `rag.content.enabled`)이 독립 토글로 신설됐다. 크레딧 소진 시 관리자가 지정한 failover 대상 모델로 이어갈지 사용자 컨펌을 받는 세션 failover(`AWAITING_FAILOVER_CONFIRM` 상태)가 추가됐다. 트랙 상태: `scenario_1`/`scenario_2`는 **보류(hold, 2026-08-19)**, `scenario_3`이 유일한 활성 트랙. 상세 진행 상황은 `0.status/handOff.md` 참고.
 - 상세 진척/설계/테스트 결과는 아래 문서 참고(경로는 `docs/advancement/` 기준):
   - [`0.status/handOff.md`](./advancement/0.status/handOff.md) — 세션 간 인계용 진행 현황 핸드오프(가장 먼저 읽을 문서, 항상 최신)
   - [`1.plan/plan.md`](./advancement/1.plan/plan.md) — 공통 설계 결정(Provider 선택 구조, RAG 조건부 설계 등)
@@ -112,20 +196,20 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 ## 📖 guides/ - 사용 가이드
 
 ### PowerPoint_변환가이드.md
-- **대상**: 기술 사용자, 개발자
-- **내용**:
-  - HTML → PowerPoint 변환 방법 (3가지)
-  - Microsoft PowerPoint 직접 변환
-  - LibreOffice Impress 사용
-  - Google Slides 온라인 변환
-  - Python 자동화 스크립트
+- **대상**: 이 앱 사용자·관리자, 개발자
+- **내용**: 서버가 분석 결과로 `.pptx`를 **자동 생성**한다 — 예전의 HTML→PowerPoint 수동 변환 절차는 폐기됨 (파일명은 링크 호환을 위해 유지)
+  - 산출물 2종(요약 PPT · 보고서 PPT)과 슬라이드 구성
+  - 받는 방법 — 화면(관리자 대시보드 / 일반 사용자 "내 활동") · API(엔드포인트 4개 + 접근 제어)
+  - 동작 특성(분석 완료 시점 구조 스냅샷 1회 계산 → 다운로드 시 렌더만)
+  - 파일명 규칙 · 실패 시 동작
+  - `scripts/pptx/`의 위치(앱 산출물과 무관한 1회성 소개 자료 스크립트)
 
 #### 주요 내용:
 ```markdown
-- PowerPoint 형식 변환 방법
-- 각 방법별 장단점 비교
-- 단계별 변환 프로세스
-- 문제 해결 팁
+- 서버 자동 생성 .pptx 2종 (요약 / 보고서)
+- 얻는 방법 (화면 · API)
+- 동작 특성 · 파일명 규칙 · 실패 시 동작
+- scripts/pptx/ 의 위치
 ```
 
 ---
@@ -211,7 +295,7 @@ docs/README.md (문서 인덱스)
 |------|------|------|
 | 문서 인덱스 | docs/ | 문서 디렉터리 전체 안내 |
 | 스크립트 가이드 | scripts/ | 자동화 스크립트 사용법 |
-| 변환 가이드 | docs/guides/ | 포맷 변환 방법 |
+| PPT 보고서 가이드 | docs/guides/ | 서버가 자동 생성하는 `.pptx`(요약·보고서) 받는 방법 |
 | DB 설계 | docs/technical/ | 데이터베이스 명세 |
 | 토큰 구현 | docs/technical/ | API 연동 상세 |
 | 부분 분석/PPT 스냅샷 | docs/technical/ | 파일 트리 선택 및 PPT 구조 스냅샷 구현 상세 |
@@ -222,10 +306,10 @@ docs/README.md (문서 인덱스)
 ## 💾 파일 목록
 
 ### guides/ (가이드)
-- `PowerPoint_변환가이드.md` (5KB)
-  - 3가지 변환 방법
-  - 단계별 설명
-  - 트러블슈팅
+- `PowerPoint_변환가이드.md`
+  - 서버가 자동 생성하는 `.pptx` 2종(요약 / 보고서)
+  - 화면 · API로 받는 경로
+  - 파일명 규칙 · 실패 시 동작
 
 ### technical/ (기술 문서)
 - `ANALYSIS_METRICS_DB_SCHEMA.md` (8KB)
@@ -258,9 +342,9 @@ A: 프로젝트에 처음 온 경우
 
 **Q: PPT는 어떻게 얻나?**
 ```
-A: 3가지 방법
-1. 웹 관리자 대시보드 → "PPT 다운로드" 버튼
-2. scripts/pptx/ 스크립트 실행
+A: 서버가 .pptx를 자동 생성한다 — 요약 PPT / 보고서 PPT 2종
+1. 웹 화면 → 관리자 대시보드의 요약·보고서 PPT 버튼, 또는 일반 사용자 "내 활동"의 "📋 보고서 PPT" 버튼
+2. scripts/pptx/ 스크립트 실행 (앱 분석 산출물이 아니라 프로젝트 소개용 1회성 자료 생성 스크립트)
 3. docs/guides/PowerPoint_변환가이드.md 참고
 ```
 
@@ -276,9 +360,9 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-08-11 (RAG(Chroma) 구현, prompt.md base/role 분리, `advancement/` 경로 재구성 반영해 현행화)
+- **마지막 업데이트**: 2026-09-16 (모델 목록 DB화·런타임 리졸버, Anthropic 허가제(`ANTHROPIC_USER`), RAG B안, 세션 failover 반영해 현행화 + 세션 상태 전이도·분석 요청 시퀀스도 추가 + PPT 가이드 소개 서술 현행화)
 - **작성자**: 정재훈
-- **관리자**: 개발팀
+- **관리자**: 정재훈
 
 ---
 
