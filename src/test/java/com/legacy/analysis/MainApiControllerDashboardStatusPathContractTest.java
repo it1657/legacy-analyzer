@@ -83,24 +83,30 @@ class MainApiControllerDashboardStatusPathContractTest {
   /** 각 케이스가 만드는 분석 대상 파일 수(= 정상 동작 시 기대 completeCount). */
   private static final int FILE_COUNT = 2;
   /**
-   * <b>비-copy 모드에서만</b> 스캔 목록이 {@link #FILE_COUNT}보다 1건 많아지는 현재 동작을 고정한 값
-   * (work-order v2 §0.8 판단 3 — PL이 모드별 정확값으로 지시).
+   * 비-copy 모드에서 1단계 스캔이 세는 파일 수. <b>추적파일 제외가 반영된 지금은 {@link #FILE_COUNT}와 같다</b>
+   * (work-order 2026-09-remaining-ux-fixes v1 TASK-006 / REQ-003 — 게이트1 ⑧ 단일 출처 + ⑨ 카나리아 RED 승인).
    *
-   * <p><b>왜 +1인가</b>: 비-copy(원본 직접 수정) 모드에서는 출력 루트 == 소스 루트이므로
-   * {@code runAnalysis()}가 만드는 추적 파일 {@code .ai-analysis-done.txt}가 <b>스캔 대상 소스 루트 안</b>에
-   * 놓인다. 그런데 {@code isSupportedFile()}의 지원 확장자 목록에 {@code .txt}가 포함돼 있어
-   * 추적 파일 자신이 스캔 목록에 1건 끼어든다. 추적 파일은 자기 자신을 완료 목록에 기록하지 않으므로
-   * {@code isCompleted=false}로 고정되고, 그 결과 {@code waitCount}에도 1이 영구히 남는다.
+   * <p><b>이력 — 왜 한때 {@code FILE_COUNT + 1}이었는가(되돌리기 방지용으로 남긴다)</b>:
+   * 비-copy(원본 직접 수정) 모드에서는 출력 루트 == 소스 루트이므로 {@code runAnalysis()}가 만드는 추적 파일
+   * {@code .ai-analysis-done.txt}가 <b>스캔 대상 소스 루트 안</b>에 놓인다. 그런데 {@code isSupportedFile()}의
+   * 지원 확장자 목록에 {@code .txt}가 포함돼 있어 추적 파일 자신이 스캔 목록에 1건 끼어들었다. 추적 파일은
+   * 자기 자신을 완료 목록에 기록하지 않으므로 {@code isCompleted=false}로 고정되고, 그 결과 {@code waitCount}에도
+   * 1이 영구히 남았다. 직전 사이클(2026-09-outputpath-normalization v2 §0.8 판단 3)에서는 <b>별건 결함으로
+   * 등록만 하고 고치지 않은 채</b> 이 상수를 {@code FILE_COUNT + 1}로 두어 현재 동작을 고정했다(값이 바뀌면
+   * RED가 나서 사람이 알아채도록 — {@code >=} 완화를 쓰지 않은 이유).
    *
-   * <p><b>이번 사이클의 결함이 아니다</b>: 이 수정 전후로 동일하게 나타나는 <b>기존 별건 결함</b>이며,
-   * {@code docs/pipeline/bug-suspects.md}에 2026-09-09 별도 항목(상태 {@code 미확인})으로 등록됐다.
-   * 여기서는 <b>고치지 않고 현재 동작을 그대로 고정</b>만 한다 — 이 값이 바뀌면(고쳐지든 악화되든)
-   * RED가 나서 사람이 알아채도록 하는 것이 목적이다({@code >=} 완화를 쓰지 않는 이유).
+   * <p><b>정정(2026-09-remaining-ux-fixes TASK-006)</b>: {@code isSupportedFile()}이 파일명이
+   * {@code TRACKER_FILE_NAME}과 <b>완전일치</b>하는 파일을 확장자 판정보다 앞에서 제외하게 되어, 이 상수를
+   * {@code FILE_COUNT}로 내렸다. 프로덕션 수정 없이 이 상수만 내리면 C2/C4가 {@code expected: <2> but was: <3>}로
+   * RED가 되고(수정 전 시점 실측), 프로덕션 수정 후 GREEN이 된다(P9 전용 동작 케이스). <b>이 값이 다시
+   * {@code FILE_COUNT + 1}이 되어야 통과한다면 추적파일 제외가 되돌려진 것이다.</b>
    *
-   * <p>반대로 <b>copy 모드</b>(C1·C3)에서는 추적 파일이 출력 루트({@code {out}/{safeUsername}}) 아래에 있어
-   * 소스 루트 스캔에 잡히지 않으므로 {@link #FILE_COUNT} 그대로다.
+   * <p>copy 모드(C1·C3)에서는 추적 파일이 출력 루트({@code {out}/{safeUsername}}) 아래에 있어 소스 루트
+   * 스캔에 애초에 잡히지 않으므로 수정 전후 모두 {@link #FILE_COUNT} 그대로다(P10).
    */
-  private static final int NON_COPY_SCAN_COUNT = FILE_COUNT + 1;
+  private static final int NON_COPY_SCAN_COUNT = FILE_COUNT;
+  /** 프로덕션 {@code MainApiController.TRACKER_FILE_NAME}과 같은 값(private이라 문자 그대로 복제 — 어긋나면 C6·C7이 RED). */
+  private static final String TRACKER_FILE_NAME = ".ai-analysis-done.txt";
 
   @TempDir
   Path tempDir;
@@ -230,6 +236,40 @@ class MainApiControllerDashboardStatusPathContractTest {
     return File.separatorChar == '\\';
   }
 
+  /** 응답 {@code files[]} 중 파일명이 추적파일과 완전일치하는 항목 수(TASK-006 DoD 2). */
+  @SuppressWarnings("unchecked")
+  private int trackerEntryCount(Map<String, Object> result) {
+    List<Map<String, Object>> files = (List<Map<String, Object>>) result.get("files");
+    int count = 0;
+    for (Map<String, Object> file : files) {
+      String fileName = String.valueOf(file.get("fileName")).replace("\\", "/");
+      if (fileName.equals(TRACKER_FILE_NAME) || fileName.endsWith("/" + TRACKER_FILE_NAME)) count++;
+    }
+    return count;
+  }
+
+  /** 응답 {@code files[]}의 fileName 목록(구분자 {@code /}로 통일, 정렬). */
+  @SuppressWarnings("unchecked")
+  private List<String> fileNamesOf(Map<String, Object> result) {
+    List<Map<String, Object>> files = (List<Map<String, Object>>) result.get("files");
+    return files.stream().map(f -> String.valueOf(f.get("fileName")).replace("\\", "/")).sorted().toList();
+  }
+
+  /** {@code isSupportedFile(Path)}는 private이라 리플렉션으로 호출한다. */
+  private boolean isSupportedFileByReflection(Path path) throws Exception {
+    Method m = MainApiController.class.getDeclaredMethod("isSupportedFile", Path.class);
+    m.setAccessible(true);
+    return (Boolean) m.invoke(controller, path);
+  }
+
+  /** {@code collectFileList(Path)}(= {@code runAnalysis()}의 분석 대상 목록)는 private이라 리플렉션으로 호출한다. */
+  @SuppressWarnings("unchecked")
+  private List<Path> collectFileListByReflection(Path root) throws Exception {
+    Method m = MainApiController.class.getDeclaredMethod("collectFileList", Path.class);
+    m.setAccessible(true);
+    return (List<Path>) m.invoke(controller, root);
+  }
+
   // ────────────────────────────────────────────────────────────────────────────
 
   /**
@@ -272,9 +312,11 @@ class MainApiControllerDashboardStatusPathContractTest {
     System.out.println(summarize("C2 non-copy/trailing-space", result));
 
     assertNull(result.get("error"), "C2는 오류 없이 응답해야 한다: " + result.get("error"));
-    // 부가 단언 — 비-copy 모드라 추적 파일(.ai-analysis-done.txt)이 소스 루트 스캔에 1건 섞인다.
-    // 왜 +1인지는 NON_COPY_SCAN_COUNT 주석 참고(별건 결함, 이번 사이클에서는 고치지 않고 고정만 한다).
+    // 부가 단언 — 비-copy 모드라 추적 파일(.ai-analysis-done.txt)이 소스 루트에 실제로 생기지만,
+    // isSupportedFile()이 이름 완전일치로 제외하므로 스캔 목록에 섞이지 않는다(TASK-006 — 이력은 NON_COPY_SCAN_COUNT 주석).
     assertEquals(NON_COPY_SCAN_COUNT, intOf(result, "totalCount"));
+    assertEquals(0, trackerEntryCount(result), "files 배열에 추적파일이 섞이면 안 된다: " + summarize("C2", result));
+    assertEquals(0, intOf(result, "waitCount"), "추적파일이 빠지면 영구 대기 1건도 사라져야 한다: " + summarize("C2", result));
     assertEquals(FILE_COUNT, intOf(result, "completeCount"),
         "runAnalysis()는 trim 후 비교해 원본을 직접 수정했는데 스캔 API가 copy 모드로 오판하면 완료가 0건이 된다. "
             + summarize("C2", result));
@@ -332,10 +374,10 @@ class MainApiControllerDashboardStatusPathContractTest {
       System.out.println("[C4] 재현 불가 — 이 플랫폼에서는 '\\' 표기가 존재하지 않아 두 입력이 동일 문자열이다.");
     }
     assertNull(result.get("error"), "C4는 오류 없이 응답해야 한다: " + result.get("error"));
-    // 부가 단언 — 실제 분석은 비-copy로 돌았으므로 추적 파일이 소스 루트 스캔에 1건 섞인다.
-    // 왜 +1인지는 NON_COPY_SCAN_COUNT 주석 참고. 이 단언이 먼저 터지면 1차 판정 기준인
-    // completeCount가 가려지므로, §0.8 판단 3에 따라 실측값(N+1)으로 고정한다.
+    // 부가 단언 — 실제 분석은 비-copy로 돌았으므로 추적 파일이 소스 루트에 생기지만, isSupportedFile()이
+    // 제외하므로 스캔 목록에 섞이지 않는다(TASK-006 — 한때 N+1로 고정했던 이력은 NON_COPY_SCAN_COUNT 주석).
     assertEquals(NON_COPY_SCAN_COUNT, intOf(result, "totalCount"));
+    assertEquals(0, trackerEntryCount(result), "files 배열에 추적파일이 섞이면 안 된다: " + summarize("C4", result));
     assertEquals(FILE_COUNT, intOf(result, "completeCount"),
         "요청 파라미터 구분자를 startAnalysis()와 같은 규칙으로 정규화하지 않으면 copy 모드 판정이 서로 반대가 된다. "
             + summarize("C4", result));
@@ -404,6 +446,70 @@ class MainApiControllerDashboardStatusPathContractTest {
     System.out.println("[C5 detection-check] otherUserRoot=" + otherUserRoot);
     assertNotEquals(otherUserRoot, copyResult.get("outputPath"),
         "계정명을 바꿔도 같은 값이 나온다면 이 동치성 단언은 아무것도 검증하지 못한다(공허한 통과).");
+  }
+
+  /**
+   * <b>C6 — 제외 조건은 "이름 완전일치" 한 건뿐이다</b>(TASK-006 DoD 4·5).
+   * 일반 {@code .txt}는 여전히 스캔·분석 대상이고({@code .txt}를 지원 확장자에서 빼지 않았다),
+   * 이름이 비슷할 뿐 완전일치하지 않는 {@code ai-analysis-done.txt}(선행 점 없음)·{@code my.ai-analysis-done.txt}
+   * (접두 있음)는 제외되지 않는다. 오직 {@code .ai-analysis-done.txt}만 빠진다.
+   *
+   * <p>두 층으로 본다: (1) {@code isSupportedFile()} 직접 호출 — 규칙 자체의 단언, (2) 실제 {@code @TempDir}에
+   * 파일을 만들고 {@code getDashboardStatus()}로 스캔 — 응답 원문 단언. 여기서는 {@code runAnalysis()}를 돌리지
+   * 않으므로 {@code .ai-analysis-done.txt}는 하네스가 손으로 둔 파일이다(이름만 같으면 제외되는지 본다).
+   *
+   * <p>{@code my.ai-analysis-done.txt.bak}는 work-order DoD 5의 예시지만 {@code .bak}가 지원 확장자가 아니라
+   * 추적파일 규칙과 무관하게 이전부터 제외됐다 — 규칙의 완전일치 여부를 가르는 근거가 될 수 없으므로
+   * "수정 전후 동일하게 false"라는 사실만 고정하고, 완전일치의 근거는 {@code .txt}를 유지한 두 이름으로 삼는다.
+   */
+  @Test
+  void C6_추적파일은_이름_완전일치_한건만_제외되고_일반_txt와_유사이름은_스캔대상으로_남는다() throws Exception {
+    createTwoSourceFiles();
+    Files.writeString(srcRoot.resolve("notes.txt"), "plain text\n", StandardCharsets.UTF_8);
+    Files.writeString(srcRoot.resolve("ai-analysis-done.txt"), "no leading dot\n", StandardCharsets.UTF_8);
+    Files.writeString(srcRoot.resolve("my.ai-analysis-done.txt"), "prefixed\n", StandardCharsets.UTF_8);
+    Files.writeString(srcRoot.resolve("my.ai-analysis-done.txt.bak"), "bak\n", StandardCharsets.UTF_8);
+    Files.writeString(srcRoot.resolve(TRACKER_FILE_NAME), "", StandardCharsets.UTF_8);
+
+    // (1) 규칙 단언 — isSupportedFile() 직접 호출
+    assertEquals(false, isSupportedFileByReflection(srcRoot.resolve(TRACKER_FILE_NAME)), "추적파일(완전일치)은 제외");
+    assertEquals(true, isSupportedFileByReflection(srcRoot.resolve("notes.txt")), "일반 .txt는 여전히 지원(DoD 4)");
+    assertEquals(true, isSupportedFileByReflection(srcRoot.resolve("ai-analysis-done.txt")), "선행 점이 없으면 완전일치가 아니다(DoD 5)");
+    assertEquals(true, isSupportedFileByReflection(srcRoot.resolve("my.ai-analysis-done.txt")), "접두가 붙으면 완전일치가 아니다(DoD 5)");
+    assertEquals(false, isSupportedFileByReflection(srcRoot.resolve("my.ai-analysis-done.txt.bak")),
+        ".bak는 추적파일 규칙과 무관하게 지원 확장자가 아니라 수정 전후 동일하게 false — 완전일치 근거로 쓰지 않는다");
+
+    // (2) 응답 원문 단언 — copy 모드 입력으로 1단계 스캔(분석은 돌리지 않는다)
+    Map<String, Object> result = dashboardStatus(srcRoot.toString(), outRoot.toString());
+    System.out.println(summarize("C6 exact-match-only", result));
+    assertNull(result.get("error"), "C6은 오류 없이 응답해야 한다: " + result.get("error"));
+    assertEquals(List.of("ai-analysis-done.txt", "com/x/A.java", "com/x/B.java", "my.ai-analysis-done.txt", "notes.txt"),
+        fileNamesOf(result), "추적파일 1건만 빠지고 일반 .txt·유사이름은 남아야 한다: " + summarize("C6", result));
+    assertEquals(FILE_COUNT + 3, intOf(result, "totalCount"));
+    assertEquals(0, trackerEntryCount(result));
+  }
+
+  /**
+   * <b>C7 — 의도된 부수효과</b>(TASK-006 DoD 7): {@code collectFileList()}는 {@code runAnalysis()}가 LLM에 보낼
+   * <b>분석 대상 목록</b>이며 같은 {@code isSupportedFile()}을 쓴다. 따라서 비-copy 모드로 한 번 분석한 뒤
+   * 소스 루트에 남은 추적파일은 <b>재분석 대상 목록에서도 빠진다</b> — 응답 측 로컬 필터로는 막을 수 없는 축이라
+   * 단일 출처에 둔 이유가 여기서 실행으로 확인된다. 수정 전에는 이 목록이 {@code FILE_COUNT + 1}이었다.
+   */
+  @Test
+  void C7_비copy_분석_후_남은_추적파일은_collectFileList의_재분석_대상_목록에서도_빠진다() throws Exception {
+    createTwoSourceFiles();
+    String src = srcRoot.toString();
+    runAnalysisAndAwait(src, src);
+
+    Path tracker = srcRoot.resolve(TRACKER_FILE_NAME);
+    assertEquals(true, Files.exists(tracker), "비-copy 분석은 소스 루트에 추적파일을 실제로 남겨야 한다(하네스 전제): " + tracker);
+
+    List<Path> fileList = collectFileListByReflection(srcRoot);
+    List<String> names = fileList.stream().map(p -> srcRoot.relativize(p).toString().replace("\\", "/")).sorted().toList();
+    System.out.println("[C7 collectFileList after non-copy analysis] trackerExists=" + Files.exists(tracker) + " fileList=" + names);
+    assertEquals(List.of("com/x/A.java", "com/x/B.java"), names,
+        "분석 대상 목록에 추적파일이 실리면 재분석 시 LLM에 그대로 전달된다");
+    assertEquals(FILE_COUNT, fileList.size());
   }
 
   /** {@code resolveUserOutputRoot()}는 private static이라 리플렉션으로 호출한다. */

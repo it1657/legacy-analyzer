@@ -133,6 +133,8 @@
                     <span id="sessionIdDisplay" style="font-size: 12px; color: #858796; font-family: monospace;"></span>
                     <button type="button" onclick="pauseAnalysis()" class="btn" style="background-color: #f6c23e; color: #333;">⏸️ 일시 중지</button>
                     <button type="button" onclick="resumeAnalysis()" class="btn" style="background-color: #4e73df; color: white; display: none;" id="resumeBtn">▶️ 재개</button>
+                    <!-- (REQ-002) 일시정지 미확정 구간(pauseSettled=false)에는 재개 버튼 대신 이 안내가 같은 자리에 보인다 -->
+                    <span id="pauseSettlingNotice" style="display: none; padding: 6px 10px; font-size: 12px; border-radius: 4px; background-color: #fff3e0; color: #e67e22;" title="서버가 진행 중이던 파일 처리를 마무리하고 있습니다.">⏸️ 일시정지 처리 중입니다</span>
                     <button type="button" onclick="cancelAnalysis()" class="btn" style="background-color: #e74a3b; color: white;">❌ 취소</button>
                 </div>
             </div>
@@ -231,7 +233,7 @@
     <div id="completionResultPanel" style="display:none; margin-top: 16px;">
         <div class="card" style="border: 1px solid #1cc88a; background: #0d1117;">
             <div class="card-header" style="background: linear-gradient(135deg, #1cc88a 0%, #17a673 100%); color: white; font-weight: bold; font-size: 15px; display: flex; justify-content: space-between; align-items: center;">
-                <span>✅ 분석 완료 결과</span>
+                <span id="cr_title">✅ 분석 완료 결과</span>
                 <div>
                     <button id="btnViewClaudeMd" onclick="openCompletionClaudeMdModal()" style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5); color: white; padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold; margin-right: 6px;" title="이 분석에 실제 사용된 CLAUDE.md 내용 보기">
                         📝 CLAUDE.md 보기
@@ -242,6 +244,13 @@
                 </div>
             </div>
             <div class="card-body" style="padding: 16px;">
+                <!-- (REQ-004, 2026-09) 전량실패로 자동 일시정지된 경우에만 dashboard.js setCompletionPanelMode(true)가 표시한다.
+                     사용자 일시정지·크레딧 소진·정상 완료에서는 숨김 유지. 카운터 값은 아래 표(단일 출처)로 채워진다. -->
+                <div id="cr_allFailedNotice" style="display:none; margin-bottom:12px; padding:10px 12px; border:1px solid #e74c3c; border-radius:6px; background:#2b1416; color:#f8d7da; font-size:13px; line-height:1.5;">
+                    <b>⚠️ 전체 파일 처리 실패로 분석이 자동 일시정지되었습니다.</b><br>
+                    성공한 파일이 없어 완료로 처리하지 않았습니다. 아래 "처리 실패" 건수와 터미널 로그의 실패 사유를 확인하고,
+                    모델·경로 설정을 점검한 뒤 분석 이력 화면에서 '이어서 분석'으로 재시도하거나 처음부터 다시 분석해 주세요.
+                </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                     <!-- 좌측: 수치 요약 -->
                     <div>

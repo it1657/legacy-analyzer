@@ -19,8 +19,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *   <li>증가 메서드와 <b>대응 getter가 같은 락(this)</b>에 묶여 있다. 증가만 원자화하고 getter를
  *       빼면, 필드가 plain {@code int}(volatile 아님)이라 <b>진행률을 폴링하는 스레드가 뒤로 가는
  *       값을 읽는다</b>. 즉 getter의 {@code synchronized}는 장식이 아니라 계약의 일부다.</li>
- *   <li><b>기존 setter는 남겨 두되 병렬 루프에서 쓰지 않는다.</b> setter는 Jackson 역직렬화와
- *       {@code AnalysisSessionManager.updateStatistics()}가 쓰는 단일 스레드 경로용이고,
+ *   <li><b>기존 setter는 남겨 두되 병렬 루프에서 쓰지 않는다.</b> setter는 Jackson 역직렬화 전용이고
+ *       (과거 이 문장이 가리키던 {@code AnalysisSessionManager}의 5-인자 통계 일괄 대입 메서드는
+ *       호출부 0건 dead code로 2026-09 REQ-007에서 삭제됐다),
  *       "읽어서 +1 해서 되쓰기" 형태로 쓰면 원자성이 깨진다.
  *       루프 안에 setter 직접 호출이 다시 생기지 않는지는
  *       {@code MainApiControllerCounterIncrementSingleSourceTest}가 감시한다.</li>

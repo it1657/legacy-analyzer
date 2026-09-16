@@ -25,6 +25,11 @@ public class AnalysisStatusDto {
   // Phase 5(프런트 컨펌 모달)가 "자체 LLM({modelKey})으로 진행하시겠습니까?" 문구를 만드는 데 사용한다.
   private String failoverModelKey;
 
+  // (REQ-002) 사용자 일시정지가 확정됐는지(pendingFilePaths 기록 완료). 일시정지 요청 직후 처리 루프가 아직
+  // 돌고 있는 구간에만 false이며, 그 외(확정 후·다른 PAUSED 경로·이 필드를 모르는 기존 세션)는 true다.
+  // 프런트는 phase==='PAUSED' && pauseSettled===false 구간에 '이어서 분석' 대신 "처리 중" 안내를 띄운다.
+  private boolean pauseSettled = true;
+
   // 완료 시 추가 정보
   private String avgTimePerFile;
   private String finalSummary;
@@ -68,6 +73,9 @@ public class AnalysisStatusDto {
 
   public String getFailoverModelKey() { return failoverModelKey; }
   public void setFailoverModelKey(String failoverModelKey) { this.failoverModelKey = failoverModelKey; }
+
+  public boolean isPauseSettled() { return pauseSettled; }
+  public void setPauseSettled(boolean pauseSettled) { this.pauseSettled = pauseSettled; }
 
   public String getAvgTimePerFile() { return avgTimePerFile; }
   public void setAvgTimePerFile(String avgTimePerFile) { this.avgTimePerFile = avgTimePerFile; }

@@ -29,6 +29,10 @@ let currentSessionId = null;
 let pollingIntervalId = null;   // SSE 대신 폴링 인터벌
 let isAnalysisPaused = false;
 let isPausedLocally = false;
+// (REQ-002, 2026-09) 폴링 응답(/api/analysis/status)의 pauseSettled. false = 사용자 일시정지 요청은 됐지만
+// 서버가 아직 pendingFilePaths를 확정하기 전(이 구간에 재개를 누르면 "재개할 파일이 없습니다"가 뜬다).
+// 응답에 필드가 없으면(구버전) true로 읽어 기존 동작(재개 버튼 노출)을 유지한다.
+let lastPolledPauseSettled = true;
 let isAnalysisComplete = false;
 let currentHistoryId = null;    // 완료된 분석의 DB historyId (PPT 다운로드용)
 // 크레딧소진 failover 컨펌 모달(Phase 5, 2026-08-25)이 폴링 tick(2초)마다 중복으로 뜨는 것을 막는 가드.
@@ -678,16 +682,14 @@ async function initLlmProviderConfig() {
       if (dbLocalModels.length === 0) {
         // 이론상 도달하기 어렵다(hasActiveLocalModel()이 true여야 provider === 'local'이 온다) —
         // 목록 조회 실패까지 포함한 방어적 처리.
-        select.innerHTML = '<option value="" selected>등록된 로컬 모델 없음</option>';
-        select.disabled = true;
-        if (hint) hint.textContent = '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.';
+        showLocalModelsUnavailable('NONE_REGISTERED');
       } else {
         // REQ-002: DB 등록 목록을 Ollama에 실제 설치된 모델로 한 번 더 거른다.
-        const { models: candidates, filtered } = await filterInstalledLocalModels(dbLocalModels);
+        // REQ-005(2026-09, A안): 확인 불가(available=false)여도 DB 목록을 그대로 노출하지 않고 차단한다 —
+        // 원인(설치 0건 / 확인 불가)에 따라 안내 문구만 달라진다.
+        const { models: candidates, available } = await filterInstalledLocalModels(dbLocalModels);
         if (candidates.length === 0) {
-          select.innerHTML = '<option value="" selected>설치된 로컬 모델 없음</option>';
-          select.disabled = true;
-          if (hint) hint.textContent = 'Ollama에 실제 설치된 모델이 없습니다 — 관리자에게 문의하세요.';
+          showLocalModelsUnavailable(available ? 'NONE_INSTALLED' : 'DISCOVERY_UNAVAILABLE');
         } else if (candidates.length === 1) {
           // 회귀 방지: 기존 고정 표시 UX(옵션 텍스트 포맷 포함)를 그대로 유지한다.
           const only = candidates[0];
@@ -703,11 +705,7 @@ async function initLlmProviderConfig() {
           // 2개 이상이면 드롭다운으로 전환(REQ-001 신규). populateModelSelectOptions()가
           // textContent 기반 XSS 안전 삽입 + disabled 해제를 담당한다.
           populateModelSelectOptions(candidates);
-          if (hint) {
-            hint.textContent = filtered
-              ? '자체 호스팅 LLM · 과금 없음'
-              : '자체 호스팅 LLM · 과금 없음 (설치 여부 확인 불가 — 표시된 모델이 실제로 없을 수 있습니다)';
-          }
+          if (hint) hint.textContent = '자체 호스팅 LLM · 과금 없음';
         }
       }
     } else if (select) {
@@ -796,19 +794,65 @@ async function fetchLocalInstalledModelKeys() {
 
 /**
  * DB 활성 LOCAL 모델 목록(dbModels, provider=LOCAL로 이미 필터링된 상태)을 discovery 결과로 다시
- * 거른다 (REQ-002). discovery 조회 자체가 불가능하면(available=false) "확인 불가" 취지로 DB 목록을
- * 그대로 반환하되 filtered=false로 표시해 호출부가 경고 문구를 붙일 수 있게 한다.
+ * 거른다 (REQ-002). 이 함수가 "미설치 로컬 모델 선택 차단"의 단일 출처이며, #modelSelect에 LOCAL
+ * 항목을 채우는 경로 전부(토글 local 탭 / local 단독 배포 / anthropic 단독 화면)가 이 함수를 탄다.
+ *
+ * REQ-005(2026-09, 게이트1 ⑤ A안): discovery 조회가 불가능하면(available=false) 예전에는 "확인 불가"
+ * 취지로 DB 목록을 그대로 돌려줘 미설치 모델까지 선택 가능했지만, 이제는 빈 목록을 돌려줘 선택 자체를
+ * 막는다. 그 대가로 Ollama 일시 장애 시 설치된 모델로도 시작할 수 없게 되는 가용성 회귀는 사람이
+ * 인지하고 감수한 결정이다(03-gate1-decision-v1 §⑤) — 여기서 조건부로 완화하지 않는다.
+ * 호출부는 available로 "설치 0건"과 "확인 불가"를 구분해 안내 문구만 달리한다.
  *
  * @param {Array<{modelKey: string, displayName: string}>} dbModels - DB 활성 LOCAL 모델 목록
- * @returns {Promise<{models: Array, filtered: boolean}>}
+ * @returns {Promise<{models: Array, available: boolean}>} models = 설치 확인된 항목(원 순서 보존),
+ *          available = discovery 조회 성공 여부(입력이 비어 조회를 생략한 경우 true)
  */
 async function filterInstalledLocalModels(dbModels) {
-  if (!dbModels || dbModels.length === 0) return { models: [], filtered: true };
+  if (!dbModels || dbModels.length === 0) return { models: [], available: true };
   const { available, models: installedKeys } = await fetchLocalInstalledModelKeys();
   if (!available) {
-    return { models: dbModels, filtered: false };
+    return { models: [], available: false };
   }
-  return { models: dbModels.filter(m => installedKeys.includes(m.modelKey)), filtered: true };
+  return { models: dbModels.filter(m => installedKeys.includes(m.modelKey)), available: true };
+}
+
+// 로컬 모델을 하나도 고를 수 없는 상태의 원인별 표시 문구. option 텍스트와 안내(hint) 문구를 한 곳에
+// 두어 이 상태를 그리는 세 경로(local 단독 분기 / 토글 local 탭 / anthropic 단독 화면)가 갈라지지 않게 한다.
+// 고정 문자열이라 innerHTML 조립에 사용자 입력이 섞이지 않는다.
+const LOCAL_MODELS_UNAVAILABLE_MESSAGES = {
+  // DB에 활성 LOCAL 모델이 등록돼 있지 않다
+  NONE_REGISTERED: {
+    option: '등록된 로컬 모델 없음',
+    hint: '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.'
+  },
+  // 등록은 있으나 discovery 결과 Ollama에 실제 설치된 것이 하나도 없다
+  NONE_INSTALLED: {
+    option: '설치된 로컬 모델 없음',
+    hint: 'Ollama에 실제 설치된 모델이 없습니다 — 관리자에게 문의하세요.'
+  },
+  // discovery 조회 자체가 실패해 설치 여부를 확인하지 못했다(REQ-005 A안: 확인 불가도 차단)
+  DISCOVERY_UNAVAILABLE: {
+    option: '로컬 모델 설치 여부 확인 불가',
+    hint: 'Ollama에 설치된 모델을 확인할 수 없습니다 — Ollama 실행 상태를 확인한 뒤 새로고침하거나 관리자에게 문의하세요.'
+  }
+};
+
+/**
+ * 로컬 모델을 하나도 선택할 수 없는 상태를 #modelSelect에 표시한다 (REQ-002 / REQ-005).
+ * 계약: `<option value="" selected>` 1개 + `select.disabled = true` → isModelSelectUnavailable()이 true를
+ * 반환해 분석 시작이 막힌다. 원인에 따라 문구만 달라지고 이 계약은 동일하다.
+ *
+ * @param {'NONE_REGISTERED'|'NONE_INSTALLED'|'DISCOVERY_UNAVAILABLE'} reason - 0건이 된 원인
+ */
+function showLocalModelsUnavailable(reason) {
+  const select = document.getElementById('modelSelect');
+  const hint = document.getElementById('modelSelectHint');
+  const message = LOCAL_MODELS_UNAVAILABLE_MESSAGES[reason] || LOCAL_MODELS_UNAVAILABLE_MESSAGES.NONE_INSTALLED;
+  if (select) {
+    select.innerHTML = `<option value="" selected>${message.option}</option>`;
+    select.disabled = true;
+  }
+  if (hint) hint.textContent = message.hint;
 }
 
 /**
@@ -839,46 +883,29 @@ async function loadModelOptionsForProvider(provider) {
   // REQ-002(2026-09): LOCAL을 고른 경우에만 DB 등록 목록을 "실제 설치된 모델"로 한 번 더 거른다.
   // 토글이 있는 배포(anthropic+local)에서도 토글 없는 배포(initLlmProviderConfig의 local 분기)와
   // 동일한 필터가 적용되게 하기 위한 것이다. ANTHROPIC 경로는 이 블록에 들어오지 않으므로 영향 없음.
+  // REQ-005(2026-09, A안): 확인 불가(available=false)여도 DB 목록을 노출하지 않는다 — 아래 0건 분기로 떨어진다.
   const hadDbLocalModels = models.length > 0;
-  let localDiscoveryFiltered = true;
+  let localDiscoveryAvailable = true;
   if (hadDbLocalModels && target === 'LOCAL') {
-    const { models: candidates, filtered } = await filterInstalledLocalModels(models);
+    const { models: candidates, available } = await filterInstalledLocalModels(models);
     models = candidates;
-    localDiscoveryFiltered = filtered;
+    localDiscoveryAvailable = available;
   }
 
   if (models.length > 0) {
     populateModelSelectOptions(models);
-    if (hint) {
-      if (target !== 'LOCAL') {
-        hint.textContent = '입력/출력 토큰 기준';
-      } else {
-        // 확인 불가(discovery 실패)면 DB 목록을 그대로 노출하되 경고 문구를 부기한다.
-        hint.textContent = localDiscoveryFiltered
-          ? '자체 호스팅 LLM · 과금 없음'
-          : '자체 호스팅 LLM · 과금 없음 (설치 여부 확인 불가 — 표시된 모델이 실제로 없을 수 있습니다)';
-      }
-    }
+    if (hint) hint.textContent = target !== 'LOCAL' ? '입력/출력 토큰 기준' : '자체 호스팅 LLM · 과금 없음';
     return;
   }
 
   // 필터 결과가 0건인 경우의 폴백. anthropic은 기존과 동일하게 하드코딩 3종으로 되돌리고,
   // local은 폴백할 값 자체가 없으므로(모델명은 배포마다 다름) 안내 문구 + 비활성화로 처리한다.
-  // 0건 사유가 "DB에 등록 자체가 없음"인지 "등록은 있으나 실제 설치된 게 없음(REQ-002 필터)"인지에
-  // 따라 문구를 나눠, initLlmProviderConfig()의 local 단독 분기와 동일한 안내를 보여준다.
+  // 0건 사유가 "DB에 등록 자체가 없음" / "등록은 있으나 실제 설치된 게 없음(REQ-002 필터)" /
+  // "설치 여부를 확인하지 못함(REQ-005, discovery 실패)" 중 어느 것인지에 따라 문구를 나눠,
+  // initLlmProviderConfig()의 local 단독 분기·loadAnthropicModelOptions()와 동일한 안내를 보여준다.
   if (target === 'LOCAL') {
-    const noneInstalled = hadDbLocalModels;
-    if (select) {
-      select.innerHTML = noneInstalled
-        ? '<option value="" selected>설치된 로컬 모델 없음</option>'
-        : '<option value="" selected>등록된 로컬 모델 없음</option>';
-      select.disabled = true;
-    }
-    if (hint) {
-      hint.textContent = noneInstalled
-        ? 'Ollama에 실제 설치된 모델이 없습니다 — 관리자에게 문의하세요.'
-        : '등록된 로컬 모델이 없습니다 — 관리자에게 문의하세요.';
-    }
+    showLocalModelsUnavailable(
+      !hadDbLocalModels ? 'NONE_REGISTERED' : (localDiscoveryAvailable ? 'NONE_INSTALLED' : 'DISCOVERY_UNAVAILABLE'));
   } else {
     populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
     if (hint) hint.textContent = '입력/출력 토큰 기준';
@@ -915,6 +942,13 @@ function getModelUnavailableAlertMessage() {
  * anthropic(기본) 모드에서 GET /api/config/llm-models를 조회해 AI 모델 드롭다운을 채운다.
  * 관리자가 DB(llm_model_options)에 등록한 활성 모델을 displayOrder 순으로 그대로 반영한다.
  * 조회 실패/빈 목록이면 기존에 하드코딩돼 있던 3개 모델(FALLBACK_MODEL_OPTIONS)로 대체한다.
+ *
+ * REQ-005(2026-09, A안): 서버는 provider와 무관하게 활성 목록 전체를 내려주므로(MainApiController
+ * Javadoc 참고) 이 경로에도 LOCAL 항목이 섞여 온다. LOCAL 항목만 filterInstalledLocalModels()에 통과시켜
+ * 미설치·확인 불가 항목을 걸러내고, 비-LOCAL(ANTHROPIC) 항목은 개수·문면·순서 그대로 둔다.
+ * 필터로 LOCAL이 전멸했고 비-LOCAL도 없어 0건이 되면 FALLBACK_MODEL_OPTIONS로 떨어뜨리지 않는다 — 그 배포에서
+ * 동작할 수 없는 Claude 3종을 선택 가능하게 만드는 새 구멍이 되기 때문이다. 대신 local 경로와 동일한 차단
+ * 표시를 한다. HTTP 실패·빈 응답·예외에 의한 0건은 종전대로 FALLBACK_MODEL_OPTIONS다.
  */
 async function loadAnthropicModelOptions() {
   try {
@@ -925,7 +959,23 @@ async function loadAnthropicModelOptions() {
       return;
     }
     const models = await resp.json();
-    populateModelSelectOptions(models && models.length > 0 ? models : FALLBACK_MODEL_OPTIONS);
+    if (!Array.isArray(models) || models.length === 0) {
+      populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
+      return;
+    }
+    // LOCAL 판정식은 loadModelOptionsForProvider()/initLlmProviderConfig()와 동일 — provider 필드가 없는
+    // 항목(구버전 응답)은 LOCAL이 아닌 것으로 취급해 Claude 항목이 사라지는 회귀를 막는다.
+    const isLocalModel = m => String(m.provider || '').toUpperCase() === 'LOCAL';
+    const { models: installedLocalModels, available } = await filterInstalledLocalModels(models.filter(isLocalModel));
+    const installedLocalKeys = new Set(installedLocalModels.map(m => m.modelKey));
+    // 원 배열에 대한 단일 filter — 비-LOCAL은 전부 통과, LOCAL은 설치 확인된 것만 통과, displayOrder 순서 보존.
+    const candidates = models.filter(m => !isLocalModel(m) || installedLocalKeys.has(m.modelKey));
+    if (candidates.length === 0) {
+      // 응답이 LOCAL만으로 구성돼 있었고 전부 걸러진 경우 — FALLBACK이 아니라 차단 표시.
+      showLocalModelsUnavailable(available ? 'NONE_INSTALLED' : 'DISCOVERY_UNAVAILABLE');
+      return;
+    }
+    populateModelSelectOptions(candidates);
   } catch (e) {
     console.warn('[LLM 모델 목록 조회 실패]', e);
     populateModelSelectOptions(FALLBACK_MODEL_OPTIONS);
@@ -1104,6 +1154,8 @@ function startPolling() {
   // 새 폴링 세션(신규 분석 시작 또는 이어서 분석/failover 컨펌 성공 후 재개) 시작마다
   // 컨펌 모달 가드를 초기화한다 — 이전 세션에서 이미 떴었다는 이유로 이번 세션에서 안 뜨면 안 된다.
   failoverModalShown = false;
+  // (REQ-002) 새 폴링 세션마다 일시정지 확정 여부도 초기화한다(이전 세션의 미확정 상태가 새 세션에 남지 않도록).
+  lastPolledPauseSettled = true;
 
   let lastLogCount = 0;
   pollingIntervalId = setInterval(async () => {
@@ -1116,6 +1168,12 @@ function startPolling() {
       const pollResp = await fetch(`/api/analysis/status/${currentSessionId}?logLines=100`);
       if (!pollResp.ok) return;
       const status = await pollResp.json();
+      // (REQ-002) 폴링으로 받은 일시정지 확정 여부가 바뀌면 인라인 재개 버튼(#resumeBtn) 노출을 다시 판정한다.
+      const polledPauseSettled = status.pauseSettled !== false;
+      if (polledPauseSettled !== lastPolledPauseSettled) {
+        lastPolledPauseSettled = polledPauseSettled;
+        updateSessionControlPanel();
+      }
       updateUiFromStatus(status, logConsole, progressPanel, lastLogCount);
       if (status.recentLogs) lastLogCount = status.recentLogs.length;
 
@@ -1234,6 +1292,12 @@ function handleAnalysisPaused(status) {
   if (logConsole) {
     appendTerminalLine(logConsole,
         `⏸️ [일시정지] 분석이 중단됐습니다.${status.errorMessage ? ' 사유: ' + status.errorMessage : ''} 분석 이력 화면에서 '이어서 분석' 버튼으로 재개하세요.`);
+  }
+
+  // (REQ-004, 2026-09) 전량실패로 자동 PAUSED된 경우에만 완료 패널을 연다(카운터는 정상 완료와 같은 한 벌로 채움).
+  // 사용자 일시정지·크레딧 소진 PAUSED는 종전대로 패널을 열지 않는다. 파일 배지("대기중")는 건드리지 않는다.
+  if (isAllFailedPause(status)) {
+    showAllFailedPausedResult(status);
   }
 
   setLocalPathControlsDisabled(false);
@@ -1443,10 +1507,61 @@ function formatReadmePathForDisplay(readmePath) {
 }
 
 // 완료 결과 패널 렌더링 (HTML에 이미 있는 패널에 데이터만 채움)
+// (REQ-004, 2026-09) 정상 완료(COMPLETED/FAILED) 전용 진입점. 카운터·수치를 채우는 코드는
+// fillCompletionResultPanel() 한 벌뿐이고(게이트1 ⑫ — 두 벌 금지), 전량실패 PAUSED도 같은 함수를 공유한다.
+// 이 함수는 "제목/안내를 정상 완료 모드로 두고 패널을 연다"는 것만 담당한다.
 function showCompletionResult(data) {
   const panel = document.getElementById('completionResultPanel');
   if (!panel) return;
 
+  fillCompletionResultPanel(data);
+  // 직전 실행이 전량실패 PAUSED였다면 그 제목/안내가 남아 있으므로 정상 완료 모드로 되돌린다.
+  setCompletionPanelMode(false);
+
+  panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// (REQ-004, 2026-09) 전량실패로 자동 PAUSED된 경우의 완료 패널 진입점.
+// 서버(runAnalysis의 전량실패 분기)는 successCount/alreadyCount/failedCount를 정확히 내려주는데, 종전
+// handleAnalysisPaused()는 패널을 채우지 않아 카운터 3종이 빈 문자열로 남았다. 카운터는 정상 완료와 같은
+// fillCompletionResultPanel()로 채우고, 제목/안내만 PAUSED 전용으로 바꾼다(정상 완료로 오인하지 않게).
+function showAllFailedPausedResult(status) {
+  const panel = document.getElementById('completionResultPanel');
+  if (!panel) return;
+
+  fillCompletionResultPanel(status);
+  setCompletionPanelMode(true);
+
+  panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// (REQ-004) 전량실패 PAUSED 판별 — 서버 runAnalysis()의 전량실패 분기와 같은 식
+// (successCount == 0 && alreadyProcessedCount == 0 && failureCount > 0). 그 외 PAUSED(사용자 일시정지,
+// 크레딧 소진)는 현행 안내를 유지해야 하므로 여기서 true가 되면 안 된다.
+function isAllFailedPause(status) {
+  if (!status) return false;
+  const successCount = status.successCount || 0;
+  const alreadyCount = status.alreadyCount || 0;
+  const failedCount = status.failedCount || 0;
+  return successCount === 0 && alreadyCount === 0 && failedCount > 0;
+}
+
+// (REQ-004) 완료 패널의 제목/안내 영역만 모드에 따라 바꾼다. 카운터에는 손대지 않는다.
+// allFailedPaused=true: 제목을 일시정지 문면으로, #cr_allFailedNotice 표시 / false: 정상 완료 제목, 안내 숨김.
+const COMPLETION_TITLE_NORMAL = '✅ 분석 완료 결과';
+const COMPLETION_TITLE_ALL_FAILED_PAUSED = '⏸️ 분석 일시정지 — 전체 파일 처리 실패';
+function setCompletionPanelMode(allFailedPaused) {
+  const title = document.getElementById('cr_title');
+  if (title) title.textContent = allFailedPaused ? COMPLETION_TITLE_ALL_FAILED_PAUSED : COMPLETION_TITLE_NORMAL;
+  const notice = document.getElementById('cr_allFailedNotice');
+  if (notice) notice.style.display = allFailedPaused ? 'block' : 'none';
+}
+
+// 완료 패널의 수치(카운터 3종 성공/이미처리/실패 포함)를 채운다 — 카운터 3종에 값을 대입하는 유일한 지점.
+// 정상 완료(showCompletionResult)와 전량실패 PAUSED(showAllFailedPausedResult)가 함께 쓴다.
+function fillCompletionResultPanel(data) {
   // PPT 다운로드를 위해 historyId 전역 저장
   currentHistoryId = data.historyId || null;
 
@@ -1479,9 +1594,6 @@ function showCompletionResult(data) {
   document.getElementById('cr_avgTime').textContent = avgTime;
   document.getElementById('cr_readme').textContent = readmePath;
   document.getElementById('cr_readmeContent').textContent = readmeContent;
-
-  panel.style.display = 'block';
-  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 /**
@@ -2064,15 +2176,24 @@ function updateSessionControlPanel() {
   const panel = document.getElementById('sessionControlPanel');
   const sessionIdDisplay = document.getElementById('sessionIdDisplay');
   const resumeBtn = document.getElementById('resumeBtn');
+  const settlingNotice = document.getElementById('pauseSettlingNotice');
 
   if (currentSessionId) {
     panel.style.display = 'flex';
     if (sessionIdDisplay) sessionIdDisplay.textContent = "분석 중";
-    if (resumeBtn) resumeBtn.style.display = isPausedLocally ? 'inline-block' : 'none';
+    // (REQ-002) 재개 버튼은 "로컬에서 일시정지함" AND "서버가 일시정지를 확정함(pauseSettled)"일 때만 보인다.
+    // 미확정 구간(isPausedLocally && !lastPolledPauseSettled)에는 같은 자리에 "일시정지 처리 중입니다" 안내를 띄운다.
+    // 이 패널은 폴링이 phase==='PAUSED'를 보는 즉시 handleAnalysisPaused()가 통째로 숨기므로(게이트1 ④, 범위 밖)
+    // 여기서 책임지는 것은 "미확정 구간에 버튼이 뜨지 않는다"까지다.
+    const showResume = isPausedLocally && lastPolledPauseSettled;
+    const showSettling = isPausedLocally && !lastPolledPauseSettled;
+    if (resumeBtn) resumeBtn.style.display = showResume ? 'inline-block' : 'none';
+    if (settlingNotice) settlingNotice.style.display = showSettling ? 'inline-block' : 'none';
     const pauseBtn = document.querySelector("button[onclick='pauseAnalysis()']");
     if (pauseBtn) pauseBtn.style.display = isPausedLocally ? 'none' : 'inline-block';
   } else {
     panel.style.display = 'none';
+    if (settlingNotice) settlingNotice.style.display = 'none';
   }
 }
 
@@ -2090,6 +2211,10 @@ function pauseAnalysis() {
   .then(data => {
     if (data.success) {
       isPausedLocally = true;
+      // (REQ-002) /api/session/pause 성공 = 서버 pauseSession()이 pauseSettled=false를 막 기록한 시점이다.
+      // 다음 폴링(최대 2초 뒤)이 같은 값을 내려주기 전까지 직전 폴링값(true)이 남아 재개 버튼이 잠깐 보이는
+      // 틈을 막기 위해 여기서 미확정으로 내린다. 이후 값은 폴링 응답이 갱신한다(폴링 밖에서 true로 올리지 않는다).
+      lastPolledPauseSettled = false;
       const logConsole = document.getElementById('terminalLog');
       const div = document.createElement('div');
       div.textContent = "[일시 중지] 분석이 일시 중지되었습니다.";

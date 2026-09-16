@@ -299,8 +299,32 @@ public class MainApiController {
     Long userSeq = user.getSeq();
     String userLoginId = user.getUserId();
 
-    String sourcePath = request.getOrDefault("sourcePath", "").replace("\\", "/");
-    String outputPath = request.getOrDefault("outputPath", "").replace("\\", "/");
+    // 입력값 정규화(REQ-009, 2026-09): sourcePath/outputPath 양쪽 모두 읽기 직후에 trim한다.
+    // - 왜 "저장 직전"이 아니라 "읽기 직후"인가: 아래 setModel(Path.of(sourcePath)) / isBlank 검사 /
+    //   new File(sourcePath) / createSession(...)이 세션 저장보다 먼저 이 값을 소비한다. 저장 직전에만
+    //   정규화하면 그 사이 소비자들은 후행 공백이 붙은 원문을 그대로 받는다.
+    // - 읽기 측 trim(isCopyModeOutput / resolveUserOutputRoot / resolveProjectOutputRoot /
+    //   runAnalysis / runAnalysisResume)은 제거하지 않는다. 이 변경은 그 방어의 "대체"가 아니라 "예방"이다.
+    // - 이미 저장된 세션 값의 소급 정규화는 하지 않는다(기동 시 보정·마이그레이션 없음).
+    // - trim을 구분자 치환보다 먼저 두는 이유: 치환은 공백에 영향이 없으므로 순서가 결과를 바꾸지 않지만,
+    //   "원문 → trim → 치환"이 읽기에 자연스럽다.
+    String sourcePath = request.getOrDefault("sourcePath", "").trim().replace("\\", "/");
+    String outputPath = request.getOrDefault("outputPath", "").trim().replace("\\", "/");
+
+    // 진입 가드(REQ-006 2단계, 2026-09, TASK-004): 정규화 직후 sourcePath가 Path로 파싱 가능한지만 검사한다.
+    // - 왜 여기인가: 아래 setModel(Path.of(sourcePath).toString(), ...)은 어떤 try에도 감싸여 있지 않고
+    //   이 프로젝트에는 @ControllerAdvice가 없어, 파싱 불가 문자열(Windows 파서 기준 '|' 등 금지문자)이 오면
+    //   InvalidPathException이 컨트롤러 밖으로 그대로 전파돼 응답 자체가 만들어지지 않았다
+    //   (TASK-003 하네스 R4가 재현 — 첫 컨트롤러 프레임이 바로 그 setModel 줄이었다).
+    // - trim 뒤의 값을 검사한다: REQ-009(위 두 줄)로 하류가 실제 파싱하는 문자열은 trim된 값이므로
+    //   "검사 대상 = 파싱 대상"이 성립한다. isParsablePath()는 검사만 하고 값을 바꾸지 않는다.
+    // - 빈 문자열은 Path.of("")가 파싱되므로 여기서 걸리지 않고, 아래 "원본 소스 경로가 필요합니다." 검사가 그대로 맡는다.
+    // - 문구는 아래 존재 검사와 같은 기존 문구를 재사용한다(새 문구를 늘리지 않는다).
+    if (!isParsablePath(sourcePath)) {
+      result.put("error", "올바르지 않은 원본 소스 경로입니다.");
+      return result;
+    }
+
     String clientSessionId = request.getOrDefault("sessionId", "");
     String selectedModel = request.getOrDefault("model", "").trim();
     String requirements = request.getOrDefault("requirements", "").trim();
@@ -680,6 +704,8 @@ public class MainApiController {
     dto.setAlreadyCount(session.getStatistics().getSkipCount());
     dto.setRecentLogs(session.getRecentLogLines(logLines));
     dto.setLoginId(loginId);
+    // (REQ-002) 일시정지 확정 여부 — NULL/true는 확정으로 읽힌다(SessionState.hasSettledPause()).
+    dto.setPauseSettled(session.hasSettledPause());
 
     // PAUSED(사용자 일시정지 또는 크레딧 소진 등)도 폴링을 멈춰야 하는 종료 상태다.
     // 여기 빠져있으면 서버는 이미 멈췄는데 화면은 계속 "처리 중" 스피너를 돌리게 된다.
@@ -981,6 +1007,15 @@ public class MainApiController {
   // 파일 상태 조회 (1단계 - 기존 유지)
   // ===================================================================
 
+  /**
+   * 파일시스템 루트(드라이브 루트·{@code /})를 원본 경로로 지정했을 때의 전용 거부 문구(REQ-008, 2026-09).
+   * 기존 두 문구("올바르지 않은 원본 디렉터리 경로입니다." / "올바르지 않은 출력 디렉터리 경로입니다.")와
+   * 문자열이 겹치지 않는다 — 어느 검사에서 걸렸는지 응답만으로 구분되게 한다. 계약 테스트가 이 상수를
+   * 문자 단위로 대조하므로 문면을 바꾸면 테스트도 함께 바꾼다.
+   */
+  private static final String ROOT_SOURCE_PATH_ERROR =
+      "최상위 경로(드라이브 루트)는 분석 대상으로 지정할 수 없습니다. 하위 프로젝트 폴더를 지정해 주세요.";
+
   @PostMapping("/api/dashboard-status")
   @ResponseBody
   public Map<String, Object> getDashboardStatus(@RequestBody Map<String, String> request,
@@ -1032,6 +1067,24 @@ public class MainApiController {
     // getFileName()이 null이라 NPE)가 남는다. 이 프로젝트에는 전역 예외 처리기가 없어 그 예외는
     // 응답 없이 그대로 빠져나간다(HTTP 500). 아래 catch (Exception e)가 흡수하게 한다.
     try {
+      // 루트 경로 조기 거부(REQ-008, 2026-09): 드라이브 루트("C:/", "/")는 File 존재 검사도 파싱 검사도 통과한다
+      // (직전 사이클 R6 실측). 이 가드가 여기에 있는 이유 세 가지:
+      //  ① 왜 try 안인가 — 요청 파라미터를 파싱하는 코드(Path.of(folderPathStr) 포함)는 기존 catch (Exception e)의
+      //     보호 범위 안에 둔다(직전 사이클 게이트1 ⑧(a)). 이 프로젝트에는 전역 예외 처리기가 없어 try 밖에서 던지면
+      //     응답 없이 HTTP 500이 된다. MainApiControllerDashboardStatusTryScopeSingleSourceTest가 이 위치를
+      //     소스 텍스트로 감시한다(토큰의 첫 출현이 try 안이어야 한다).
+      //  ② 왜 resolve*()·Files.walk()보다 앞인가 — copy 모드면 resolveProjectOutputRoot()의
+      //     getFileName().toString()이 NPE, 비-copy 모드면 Files.walk(루트)가 드라이브 전체를 순회한다.
+      //     어느 쪽도 사용자가 의도한 요청이 아니므로 둘 다 도달하기 전에 전용 문구로 거부한다.
+      //  ③ 왜 구분자 정규화 이후 값을 검사하는가 — 검사 대상 = 하류 파싱 대상. 위 replace("\\","/")를 거친
+      //     folderPathStr이 바로 아래 resolve*()와 Files.walk()가 실제로 파싱하는 값이다. trim은 하지 않는다
+      //     (하류도 trim하지 않으므로 검사 대상과 파싱 대상이 같아야 "가드는 통과했는데 뒤에서 터지는" 구멍이 없다).
+      Path folderPath = Path.of(folderPathStr);
+      if (folderPath.getFileName() == null) {
+        resultData.put("error", ROOT_SOURCE_PATH_ERROR);
+        return resultData;
+      }
+
       // 계정별 출력 경로의 산식은 공용 헬퍼가 단일 출처다 — 이 메서드는 산식을 따로 갖지 않고 위임한다.
       // (과거 이 자리에 인라인 사본이 있었고, 거기엔 outputPath.trim()과 구분자 정규화가 빠져 있어
       //  실제 저장 위치와 어긋났다. 완료 판정이 절대경로 문자열 비교라 한 글자만 달라도 전부 미완료가 된다.)
@@ -1040,8 +1093,6 @@ public class MainApiController {
           && authentication.getPrincipal() instanceof User u) ? u.getUserId() : null;
       String userOutputPathStr = resolveUserOutputRoot(folderPathStr, outputPathStr, requestUsername);
       Path outputRootPath = resolveProjectOutputRoot(folderPathStr, outputPathStr, requestUsername);
-
-      Path folderPath = Path.of(folderPathStr);
 
       try (Stream<Path> stream = Files.walk(folderPath)) {
         List<Path> fileList = stream
@@ -1130,6 +1181,12 @@ public class MainApiController {
     session.setPausedAt(LocalDateTime.now());
     session.setCurrentPhase("PAUSED");
     session.setStatus("PAUSED");
+    // (REQ-002) 사용자 일시정지 요청 시점 = "아직 멈추는 중". pauseSettled를 false로 내리는 곳은 여기 한 곳뿐이며,
+    // 처리 루프의 pauseDetected 블록이 pendingFilePaths를 확정한 직후 true로 되돌린다. 목록 API
+    // (GET /api/my/analysis-history)는 이 값을 DB(SessionRepository)에서 읽으므로 여기서 바로 저장해 둔다 —
+    // 저장하지 않으면 확정 전 구간에 DB 행이 여전히 NULL(=확정)로 읽혀 이 신호가 프런트에 전달되지 않는다.
+    session.setPauseSettled(Boolean.FALSE);
+    sessionManager.saveSessionState(session);
 
     // AnalysisHistory("내 분석 이력" 목록에 표시되는 값)도 즉시 갱신한다. 실제 파일 처리 루프는
     // 이미 진행 중이던 파일들(스레드풀 동시 처리분)이 다 끝나야 pauseDetected를 감지해 history를
@@ -1305,6 +1362,27 @@ public class MainApiController {
   // ===================================================================
 
   /**
+   * (REQ-002 / TASK-002B, work-order 2026-09-remaining-ux-fixes v4 §0.21.4) 처리 루프 <b>종단 정규화</b>.
+   *
+   * <p>불변식: {@code pauseSettled == FALSE}는 "사용자 일시정지 요청이 접수됐고 처리 루프가 아직 종단에 도달하지
+   * 않은 구간"에서만 유효하다. {@code runAnalysis()}/{@code runAnalysisResume()}가 어떤 경로(크레딧 소진·취소·
+   * 전량실패·정상 완료)로 끝나든, 종단에서 세션을 저장하기 직전에 이 메서드를 불러 FALSE가 남지 않게 한다.
+   * ({@code pauseDetected} 블록은 이미 pending 확정 직후 TRUE를 쓰므로 이 메서드를 부르지 않는다.)
+   *
+   * <p><b>조건부 승격만 한다(FALSE일 때만 TRUE)</b>. 무조건 TRUE로 쓰면 사용자 일시정지가 없던 단독 경로(크레딧
+   * 소진·전량실패·정상 완료)의 raw 값이 NULL에서 TRUE로 바뀌어 "NULL = 이 경로는 플래그를 쓰지 않는다"는 기존
+   * 관측(및 그 계약 테스트)이 깨진다. NULL은 그대로 두고 FALSE만 되돌린다.
+   *
+   * <p><b>범위 밖</b>: 확정 전 구간에 서버가 내려가 DB에 false가 잔존하는 경우(§0.21.3 (ii))는 이 보강이
+   * 다루지 않는다 — 기동 시 보정·일괄 UPDATE·마이그레이션은 §A.2 금지행이며, 게이트2에서 PM이 별도로 판단한다.
+   */
+  private void settlePauseAtTerminal(SessionState session) {
+    if (Boolean.FALSE.equals(session.getPauseSettled())) {
+      session.setPauseSettled(Boolean.TRUE);
+    }
+  }
+
+  /**
    * 크레딧 소진(INSUFFICIENT_CREDITS) 감지 시 공통 처리 — runAnalysis()/runAnalysisResume() 양쪽에서
    * 재사용한다. 관리자가 failover 대상(활성 LOCAL 모델, {@link LlmModelOptionService#getActiveFailoverTarget()})을
    * 지정해뒀으면 AWAITING_FAILOVER_CONFIRM 상태로 전이해 사용자의 "자체 LLM으로 진행하시겠습니까?"
@@ -1312,9 +1390,17 @@ public class MainApiController {
    * 폴백한다 — 관리자가 아직 failover 대상을 지정하지 않은 배포에서 이 흐름이 깨지지 않게 하기
    * 위함이다(근거: analyzer-plan
    * docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §4).
+   *
+   * <p>(REQ-002, 2026-09) 이 경로는 {@code pauseSettled}를 새로 내리지 않는다 — 루프가 끝난 뒤
+   * pendingFilePaths를 기록하며 PAUSED가 되므로 사용자 일시정지가 선행하지 않았다면 처음부터 "확정" 상태이고,
+   * 플래그의 기본값(NULL = 확정)이 그 의미를 그대로 표현한다. 사용자 일시정지(pauseSession)만 false를 거친다.
+   * 단 일시정지 요청이 <b>선행한</b> 뒤 같은 배치에서 크레딧이 소진되면 진입 시점 값이 이미 false이므로,
+   * 저장 전에 {@link #settlePauseAtTerminal(SessionState)}로 되돌린다(TASK-002B, work-order v4 §0.21.4).
    */
   private void handleCreditExhaustedPause(SessionState session, AnalysisHistory history,
       List<String> pendingPaths, int completedCount) {
+    // (TASK-002B) failover 있음/없음 두 하위 분기 모두 이 아래에서 saveSessionState()하므로 여기 한 곳에서 정규화한다.
+    settlePauseAtTerminal(session);
     session.setPendingFilePaths(pendingPaths);
     if (history != null) {
       history.setStatus("PAUSED");
@@ -1605,6 +1691,9 @@ public class MainApiController {
             .filter(p -> !completedFilePaths.contains(p))
             .collect(Collectors.toList());
         session.setPendingFilePaths(pendingPaths);
+        // (REQ-002) pendingFilePaths가 기록된 이 시점이 "일시정지 확정". 저장(saveSessionState) 전에 올려야
+        // 목록 API가 pending과 확정 신호를 같은 행에서 함께 본다.
+        session.setPauseSettled(Boolean.TRUE);
         if (history != null) {
           history.setStatus("PAUSED");
           history.setTotalFiles(session.getTotalFiles());
@@ -1625,6 +1714,8 @@ public class MainApiController {
       // (취소된 파일들은 성공도 실패도 아니라 카운트 자체가 없어 "전부 실패" 분기에도 안 걸림)
       // 여기서 명시적으로 CANCELLED로 마무리한다.
       if (session.isCancelled()) {
+        // (TASK-002B) 일시정지 직후 취소된 세션에 false가 고아로 남지 않게 한다(CANCELLED 행은 화면 증상은 없다).
+        settlePauseAtTerminal(session);
         if (history != null) {
           history.setStatus("CANCELLED");
           history.setTotalFiles(session.getTotalFiles());
@@ -1640,8 +1731,12 @@ public class MainApiController {
 
       // 전부 실패한 경우 - COMPLETED로 표시하면 정상 완료로 오인할 수 있으므로
       // 크레딧 소진과 동일하게 PAUSED로 저장해 '이어서 분석'으로 재시도할 수 있게 한다.
+      // (REQ-002) pauseSettled를 여기서 새로 내리지는 않는다 — 사용자 일시정지가 선행하지 않았다면 기본값(NULL = 확정)이
+      // 그대로 맞다. 다만 일시정지 요청이 "남은 미시작 태스크가 없는 시점"에 도착하면 pauseDetected가 서지 않아
+      // 이 분기로 오면서 false가 남으므로(TASK-002B, §0.21.3 (i-b)) 저장 전에 조건부로 되돌린다.
       if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
           && session.getStatistics().getFailureCount() > 0) {
+        settlePauseAtTerminal(session);
         List<String> pendingPaths = fileList.stream()
             .map(Path::toString)
             .filter(p -> !completedFilePaths.contains(p))
@@ -1666,6 +1761,9 @@ public class MainApiController {
       }
 
       // [4단계] 완료 처리
+      // (TASK-002B) 마지막 파일 처리 도중 일시정지가 왔지만 그 파일이 성공해 정상 완료로 흐르는 경우 —
+      // finalizeAnalysis() 안의 completeSession()이 저장하므로 그 전에 false를 되돌린다.
+      settlePauseAtTerminal(session);
       session.setCurrentPhase("FINALIZING");
       session.addRecentLog("[시스템] ✓ AI 분석 완료! 최종 보고서를 생성합니다.");
       String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
@@ -1871,6 +1969,10 @@ public class MainApiController {
             .filter(p -> !completedFilePaths.contains(p))
             .collect(Collectors.toList());
         session.setPendingFilePaths(newPending);
+        // (REQ-002) 재개 후 2회차 이후의 일시정지도 같은 규칙 — pending 기록 직후, 저장 전에 확정 신호를 올린다.
+        // (재개 시작 시 setPendingFilePaths(new ArrayList<>())가 "[]"를 미리 써두므로 "json이 null인가"로는
+        // 2회차 확정 여부를 판별할 수 없다 — 그래서 별도 플래그다.)
+        session.setPauseSettled(Boolean.TRUE);
         if (history != null) {
           history.setStatus("PAUSED");
           analysisHistoryRepository.save(history);
@@ -1884,6 +1986,8 @@ public class MainApiController {
 
       // 사용자가 취소한 경우 - 아래로 흘러가면 finalizeAnalysis()가 COMPLETED로 기록해버리므로 여기서 마무리한다.
       if (session.isCancelled()) {
+        // (TASK-002B) runAnalysis()의 취소 분기와 같은 이유 — 고아 false 방지.
+        settlePauseAtTerminal(session);
         if (history != null) {
           history.setStatus("CANCELLED");
           history.setTotalFiles(session.getTotalFiles());
@@ -1898,8 +2002,11 @@ public class MainApiController {
       }
 
       // 재개했는데 이번에도 전부 실패한 경우 - 다시 PAUSED로 저장해 재시도 가능하게 한다.
+      // (REQ-002) pauseSettled를 여기서 새로 내리지는 않는다 — 위 runAnalysis()의 전량실패 분기와 같은 이유로,
+      // 일시정지가 선행해 false인 채 이 분기로 온 경우만 저장 전에 조건부로 되돌린다(TASK-002B).
       if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
           && session.getStatistics().getFailureCount() > 0) {
+        settlePauseAtTerminal(session);
         List<String> newPending = fileList.stream()
             .map(Path::toString)
             .filter(p -> !completedFilePaths.contains(p))
@@ -1918,6 +2025,8 @@ public class MainApiController {
         return;
       }
 
+      // (TASK-002B) runAnalysis()의 정상 완료 경로와 같은 이유 — completeSession() 저장 전에 false를 되돌린다.
+      settlePauseAtTerminal(session);
       session.setCurrentPhase("FINALIZING");
       String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
       finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName, generateReadme,
@@ -2226,6 +2335,18 @@ public class MainApiController {
         pathStr.contains("/.venv/") || pathStr.contains("/venv/") ||
         pathStr.contains("/__pycache__/") || pathStr.contains("/.pytest_cache/") ||
         pathStr.contains("/.tox/") || pathStr.contains("/.mypy_cache/")) return false;
+
+    // 분석 완료 추적파일(TRACKER_FILE_NAME)은 파일명이 완전일치할 때만 제외한다 — 확장자 판정보다 앞.
+    // 왜 여기(단일 출처)인가: 이 메서드는 getDashboardStatus()(1단계 스캔), collectFileList()(runAnalysis()의
+    // 분석 대상 목록), appendJavaStructure(), appendFrontendStructure() 네 스캔 지점이 공유한다. 비-copy(원본
+    // 직접 수정) 모드에서는 출력 루트 == 소스 루트라 runAnalysis()가 만든 추적파일이 소스 루트 안에 놓이고,
+    // .txt가 지원 확장자라 스캔 목록에 1건 끼어들어 영구 대기(isCompleted=false)로 남는다. 응답 측에서만
+    // 걸러내면 collectFileList()가 재분석 시 추적파일 자체를 LLM에 실어 보내는 축이 그대로 남으므로,
+    // 스캔 지점 전부가 거치는 이 메서드 한 곳에서만 제외한다.
+    // 제외는 이름 완전일치 한 건뿐이다(추적파일은 항상 getTrackerFilePath()가 TRACKER_FILE_NAME 그대로
+    // 만든다). 일반 .txt는 여전히 분석 대상이고, "ai-analysis-done.txt"·"my.ai-analysis-done.txt"처럼
+    // 이름이 다른 파일은 제외되지 않는다.
+    if (TRACKER_FILE_NAME.equals(path.getFileName().toString())) return false;
 
     String name = path.getFileName().toString().toLowerCase();
     if (name.endsWith(".class") || name.endsWith(".jar") || name.endsWith(".war") ||

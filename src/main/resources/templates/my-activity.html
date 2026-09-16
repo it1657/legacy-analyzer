@@ -80,6 +80,9 @@
     .btn-ppt:hover { background: #d35400; }
     .btn-resume { background: #2980b9; color: white; }
     .btn-resume:hover { background: #1a6fa3; }
+    /* (REQ-002) 일시정지 미확정 구간 안내 — '이어서 분석' 버튼 자리에 대신 표시 */
+    .pause-settling { display: inline-block; padding: 0.35rem 0.7rem; font-size: 11px; border-radius: 4px; background: #fff3e0; color: #e67e22; }
+    .pause-settling-hint { display: block; margin-top: 0.25rem; font-size: 10px; color: #7f8c8d; }
     .btn-claudemd { background: #6c5ce7; color: white; }
     .btn-claudemd:hover { background: #5b4bd6; }
 
@@ -384,8 +387,17 @@
       let actionBtn = '-';
       if (h.status === 'COMPLETED') {
         actionBtn = `<button class="btn-sm btn-ppt" onclick="downloadProjectReport(${h.id})" title="프로젝트 구조 · 비즈니스 로직 분석 보고서">📋 보고서 PPT</button>`;
-      } else if (h.status === 'PAUSED' && h.sessionId) {
+      } else if (h.status === 'PAUSED' && h.sessionId && h.pauseSettled !== false) {
         actionBtn = `<button class="btn-sm btn-resume" onclick="resumeAnalysis('${h.sessionId}', ${h.id})" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
+      } else if (h.status === 'PAUSED' && h.sessionId) {
+        // (REQ-002, 2026-09) pauseSettled === false: 일시정지 요청은 됐지만 서버가 아직 pendingFilePaths를
+        // 확정하기 전이다. 이 구간에 재개를 누르면 "재개할 파일이 없습니다" alert이 뜨므로 버튼 대신 안내만 보인다.
+        // - 응답에 pauseSettled가 없으면(구버전 응답) 위 분기의 `!== false`가 기존 동작 그대로 버튼을 띄운다.
+        // - 목록 화면에 자동 폴링은 도입하지 않는다(확정까지 최대 6분 32초 실측 — 수동 새로고침 유도).
+        // - "새로 고치면 반드시 재개된다"고 단정하지 않는다 — 확정 전에 서버가 내려간 세션은 이 상태가 영구히 남을 수
+        //   있어(이번 사이클 범위 밖) 해소되지 않을 때의 대안(처음부터 새 분석)을 함께 안내한다. 자동 재개 호출도 없다.
+        // - admin/dashboard.html renderMyHistory()의 판정식·안내 문면과 문자 단위로 같아야 한다(한쪽만 고쳐 벌어진 이력 반복).
+        actionBtn = `<span class="pause-settling" title="서버가 진행 중이던 파일 처리를 마무리하고 있습니다.">⏸️ 일시정지 처리 중입니다</span><span class="pause-settling-hint">잠시 후 목록을 새로 고쳐 주세요. 확정되면 '이어서 분석' 버튼이 나타납니다. 시간이 지나도 나타나지 않으면 처음부터 새로 분석해 주세요.</span>`;
       }
       // CANCELLED/FAILED는 파일 분석이 실제로 진행되지 못했을 수 있어 다운로드할 의미 있는 결과물이
       // 없다 - CLAUDE.md는 파일 처리 시작 전(취소돼도 이미 저장됨)에 생성되므로 상태와 별개로

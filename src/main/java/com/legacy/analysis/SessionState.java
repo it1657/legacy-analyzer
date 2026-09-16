@@ -83,6 +83,20 @@ public class SessionState {
   @Column(name = "pending_file_paths_json", columnDefinition = "TEXT")
   private String pendingFilePathsJson;
 
+  // (REQ-002, 2026-09) 사용자 일시정지가 "확정"됐는지 — pendingFilePaths가 실제로 기록됐는지 — 를 나타내는 플래그.
+  // 일시정지 요청(pauseSession) 시점에 status/currentPhase는 즉시 PAUSED가 되지만, 스레드풀에서 이미
+  // 돌고 있던 파일들이 끝나 pauseDetected 블록이 pendingFilePaths를 저장하기 전까지는 '이어서 분석'을
+  // 눌러도 재개할 파일이 없다. 그 구간을 프런트에 알리기 위한 별도 신호이며, PAUSED 문자열 자체는 그대로
+  // 둔다(PAUSING 같은 중간 상태를 도입하면 shouldStop()의 중단 감지가 깨진다 — 게이트1 ③).
+  //   - false로 내리는 곳: MainApiController.pauseSession() 단 한 곳(사용자 일시정지 요청 시점)
+  //   - true로 올리는 곳: runAnalysis()/runAnalysisResume()의 pauseDetected 블록(setPendingFilePaths 직후)
+  //   - NULL/true = 확정(settled). 이 컬럼이 없던 시절의 기존 행(ddl-auto=update로 컬럼만 추가돼 NULL)과
+  //     사용자 일시정지가 아닌 다른 PAUSED 경로(전량실패·크레딧 소진)는 전부 "확정"으로 취급된다.
+  // primitive boolean이 아니라 wrapper인 이유: 기존 행이 NULL이라 primitive로 읽으면 예외가 난다.
+  @Column(name = "pause_settled")
+  @JsonProperty("pauseSettled")
+  private Boolean pauseSettled;
+
   // 재개 시 분석 스레드 재시작에 필요한 사용자명
   @Column(name = "username", length = 100)
   private String username;
@@ -91,14 +105,27 @@ public class SessionState {
   @Column(name = "requirements", columnDefinition = "TEXT")
   private String requirements;
 
+  // (TASK-002C, 2026-09) 아래 두 필드는 primitive boolean이 아니라 Boolean wrapper다 — 위 pauseSettled 주석과 같은 계열.
+  // force_active(ff504e9) / generate_readme(7333ea4)는 이미 행이 있는 analysis_sessions 테이블에 ddl-auto=update로
+  // 나중에 추가된 nullable 컬럼이라 옛 행이 NULL이다(2026-09-15 배포 DB 실측: generate_readme NULL 83/94,
+  // force_active NULL 11/94). Hibernate는 로드 시 모든 기본 필드를 하이드레이트하므로 primitive면 그 필드를 읽는
+  // 코드가 없어도 로드 자체가 "Null value was assigned to a property ... of primitive type"으로 실패한다
+  // (TASK-002가 연 findAllById 경로에서 목록 API 전체가 500 — v5 §0.22).
+  //   - NULL 해석 규칙은 하나다: "NULL은 그 필드의 Java 초기값으로 읽는다" → forceActive NULL=false, generateReadme NULL=true.
+  //     (generate_readme 컬럼이 없던 시절의 분석은 전부 README를 생성했고 7333ea4가 도입한 것은 '생략' 옵션이므로 true,
+  //      강제 재분석은 기본 비활성이 안전하므로 false — 방향이 서로 반대인 것이 규칙의 핵심이다.)
+  //   - 옛 행은 UPDATE·마이그레이션·기동 보정으로 소급 정규화하지 않는다(§A.2). 읽기 측 해석만 정한다.
+  //   - 접근자 isForceActive()/isGenerateReadme()는 계속 primitive boolean을 돌려준다(내부에서만 NULL 해석) →
+  //     호출부 diff 0줄, Jackson 출력에 null이 새지 않음. raw 값 getter(getForceActive 등)는 Jackson이 두 번째
+  //     프로퍼티로 인식하므로 추가하지 않는다(테스트의 raw 관측은 리플렉션/JPQL로 한다).
   // 강제 재분석 여부
   @Column(name = "force_active")
-  private boolean forceActive = false;
+  private Boolean forceActive = false;
 
   // 최종 보고서(README) 생성 여부 - 부분 선택 분석은 기본 생략(옵트인), 전체 분석은 기본 생성.
   // '이어서 분석'(재개) 시에도 최초 선택을 그대로 유지해야 하므로 forceActive와 동일하게 세션에 영속한다.
   @Column(name = "generate_readme")
-  private boolean generateReadme = true;
+  private Boolean generateReadme = true;
 
   // 크레딧소진 컨펌 대기 상태(AWAITING_FAILOVER_CONFIRM)에서 "예" 선택 시 전환할 자체 LLM 모델키.
   // 크레딧 소진을 감지한 시점에 관리자가 지정해둔 failover 대상(LlmModelOptionService.getActiveFailoverTarget())
@@ -339,6 +366,20 @@ public class SessionState {
     }
   }
 
+  // 원시값 접근자(Jackson 직렬화·테스트 관측용). 판정에는 아래 hasSettledPause()를 쓴다.
+  public Boolean getPauseSettled() { return pauseSettled; }
+  public void setPauseSettled(Boolean pauseSettled) { this.pauseSettled = pauseSettled; }
+
+  /**
+   * 일시정지 확정 여부 읽기 헬퍼 — <b>NULL/true = 확정(settled)</b>, false일 때만 "아직 멈추는 중".
+   * 기존 세션(컬럼 추가 전 행)과 pauseSession()을 거치지 않은 PAUSED 경로가 모두 확정으로 읽히도록
+   * 기본값을 true 쪽으로 둔다(기존 동작 보존이 기본값). 빈 접근자(get/is) 형태를 피한 이유는
+   * Jackson이 getPauseSettled()와 충돌하는 두 번째 프로퍼티로 인식하지 않게 하기 위함이다.
+   */
+  public boolean hasSettledPause() {
+    return !Boolean.FALSE.equals(pauseSettled);
+  }
+
   public java.util.Set<String> getPatchedFilePaths() { return patchedFilePaths; }
   public void setPatchedFilePaths(java.util.Set<String> set) { this.patchedFilePaths = set; }
 
@@ -362,9 +403,11 @@ public class SessionState {
   public void setUsername(String username) { this.username = username; }
   public String getRequirements() { return requirements; }
   public void setRequirements(String requirements) { this.requirements = requirements; }
-  public boolean isForceActive() { return forceActive; }
+  // (TASK-002C) NULL은 Java 초기값으로 읽는다 — forceActive NULL=false, generateReadme NULL=true(필드 선언부 주석 참조).
+  // 시그니처는 primitive 그대로 유지한다(호출부·Jackson 출력 불변).
+  public boolean isForceActive() { return Boolean.TRUE.equals(forceActive); }
   public void setForceActive(boolean forceActive) { this.forceActive = forceActive; }
-  public boolean isGenerateReadme() { return generateReadme; }
+  public boolean isGenerateReadme() { return !Boolean.FALSE.equals(generateReadme); }
   public void setGenerateReadme(boolean generateReadme) { this.generateReadme = generateReadme; }
 
   public String getFailoverModelKey() { return failoverModelKey; }

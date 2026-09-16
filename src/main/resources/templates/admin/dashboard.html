@@ -248,6 +248,23 @@
             background-color: #d35400;
         }
 
+        /* (REQ-002) 일시정지 미확정 구간 안내 — '이어서 분석' 버튼 자리에 대신 표시 */
+        .pause-settling {
+            display: inline-block;
+            padding: 3px 8px;
+            font-size: 11px;
+            border-radius: 4px;
+            background-color: #fff3e0;
+            color: #e67e22;
+        }
+
+        .pause-settling-hint {
+            display: block;
+            margin-top: 3px;
+            font-size: 10px;
+            color: #7f8c8d;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -1170,6 +1187,14 @@
                             title="이 분석 결과를 PPT로 다운로드">📊 PPT</button>`
                     : `<button class="btn-sm btn-ppt" disabled style="opacity:0.4; cursor:not-allowed;"
                             title="분석이 완료되지 않아 다운로드할 수 없습니다 (상태: ${h.status})">📊 PPT</button>`;
+                // 상세 보고서 PPT (REQ-001, 2026-09) — 활성화 조건은 위 요약 PPT 버튼과 동일(COMPLETED만).
+                // 상세 보고서는 readmeContent 파싱 기반이라 미완료 이력에서는 내용이 없다.
+                // 라벨 "📋 보고서 PPT"는 my-activity.html / "내 활동" 탭과 문자 단위로 동일하게 유지한다.
+                const reportBtn = h.status === 'COMPLETED'
+                    ? `<button class="btn-sm btn-ppt" onclick="downloadProjectReport(${h.id})"
+                            title="프로젝트 구조 · 비즈니스 로직 분석 보고서">📋 보고서 PPT</button>`
+                    : `<button class="btn-sm btn-ppt" disabled style="opacity:0.4; cursor:not-allowed;"
+                            title="분석이 완료되지 않아 상세 보고서를 만들 수 없습니다 (상태: ${h.status})">📋 보고서 PPT</button>`;
                 return `
                 <tr>
                     <td>${userLabel}</td>
@@ -1180,6 +1205,7 @@
                     <td>${timeSec}초</td>
                     <td>
                         ${pptBtn}
+                        ${reportBtn}
                         <button class="btn-sm btn-delete" onclick="deleteHistory(${h.id})"
                             title="이 이력 삭제">삭제</button>
                     </td>
@@ -1499,8 +1525,17 @@
                 let actionBtns = '-';
                 if (h.status === 'COMPLETED') {
                     actionBtns = `<button class="btn-sm btn-ppt" onclick="downloadMyPpt(${h.id})" style="font-size:11px;padding:3px 8px;">📋 보고서 PPT</button>`;
-                } else if (h.status === 'PAUSED' && h.sessionId) {
+                } else if (h.status === 'PAUSED' && h.sessionId && h.pauseSettled !== false) {
                     actionBtns = `<button class="btn-sm" onclick="resumeMyAnalysis('${h.sessionId}', ${h.id})" style="font-size:11px;padding:3px 8px;background:#2980b9;color:white;border:none;border-radius:4px;cursor:pointer;" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
+                } else if (h.status === 'PAUSED' && h.sessionId) {
+                    // (REQ-002, 2026-09) pauseSettled === false: 일시정지 요청은 됐지만 서버가 아직 pendingFilePaths를
+                    // 확정하기 전이다. 이 구간에 재개를 누르면 "재개할 파일이 없습니다" alert이 뜨므로 버튼 대신 안내만 보인다.
+                    // - 응답에 pauseSettled가 없으면(구버전 응답) 위 분기의 `!== false`가 기존 동작 그대로 버튼을 띄운다.
+                    // - 목록 화면에 자동 폴링은 도입하지 않는다(확정까지 최대 6분 32초 실측 — 수동 새로고침 유도).
+                    // - "새로 고치면 반드시 재개된다"고 단정하지 않는다 — 확정 전에 서버가 내려간 세션은 이 상태가 영구히 남을 수
+                    //   있어(이번 사이클 범위 밖) 해소되지 않을 때의 대안(처음부터 새 분석)을 함께 안내한다. 자동 재개 호출도 없다.
+                    // - my-activity.html renderHistory()의 판정식·안내 문면과 문자 단위로 같아야 한다(한쪽만 고쳐 벌어진 이력 반복).
+                    actionBtns = `<span class="pause-settling" title="서버가 진행 중이던 파일 처리를 마무리하고 있습니다.">⏸️ 일시정지 처리 중입니다</span><span class="pause-settling-hint">잠시 후 목록을 새로 고쳐 주세요. 확정되면 '이어서 분석' 버튼이 나타납니다. 시간이 지나도 나타나지 않으면 처음부터 새로 분석해 주세요.</span>`;
                 }
                 // CANCELLED/FAILED는 파일 분석이 실제로 진행되지 못했을 수 있어 다운로드할 의미 있는 결과물이
                 // 없다 - CLAUDE.md는 파일 처리 시작 전(취소돼도 이미 저장됨)에 생성되므로 상태와 별개로
@@ -2143,6 +2178,50 @@
             } catch (error) {
                 console.error('❌ PPT 다운로드 오류:', error);
                 alert('❌ PPT 다운로드 중 오류가 발생했습니다.');
+            }
+        }
+
+        // 분석 이력 ID 기반 상세 보고서 PPT 다운로드 (REQ-001, 2026-09)
+        // 위 downloadPresentation()의 fetch/blob/Authorization: Bearer 패턴을 그대로 따른다.
+        async function downloadProjectReport(historyId) {
+            try {
+                const token = localStorage.getItem('token');
+                if (!token) {
+                    alert('❌ 인증 토큰이 없습니다. 다시 로그인해주세요.');
+                    return;
+                }
+
+                const response = await fetch(`/api/admin/download/project-report/${historyId}`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (response.status === 404) {
+                    alert('❌ 해당 분석 이력을 찾을 수 없습니다.');
+                    return;
+                }
+                if (!response.ok) {
+                    alert('❌ 상세 보고서 PPT 다운로드에 실패했습니다.');
+                    return;
+                }
+
+                const cd = response.headers.get('Content-Disposition') || '';
+                const fnMatch = cd.match(/filename="?([^";\s]+)"?/);
+                const filename = fnMatch ? fnMatch[1] : `report_${historyId}.pptx`;
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(link);
+
+                console.log('✅ 상세 보고서 PPT 다운로드 완료 - historyId:', historyId);
+            } catch (error) {
+                console.error('❌ 상세 보고서 PPT 다운로드 오류:', error);
+                alert('❌ 상세 보고서 PPT 다운로드 중 오류가 발생했습니다.');
             }
         }
 

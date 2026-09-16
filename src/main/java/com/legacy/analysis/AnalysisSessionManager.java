@@ -210,21 +210,9 @@ public class AnalysisSessionManager {
     }
   }
 
-  /**
-   * 분석 통계 업데이트
-   */
-  public void updateStatistics(String sessionId, int successCount,
-      int skipCount, int failureCount, int oversizeCount) {
-    SessionState session = activeSessions.get(sessionId);
-    if (session != null) {
-      AnalysisStatistics stats = session.getStatistics();
-      stats.setSuccessCount(successCount);
-      stats.setSkipCount(skipCount);
-      stats.setFailureCount(failureCount);
-      stats.setOversizeCount(oversizeCount);
-      session.setLastUpdateTime(LocalDateTime.now());
-    }
-  }
+  // (REQ-007, 2026-09) 이 자리에 있던 5-인자 통계 일괄 대입 메서드(sessionId, success, skip, failure, oversize)는
+  // 호출부 0건인 dead code라 삭제했다. 카운터는 병렬 루프에서 AnalysisStatistics의 increment* 메서드로만
+  // 갱신한다 — "읽어서 되쓰기" 형태의 setter 일괄 대입 경로를 다시 만들지 않는다(AnalysisStatistics Javadoc 참고).
 
   /**
    * 분석 대상 파일 목록 초기화

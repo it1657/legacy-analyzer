@@ -323,4 +323,38 @@ public class AdminController {
       return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
     }
   }
+
+  // 분석 이력 ID 기반 상세 보고서(프로젝트 구조·비즈니스 로직) PPT 다운로드 (REQ-001, 2026-09)
+  // - 위 downloadPresentation()(요약 PPT, 접두사 analysis_)과 응답 관행을 맞춘다.
+  // - 클래스 레벨 @PreAuthorize("hasRole('ADMIN')")를 상속하므로 별도 애노테이션이 없고,
+  //   관리자가 임의 사용자의 이력을 대상으로 하므로 소유자 검증도 두지 않는다(UserActivityController와 다른 점).
+  // - 서비스는 사용자용 /api/my/download/project-report와 같은 generateProjectReportPresentation()을 재사용한다.
+  // - 파일명 접두사는 report_ — 사용자용 buildPptResponse(..., "report", ...)와 의미를 맞추고 요약 PPT(analysis_)와 구분한다.
+  @GetMapping("/download/project-report/{historyId}")
+  public ResponseEntity<byte[]> downloadProjectReport(@PathVariable Long historyId) {
+    try {
+      AnalysisHistory history = analysisHistoryRepository.findById(historyId).orElse(null);
+      if (history == null) return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+
+      byte[] pptxContent = presentationGeneratorService.generateProjectReportPresentation(history);
+
+      // sourcePath가 없으면 파일명 접두사("report_")와 겹치지 않도록 untitled를 기본값으로 쓴다.
+      String projectName = history.getSourcePath() != null
+          ? history.getSourcePath().replaceAll(".*[/\\\\]", "") : "untitled";
+
+      HttpHeaders headers = new HttpHeaders();
+      headers.setContentType(new MediaType("application",
+          "vnd.openxmlformats-officedocument.presentationml.presentation"));
+      headers.setContentLength(pptxContent.length);
+      String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+      String filename = String.format("report_%s_%s.pptx", projectName, timestamp);
+      // 폼 필드용 form-data가 아니라 파일 첨부용 attachment 타입으로 지정한다.
+      headers.setContentDisposition(ContentDisposition.attachment().filename(filename).build());
+
+      return new ResponseEntity<>(pptxContent, headers, HttpStatus.OK);
+    } catch (Exception e) {
+      log.error("[상세 보고서 PPT 다운로드 실패] historyId={}", historyId, e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+  }
 }

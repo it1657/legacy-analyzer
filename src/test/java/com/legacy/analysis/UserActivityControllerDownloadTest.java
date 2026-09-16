@@ -33,9 +33,11 @@ class UserActivityControllerDownloadTest {
     analysisHistoryRepository = mock(AnalysisHistoryRepository.class);
     presentationGeneratorService = mock(PresentationGeneratorService.class);
 
+    // (REQ-002) 세션 저장소는 이 테스트의 관심사(다운로드 경로)가 아니므로 mock으로만 채운다.
     userActivityController = new UserActivityController(
         analysisHistoryRepository,
-        presentationGeneratorService);
+        presentationGeneratorService,
+        mock(SessionRepository.class));
 
     // 로그인 주체는 seq=10L 사용자로 고정한다.
     User principal = new User("tester", "tester@example.com", "hash");
