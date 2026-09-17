@@ -41,35 +41,35 @@ docs/
 sequenceDiagram
     participant B as Browser
     participant C as MainApiController
-    participant S as SessionState + AnalysisSessionManager
-    participant L as ClaudeServiceImpl + LlmClientResolver + LlmClient
+    participant S as SessionState<br/>+ AnalysisSessionManager
+    participant L as ClaudeServiceImpl<br/>+ LlmClientResolver<br/>+ LlmClient
     participant D as DB AnalysisHistory
     participant P as PresentationGeneratorService
-    B->>C: POST /api/start-analysis 서버 경로, 관리자 또는 POST /api/upload-analysis 업로드
-    C->>S: createSession - currentPhase STARTING
+    B->>C: POST /api/start-analysis<br/>서버 경로, 관리자 또는<br/>POST /api/upload-analysis 업로드
+    C->>S: createSession<br/>- currentPhase STARTING
     C-->>B: sessionId 즉시 응답
-    Note over C: new Thread runAnalysis - 분석은 비동기로 시작
+    Note over C: new Thread runAnalysis<br/>- 분석은 비동기로 시작
     C->>C: performCopy - copy 모드일 때만
     C->>C: collectFileList
-    C->>D: AnalysisHistory 저장 - IN_PROGRESS
+    C->>D: AnalysisHistory 저장<br/>- IN_PROGRESS
     C->>L: generateSessionClaudeMd
     loop 파일별 병렬 처리
-        C->>L: analyzeFile - analyzeCodeWithClaude
-        L->>L: resolveLlmClient modelKey - DB 모델 provider로 구현체 선택
+        C->>L: analyzeFile<br/>- analyzeCodeWithClaude
+        L->>L: resolveLlmClient modelKey<br/>- DB 모델 provider로 구현체 선택
         L-->>C: LlmResult
-        C->>C: 결과 쓰기 + 추적 파일 기록 markFileAsPatched
+        C->>C: 결과 쓰기 + 추적 파일 기록<br/>markFileAsPatched
     end
     loop 2초 폴링
         B->>C: GET /api/analysis/status/sessionId
         C-->>B: currentPhase, 진행률, 최근 로그
     end
     C->>C: finalizeAnalysis - 상태 확정
-    C->>P: buildStructureSnapshot - COMPLETED일 때
-    C->>D: structureSnapshotJson 저장, COMPLETED
+    C->>P: buildStructureSnapshot<br/>- COMPLETED일 때
+    C->>D: structureSnapshotJson<br/>저장, COMPLETED
     opt 업로드 모드
-        B->>C: GET manifest, 파일별 GET, write-back 뒤 cleanup
+        B->>C: GET manifest, 파일별 GET,<br/>write-back 뒤 cleanup
     end
-    B->>P: GET /api/my/download/project-report/id - UserActivityController 경유
+    B->>P: GET /api/my/download/project-report/id<br/>- UserActivityController 경유
     P->>D: 저장된 structureSnapshot 읽기
     P-->>B: report_프로젝트명_시각.pptx
 ```
@@ -145,14 +145,14 @@ stateDiagram-v2
     STARTING --> COPYING : 출력 경로가 원본과 다름 - copy 모드
     STARTING --> ANALYZING : copy 모드 아님
     COPYING --> ANALYZING : 미러링 복사 완료
-    ANALYZING --> PAUSED : 사용자 일시정지 POST /api/session/pause
-    PAUSED --> ANALYZING : 이어서 분석 POST /api/session/resume - pending 파일만
+    ANALYZING --> PAUSED : 사용자 일시정지
+    PAUSED --> ANALYZING : 이어서 분석
     ANALYZING --> CANCELLED : 사용자 취소 POST /api/session/cancel - 재개 불가
     ANALYZING --> AWAITING_FAILOVER_CONFIRM : 크레딧 소진 + 관리자 지정 failover 대상 있음
-    ANALYZING --> PAUSED : 크레딧 소진 + failover 대상 없음
+    ANALYZING --> PAUSED : 크레딧 소진
     AWAITING_FAILOVER_CONFIRM --> ANALYZING : 컨펌 수락 POST /api/session/failover/confirm - failover 모델로 전환 후 재개
     AWAITING_FAILOVER_CONFIRM --> AWAITING_FAILOVER_CONFIRM : 컨펌 거절 - 전용 API 없음, 상태 유지
-    ANALYZING --> PAUSED : 선택된 파일 전부 실패 - 재시도 가능
+    ANALYZING --> PAUSED : 선택된 파일 전부 실패
     ANALYZING --> FINALIZING : 파일 처리 완료
     FINALIZING --> COMPLETED : README 생성 + PPT 구조 스냅샷 저장
     ANALYZING --> FAILED : 예외
@@ -160,6 +160,13 @@ stateDiagram-v2
     COMPLETED --> [*]
     CANCELLED --> [*]
     FAILED --> [*]
+    note right of PAUSED
+      진입 1 사용자 일시정지 - POST /api/session/pause
+      진입 2 크레딧 소진 + failover 대상 없음
+      진입 3 선택된 파일 전부 실패 - 재시도 가능
+      이어서 분석 - POST /api/session/resume
+      이어서 분석 - pending 파일만
+    end note
 ```
 
 위 그림은 `SessionState.currentPhase` 값 기준의 전이다. `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며 폴링이 계속된다**(컨펌 거절에는 전용 API가 없어 그 상태에 머문다). `PAUSED`와 `AWAITING_FAILOVER_CONFIRM`은 `pendingFilePaths`가 남아 있어 재개할 수 있지만, **취소만 재개 불가**다(`CANCELLED`는 pending을 저장하지 않는다).
