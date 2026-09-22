@@ -66,6 +66,15 @@ sequenceDiagram
     C->>C: finalizeAnalysis - 상태 확정
     C->>P: buildStructureSnapshot<br/>- COMPLETED일 때
     C->>D: structureSnapshotJson<br/>저장, COMPLETED
+    opt README 생성 옵션 켬
+        C->>L: analyzeCodeWithClaude<br/>- README 본문 생성 요청
+        L-->>C: 생성된 README 본문
+        C->>C: Files.writeString<br/>- README 파일 쓰기
+        C->>D: readmePath, readmeContent<br/>저장 - 세션 메타 + DB
+    end
+    opt anthropic 모델 + API 키 미설정
+        C->>C: 예외 후 경고 로그만 기록<br/>- README 없이 COMPLETED
+    end
     opt 업로드 모드
         B->>C: GET manifest, 파일별 GET,<br/>write-back 뒤 cleanup
     end
@@ -74,7 +83,7 @@ sequenceDiagram
     P-->>B: report_프로젝트명_시각.pptx
 ```
 
-요청을 받은 컨트롤러는 세션을 만들고 `sessionId`를 바로 돌려준 뒤 별도 스레드에서 분석을 진행하며, 브라우저는 상태 API를 폴링한다. 파일마다 `ClaudeServiceImpl`이 **호출 시점에** 선택된 모델의 provider(DB `llm_model_options`)로 `LlmClientResolver`를 통해 구현체를 고르므로, provider는 서버 전역 설정이 아니라 세션·모델 단위로 결정된다. 완료 시 PPT용 구조 스냅샷을 1회 저장하고, 이후 다운로드는 그 스냅샷으로 렌더만 한다.
+요청을 받은 컨트롤러는 세션을 만들고 `sessionId`를 바로 돌려준 뒤 별도 스레드에서 분석을 진행하며, 브라우저는 상태 API를 폴링한다. 파일마다 `ClaudeServiceImpl`이 **호출 시점에** 선택된 모델의 provider(DB `llm_model_options`)로 `LlmClientResolver`를 통해 구현체를 고르므로, provider는 서버 전역 설정이 아니라 세션·모델 단위로 결정된다. 완료 시 PPT용 구조 스냅샷을 1회 저장하고, 이후 다운로드는 그 스냅샷으로 렌더만 한다. README(최종 보고서) 생성은 **옵션**이며(`generateReadme` — 전체 분석은 기본 생성, 부분 선택 분석은 기본 생략), 선택된 모델의 provider가 anthropic인데 API 키가 없으면 예외가 경고 로그로만 남고 README 없이 `COMPLETED`로 끝난다(로컬 모델은 키 없이도 생성한다).
 
 `docs/`는 프로젝트 루트(`legacy-analyzer/`)의 하위 디렉터리입니다. 전체 프로젝트는 **Spring Boot 3.2.5 (Java 17)** 기반 백엔드 애플리케이션이며, 다음과 같이 구성되어 있습니다.
 
@@ -140,6 +149,7 @@ legacy-analyzer/                       (rootProject.name = 'legacy-analyzer')
 | `POST /api/session/cancel` | 세션과 `AnalysisHistory`를 즉시 `CANCELLED`. `pendingFilePaths`를 저장하지 않으므로 **재개 불가** |
 
 ```mermaid
+%%{init: {"layout":"dagre", "state": {"nodeSpacing": 40}}}%%
 stateDiagram-v2
     [*] --> STARTING
     STARTING --> COPYING : 출력 경로가 원본과 다름 - copy 모드
@@ -154,7 +164,7 @@ stateDiagram-v2
     AWAITING_FAILOVER_CONFIRM --> AWAITING_FAILOVER_CONFIRM : 컨펌 거절 - 전용 API 없음, 상태 유지
     ANALYZING --> PAUSED : 선택된 파일 전부 실패
     ANALYZING --> FINALIZING : 파일 처리 완료
-    FINALIZING --> COMPLETED : README 생성 + PPT 구조 스냅샷 저장
+    FINALIZING --> COMPLETED : 구조 스냅샷 저장 후 README 생성 - 조건부
     ANALYZING --> FAILED : 예외
     FINALIZING --> FAILED : 예외
     COMPLETED --> [*]
@@ -169,7 +179,7 @@ stateDiagram-v2
     end note
 ```
 
-위 그림은 `SessionState.currentPhase` 값 기준의 전이다. `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며 폴링이 계속된다**(컨펌 거절에는 전용 API가 없어 그 상태에 머문다). `PAUSED`와 `AWAITING_FAILOVER_CONFIRM`은 `pendingFilePaths`가 남아 있어 재개할 수 있지만, **취소만 재개 불가**다(`CANCELLED`는 pending을 저장하지 않는다).
+위 그림은 `SessionState.currentPhase` 값 기준의 전이다. `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며 폴링이 계속된다**(컨펌 거절에는 전용 API가 없어 그 상태에 머문다). `PAUSED`와 `AWAITING_FAILOVER_CONFIRM`은 `pendingFilePaths`가 남아 있어 재개할 수 있지만, **취소만 재개 불가**다(`CANCELLED`는 pending을 저장하지 않는다). `FINALIZING → COMPLETED`에서는 **PPT용** 구조 스냅샷을 먼저 저장하고 그 다음 README를 생성하는데, README는 조건부다(`generateReadme` 옵션이 꺼져 있으면 생략, anthropic 모델 + API 키 미설정이면 경고만 남기고 생략 — 위 분석 요청 시퀀스의 `opt` 두 블록 참고).
 
 - **크레딧 소진 시**: 관리자가 지정해 둔 활성 failover 대상 모델이 있으면 세션이 `AWAITING_FAILOVER_CONFIRM`으로 바뀌어 사용자 컨펌("자체 LLM으로 진행하시겠습니까?")을 기다리고, 없으면 예전처럼 단순 `PAUSED`(수동 재개만 가능)가 된다.
 - **"아니오"(중단 유지)에는 전용 API가 없다** — 그 상태를 그대로 두는 것으로 처리한다.
@@ -177,6 +187,66 @@ stateDiagram-v2
 - **모델 선택·관리**는 두 API 계열로 나뉜다:
   - 관리자 CRUD `/api/admin/llm-models`(`LlmModelAdminController`, **ADMIN 전용**) — 모델 등록/수정/삭제, Ollama 설치 모델 조회(`/ollama-installed`). 모델 목록은 DB(`llm_model_options`)에 있고, 활성 모델은 최소 1개, failover 대상은 0개 또는 1개만 허용된다.
   - 사용자 조회 `GET /api/config/llm-models`(활성 모델을 표시 순서대로 반환, 인증만 필요) / `GET /api/config/llm-models/local-installed`(로컬 서버에 실제 설치된 모델을 TTL 캐시 경유로 조회). `local-installed`의 `available=false`는 "설치 모델 없음"이 아니라 **"확인 불가"**(타임아웃·미기동 등)를 뜻한다.
+
+### 사용자 화면 흐름 (UI 플로우)
+
+```mermaid
+flowchart TD
+    N1[페이지 진입] --> D1{localStorage.token<br/>있음}
+    D1 -->|아니오| N2[로그인 화면<br/>/auth/login]
+    N2 -->|로그인 성공| N3
+    D1 -->|예| N3[메인 화면 /]
+    N3 -->|관리자만| H1[관리자 대시보드로<br/>이동]
+    N3 --> H2[분석 화면<br/>- 메인 재진입]
+    N3 --> H3[내 활동<br/>/my-activity]
+    N3 --> H4[알림]
+    N3 --> H5[로그아웃]
+    N3 --> D2{시작 경로 선택}
+    D2 -->|A 업로드| D3{지원 브라우저 +<br/>보안 접속}
+    D3 -->|아니오| A0[경고만 표시<br/>- 업로드 불가]
+    D3 -->|예| A1[1단계 폴더 선택]
+    A1 --> T1[파일 트리 선택<br/>+ README 체크]
+    T1 -->|업로드| A2[출력 폴더 지정<br/>- 선택 사항]
+    A2 --> A3[2단계 업로드<br/>분석 시작]
+    A3 --> A4[POST 요청<br/>upload-analysis]
+    D2 -->|B 서버 경로| B1[원본 경로 입력<br/>- 관리자 전용]
+    B1 --> B2[1단계 파일 상태<br/>조회]
+    B2 --> T1
+    T1 -->|서버 경로| B3[출력 경로 입력]
+    B3 --> B4[2단계 특정 경로에<br/>결과 생성]
+    B4 --> D4{출력 경로<br/>비어 있음}
+    D4 -->|예| M1[원본 직접 수정<br/>경고 모달]
+    M1 -->|취소| B3
+    M1 -->|진행| B5[POST 요청<br/>start-analysis]
+    D4 -->|아니오| B5
+    A4 -->|2초 폴링| P1[콘솔 + 진행률<br/>+ 미처리 완료 목록]
+    B5 -->|2초 폴링| P1
+    P1 --> C1[일시중지 - 재개<br/>- 취소]
+    C1 -->|일시중지| C2[일시정지 처리 중<br/>안내 - 재개 대신]
+    C2 -->|확정 후 재개| P1
+    C1 -->|재개| P1
+    C1 -->|취소| X1[취소됨 - 재개 불가]
+    P1 -->|크레딧 소진| F1[failover 컨펌 모달<br/>- 폴링 중단]
+    F1 -->|예| F2[failover 모델로<br/>전환 후 재개]
+    F2 --> P1
+    F1 -->|아니오| F3[상태 유지<br/>- 전용 API 없음]
+    P1 -->|전량 실패| X2[자동 PAUSED<br/>+ 완료 패널 경고]
+    P1 -->|완료| R1[완료 결과 패널]
+    R1 --> R2[CLAUDE.md<br/>보기 모달]
+    R1 --> R3[PPT 다운로드]
+    R1 --> R4[README 본문 확인]
+    R1 -->|업로드 모드| U1[write-back<br/>- 결과 반영]
+    U1 -->|차단 파일 있음| U2[차단 파일 개별<br/>다운로드 패널]
+    U2 --> U3[cleanup<br/>- 스테이징 정리]
+    U1 --> U3
+    H3 --> D5{이력 상태}
+    D5 -->|COMPLETED| Y1[보고서 PPT<br/>다운로드]
+    D5 -->|PAUSED 확정| Y2[이어서 분석<br/>- 메인으로 복귀]
+    Y2 -->|sessionId 복귀| P1
+    D5 -->|PAUSED 미확정| Y3[일시정지 처리 중<br/>안내]
+```
+
+경로 B(서버 경로 직접 지정)는 **관리자 전용** 섹션이며, 출력 경로를 비운 채 시작할 때 뜨는 "원본 소스 직접 수정 모드" 경고 모달도 이 경로에서만 나타난다. `POST 요청` 노드의 실제 엔드포인트는 각각 `/api/upload-analysis`·`/api/start-analysis`이고, 파일 트리의 README 생성 체크박스는 전체 분석이면 기본 켬·부분 선택이면 기본 끔이며, 헤더의 "분석 화면" 버튼은 메인 `/`을 다시 여는 것이라 별도 화면이 없다. 크레딧 소진 컨펌에서 "예"는 `POST /api/session/failover/confirm`으로 이어지지만 **"아니오"에는 전용 API가 없어** 세션이 `AWAITING_FAILOVER_CONFIRM` 상태 그대로 남고, 내 활동 화면에서 나중에 다시 컨펌할 수 있다. 내 활동의 "이어서 분석"은 `POST /api/session/resume` 뒤 `/?sessionId=...`로 메인에 복귀해 진행 관측으로 이어지며, 관리자 대시보드·알림 패널·프로필 모달·토큰 사용량 탭의 내부 흐름은 이 그림에 담지 않았다.
 
 ### 배포 구성 참고
 - **Dockerfile**: Debian 기반 이미지 사용 (ARM64/PGX 서버 호환을 위해 Alpine에서 전환)
@@ -367,7 +437,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-09-16 (모델 목록 DB화·런타임 리졸버, Anthropic 허가제(`ANTHROPIC_USER`), RAG B안, 세션 failover 반영해 현행화 + 세션 상태 전이도·분석 요청 시퀀스도 추가 + PPT 가이드 소개 서술 현행화)
+- **마지막 업데이트**: 2026-09-22 (분석 요청 시퀀스에 README 생성·키 미설정 `opt` 2블록 보강 + 세션 상태 전이도 `FINALIZING→COMPLETED` 라벨 정정·렌더 설정 directive 추가 + 사용자 화면 흐름(UI 플로우) 소절 신설 + technical/ 토큰 누적 서술 현행화)
 - **작성자**: 정재훈
 - **관리자**: 정재훈
 

@@ -175,6 +175,8 @@ CREATE INDEX idx_analysis_history_tokens ON analysis_history(total_tokens);
 
 ## 🎯 토큰 정보 수집 흐름
 
+> **현행화(2026-09-18)**: 초기 설계안에 있던 "`SessionState.metadata`에 `totalInputTokens`/`totalOutputTokens`/`modelName`을 누적하고 완료 시 거기서 읽는다"는 방식은 **구현되지 않았다**(소스 이력 전체에 해당 키가 등장한 적 없음). 실제 누적 위치는 `ClaudeServiceImpl`(`@Service` 싱글턴)의 `AtomicLong` 필드이며, 이 카운터는 세션별이 아니라 애플리케이션 전역 하나다. 아래 흐름은 실제 코드 기준으로 교체했다. 분석 세션 두 개가 동시에 진행될 때 저장되는 집계값이 세션 간에 어떻게 반영되는지는 2026-09-18 시점 확인 대기 상태다.
+
 ### 1. Claude API 호출 시
 ```
 ClaudeServiceImpl.analyzeCodeWithClaude()
@@ -190,17 +192,18 @@ Claude API 응답 수신
     "model": "claude-xxx"
   }
   ↓
-SessionState의 metadata에 누적
-  metadata.put("totalInputTokens", ...)
-  metadata.put("totalOutputTokens", ...)
-  metadata.put("modelName", ...)
+ClaudeServiceImpl.extractAndStoreTokenUsage() — 싱글턴 빈의 AtomicLong 필드에 누적
+  accumulatedInputTokens.addAndGet(inputTokens)
+  accumulatedOutputTokens.addAndGet(outputTokens)
+  lastModelName = modelUsed
 ```
 
 ### 2. 분석 완료 시
 ```
 MainApiController.finalizeAnalysis()
   ↓
-SessionState에서 누적된 토큰 정보 조회
+claudeService.getTotalTokenUsage()로 누적 토큰 조회 (전역 카운터)
+claudeService.getCurrentModel(session.getSourcePath())로 세션 모델 조회
   ↓
 AnalysisHistory 객체에 설정
   history.setInputTokens(...)
