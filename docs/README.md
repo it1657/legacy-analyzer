@@ -159,10 +159,9 @@ stateDiagram-v2
     PAUSED --> ANALYZING : 이어서 분석
     ANALYZING --> CANCELLED : 사용자 취소 POST /api/session/cancel - 재개 불가
     ANALYZING --> AWAITING_FAILOVER_CONFIRM : 크레딧 소진 + 관리자 지정 failover 대상 있음
-    ANALYZING --> PAUSED : 크레딧 소진
+    ANALYZING --> PAUSED : 자동 일시정지 2종
     AWAITING_FAILOVER_CONFIRM --> ANALYZING : 컨펌 수락 POST /api/session/failover/confirm - failover 모델로 전환 후 재개
     AWAITING_FAILOVER_CONFIRM --> AWAITING_FAILOVER_CONFIRM : 컨펌 거절 - 전용 API 없음, 상태 유지
-    ANALYZING --> PAUSED : 선택된 파일 전부 실패
     ANALYZING --> FINALIZING : 파일 처리 완료
     FINALIZING --> COMPLETED : 구조 스냅샷 저장 후 README 생성 - 조건부
     ANALYZING --> FAILED : 예외
@@ -179,7 +178,7 @@ stateDiagram-v2
     end note
 ```
 
-위 그림은 `SessionState.currentPhase` 값 기준의 전이다. `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며 폴링이 계속된다**(컨펌 거절에는 전용 API가 없어 그 상태에 머문다). `PAUSED`와 `AWAITING_FAILOVER_CONFIRM`은 `pendingFilePaths`가 남아 있어 재개할 수 있지만, **취소만 재개 불가**다(`CANCELLED`는 pending을 저장하지 않는다). `FINALIZING → COMPLETED`에서는 **PPT용** 구조 스냅샷을 먼저 저장하고 그 다음 README를 생성하는데, README는 조건부다(`generateReadme` 옵션이 꺼져 있으면 생략, anthropic 모델 + API 키 미설정이면 경고만 남기고 생략 — 위 분석 요청 시퀀스의 `opt` 두 블록 참고).
+위 그림은 `SessionState.currentPhase` 값 기준의 전이다. `AWAITING_FAILOVER_CONFIRM`은 **종료 상태가 아니며 폴링이 계속된다**(컨펌 거절에는 전용 API가 없어 그 상태에 머문다). `PAUSED`와 `AWAITING_FAILOVER_CONFIRM`은 `pendingFilePaths`가 남아 있어 재개할 수 있지만, **취소만 재개 불가**다(`CANCELLED`는 pending을 저장하지 않는다). `FINALIZING → COMPLETED`에서는 **PPT용** 구조 스냅샷을 먼저 저장하고 그 다음 README를 생성하는데, README는 조건부다(`generateReadme` 옵션이 꺼져 있으면 생략, anthropic 모델 + API 키 미설정이면 경고만 남기고 생략 — 위 분석 요청 시퀀스의 `opt` 두 블록 참고). 그림의 `자동 일시정지 2종`은 **크레딧 소진 + failover 대상 없음**과 **선택된 파일 전부 실패** 두 경우를 하나의 화살표로 묶은 것이고, 각 경우의 상세 조건은 그림 안 `PAUSED` note의 진입 2·진입 3에 그대로 남아 있다.
 
 - **크레딧 소진 시**: 관리자가 지정해 둔 활성 failover 대상 모델이 있으면 세션이 `AWAITING_FAILOVER_CONFIRM`으로 바뀌어 사용자 컨펌("자체 LLM으로 진행하시겠습니까?")을 기다리고, 없으면 예전처럼 단순 `PAUSED`(수동 재개만 가능)가 된다.
 - **"아니오"(중단 유지)에는 전용 API가 없다** — 그 상태를 그대로 두는 것으로 처리한다.
@@ -437,7 +436,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-09-22 (분석 요청 시퀀스에 README 생성·키 미설정 `opt` 2블록 보강 + 세션 상태 전이도 `FINALIZING→COMPLETED` 라벨 정정·렌더 설정 directive 추가 + 사용자 화면 흐름(UI 플로우) 소절 신설 + technical/ 토큰 누적 서술 현행화)
+- **마지막 업데이트**: 2026-09-23 (세션 상태 전이도 `ANALYZING → PAUSED` 전이 3개를 2개로 병합 — `크레딧 소진`·`선택된 파일 전부 실패` 라벨을 `자동 일시정지 2종` 하나로 묶어 GitHub 실렌더 라벨 겹침 2건 해소 + 두 경우의 이름과 상세 위치를 설명 문단에 매핑 문장으로 보존)
 - **작성자**: 정재훈
 - **관리자**: 정재훈
 
