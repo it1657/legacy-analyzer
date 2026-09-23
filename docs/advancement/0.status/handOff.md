@@ -1,11 +1,11 @@
-# 진행 현황 핸드오프 — 현재 상태 (2026-09-22 기준)
+# 진행 현황 핸드오프 — 현재 상태 (2026-09-23 기준)
 
-> **① 상태**: `scenario_3`(선택형)만 유일한 활성 트랙. 마지막 완료 사이클은 **53차 `2026-09-doc-currency-v2`**(squash `8ba9e90`, `origin/master` 반영 완료). 진행 중인 사이클 **0건**.
+> **① 상태**: `scenario_3`(선택형)만 유일한 활성 트랙. 마지막 완료 사이클은 **54차 `2026-09-state-diagram-restructure`**(squash `e4bb208`, `origin/master` 반영 완료). 진행 중인 사이클 **0건**.
 > **② 막힌 것**: `scenario_3` 롤아웃 계획이 현재 권한 구조와 안 맞는다(전제 붕괴 3건) — 계획 개정은 PM/사람 결정 사항. PGX Qwen3 샌드박스는 계정 권한 확인이 안 돼 착수 불가.
-> **③ 사람이 할 일**: (1) **push 직후 GitHub에서 `docs/README.md` ② 상태 전이도가 그려지는지 1회 확인**(`%%{init}%%` directive 의존 — 무시되면 라벨 겹침으로 복귀), (2) `bug-suspects.md` B1~B4(전역 토큰 카운터·비용 0 저장 등) 상태 확정, (3) `scenario_3` 롤아웃 계획을 고칠지 결정, (4) PGX 서버 권한 확인. 다음 사이클 1순위 후보는 REQ-003 이월 (B) 3건(§4-C).
+> **③ 사람이 할 일**: (1) `bug-suspects.md` B1~B4(전역 토큰 카운터·비용 0 저장 등) 상태 확정, (2) `scenario_3` 롤아웃 계획을 고칠지 결정, (3) PGX 서버 권한 확인. 다음 사이클 1순위 후보는 REQ-003 이월 (B) 3건(§4-C).
 
 **이 파일은 "지금 상태"만 담는 스냅샷이다.** 매 사이클이 끝날 때 통째로 다시 쓴다(append 아님).
-차수별 전체 이력(1~53차)은 **[`handOff_history.md`](./handOff_history.md)** 에 그대로 보존돼 있고, 새 사이클 요약은 앞으로도 그쪽에 append한다.
+차수별 전체 이력(1~54차)은 **[`handOff_history.md`](./handOff_history.md)** 에 그대로 보존돼 있고, 새 사이클 요약은 앞으로도 그쪽에 append한다.
 문서 표준 근거: `analyzer-plan/docs/pipeline/STRUCTURE.md` 22절 / 갱신 규칙: 이 저장소 `CLAUDE.md` "문서 현행화는 즉시" 절.
 
 ---
@@ -87,8 +87,8 @@
 |---|---|---|
 | **P2** | **REQ-003 이월 (B) 3건 — 다음 사이클 최우선 후보** | "Claude 단일 provider" 전제가 "provider는 세션·모델 단위 런타임 결정"으로 바뀐 뒤 문서 구조 자체가 낡은 3건: `technical/TOKEN_EXTRACTION_IMPLEMENTATION.md`(제목·응답 구조 = Claude `usage` 단일 경로 전제), `technical/ANALYSIS_METRICS_DB_SCHEMA.md`(스키마·비용식 전부 Claude 전제), `5.completed/scenario_0_completed.md`(`@ConditionalOnProperty` 단일 빈 전제). 같은 뿌리라 **묶어서 한 사이클**이 효율적(PL). 그 외 P2 6건·P3 16건은 `analyzer-plan …/2026-09-doc-currency-v2/05-dev-progress.md` 발견표(316~348행)에 경로·식별자까지 기록돼 재탐색 없이 착수 가능 |
 | **P2** | 문서 전체의 톤·대상 독자 불통일 | 문서별 "누가 왜 읽는지"가 불명확하고 톤이 제각각. rename·이동·분할 가능성이 있어 **요구사항 정의부터 필요** |
-| **P3** | `docs/README.md` ② 상태 전이도의 **GitHub 실렌더 미검증** | 53차 사람 확인은 mermaid.live v12뿐. ②는 `%%{init: {"layout":"dagre", "state": {"nodeSpacing": 40}}}%%`에 의존 — GitHub 렌더러가 directive를 무시하면 1회차와 같은 라벨 겹침으로 복귀. **push 직후 눈으로 1회**(③ 사람이 할 일) |
-| **P3** | mermaid 남은 한계 | ② 장문 라벨 2건·① URL 경로 예외·note 배치 뷰포트 의존(결함 아님 확정) / dagre 전환 부작용으로 **타 엣지 선이 라벨 4곳 뒤를 지남**(사람 C4 O 판정으로 수용) / `nodeSpacing 40`은 구버전 v11에서도 작동(폭 −37.5px, 기존 교차 1건 +86px²) |
+| **P3** | ③ UI 플로우가 컨테이너보다 넓어 **39%로 축소 렌더**(이월-1) | 자연폭 2,594px vs 컨테이너 1,012px. 잘리거나 가로 스크롤이 생기지는 않지만 축소 배율만큼 글자가 작아져 전체 흐름 판독이 어렵다(C7 X). 패닝 버튼은 있다(이월-2). 54차에서 **③ 블록 0행 유지**로 이월 |
+| **P3** | mermaid 남은 한계 | ② 장문 라벨·① URL 경로 예외·note 배치 뷰포트 의존(결함 아님 확정) / 라벨 박스 뒤로 엣지 선이 지나는 지점 5곳 — **그리기 순서가 `edgePaths` → `edgeLabels` → `nodes`라 글자 위에 선이 얹히지 않는다**(54차 W-1 실측, 사람 C4 O) / **`layout: "dagre"`는 GitHub(11.17.2)에서 완전 no-op**, 실효가 있는 것은 `nodeSpacing: 40`뿐 |
 | **P3** | README 파일 목록 용량 표기 드리프트 | `(8KB)/(6KB)` vs 실제 8,834/7,771B — 갱신 vs 제거 방향 미정 |
 | **P3** | `5.completed/scenario_0_completed.md` 낡은 서술 | (B) #23으로 위 최우선 후보에 흡수 |
 
@@ -101,25 +101,26 @@
 | **P3** | 후행 공백 결함의 **Linux 형태는 코드 추론** | 양성 대조군은 Windows `InvalidPathException`으로 재현한 것이고, 운영 환경인 Linux의 조용한 미매칭은 실측이 아니다 |
 | **P3** | failover 다중 탭 `failoverModalShown` | 41차 후속 과제로 유효 |
 
-## 5. 최근 완료 사이클 (48~53차, 상세는 `handOff_history.md`)
+## 5. 최근 완료 사이클 (49~54차, 상세는 `handOff_history.md`)
 
 | 차수 | 사이클 | 한 줄 요약 | squash 커밋 |
 |---|---|---|---|
-| 48 | `2026-09-outputpath-normalization` | `getDashboardStatus()` 경로 산식 4번째 사본 해소(실제 증상은 표시 오류가 아니라 HTTP 500) | `19d7cfe` |
 | 49 | `2026-09-quick-fixes-batch` | 소규모 결함 4건 일괄 정리(업로드 잠금 우회·버튼 parity·완료개수 집계·후행공백 500) | `9d89c50` |
 | 50 | `2026-09-remaining-ux-fixes` | 잔여 UX 결함 9건, TASK 15건 전량 Pass | `a6d488f` |
 | 51 | `2026-09-docs-currency` | 레거시 문서 6개 정확성 정정 + mermaid 최초 도입 | `0205868` |
 | 52 | `2026-09-diagram-readability` | README mermaid 2종 가독성 개선(겹침·잘림 해소, 정보 무손실) | `a8a7938` |
 | 53 | `2026-09-doc-currency-v2` | README mermaid 3종(시퀀스 보강·상태전이 directive·UI 플로우 신설) + 토큰 문서 2건 현행화, 괴리 27건 탐색(P1 2건 반영·25건 이월) | `8ba9e90` |
+| 54 | `2026-09-state-diagram-restructure` | ② 상태 전이도 `ANALYZING→PAUSED` 전이 3개 → 2개 축소로 GitHub 라벨 겹침 해소(교차 2건 → 0건), 정보는 note·산문에 보존 | `e4bb208` |
 
 **다음 사이클을 열 때 그대로 적용할 규칙**(51·52차에서 확정, 상세는 history 해당 절):
 - 새 서술에 **소스 라인 번호를 적지 않는다** — 클래스/메서드/엔드포인트/테이블명으로 쓴다.
 - **"낡은 패턴 0건"은 대조군 없이 근거가 아니다** — 수정 전 N>0을 먼저 보이고 수정 후 0건을 나란히 남긴다.
 - **mermaid는 사람이 직접 렌더를 봐야 한다.** 판정은 "그려짐"이 아니라 가독성 4항목(C1~C4) 각각 O/X. 라벨 한 줄은 코드포인트 30자 이하, 4줄 이상 금지.
 - **재현 산출물은 관측 세션 안에서 확보한다**(mermaid.live `#pako:` 공유 URL 등). "구두 보고만"은 산출물 0건이다.
+- **mermaid 판정 렌더러는 GitHub 실화면(현재 11.17.2)이다** — mermaid.live(v12)는 메이저가 달라 래핑·배치가 다르므로 기록·회귀 감시용이다. 로컬 `mermaid-cli 11.17.x`는 GitHub와 좌표 편차 0이라 기하 측정 대리값으로 쓸 수 있다(54차 실증). 겹침은 **라벨 박스 쌍별 교차 면적**으로 재고, `g.edgeLabel`·`foreignObject` **두 기준 모두 0건**일 때만 통과로 본다.
 - **mermaid 겹침은 기본(fit) 배율 화면좌표로 판정한다**(확대는 보조). 배율은 그림의 **긴 축**에 묶이므로 라벨을 줄여도 안 바뀔 수 있다 — mermaid.live v12 기본 엔진(ELK)은 `state.*` 간격 키를 무시하며, 허용된 우회는 `%%{init: {"layout":"dagre"}}%%` + `nodeSpacing`뿐(`fontSize`·`elk.*` 금지). 전제는 렌더러에서 실측으로 확인한 뒤 채택한다.
 - **레거시 문서에 파이프라인 문서 경로·사이클 슬러그·`bug-suspects.md`를 인용하지 않는다** — "2026-09-22 시점 확인 대기"처럼 날짜+상태로만 쓴다. 관찰된 동작(단정형+근거)과 열린 질문(확인 대기)을 층으로 분리하고 판단형 문장은 쓰지 않는다.
 
 ---
 
-전체 이력(1~53차): **[`handOff_history.md`](./handOff_history.md)**
+전체 이력(1~54차): **[`handOff_history.md`](./handOff_history.md)**
