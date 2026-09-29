@@ -1,7 +1,9 @@
-# Claude API 토큰 추출 구현 완료
+# LLM 토큰 추출 구현 완료 (초기 구현: Claude API 단일 provider 전제)
 
 ## 📋 구현 개요
-ClaudeServiceImpl에서 Claude API 응답의 토큰 정보를 추출하여 분석 이력에 저장하는 기능 구현
+LLM 응답의 토큰 정보를 추출하여 분석 이력에 저장하는 기능 구현. 응답 파싱은 각 `LlmClient` 구현체(`AnthropicLlmClient`·`OpenAiCompatibleLlmClient`)가 맡아 `LlmResult`로 정규화하고, `ClaudeServiceImpl`은 이를 받아 provider 구분 없이 같은 카운터에 누적하며, 최종 저장처는 `AnalysisHistory`다.
+
+> **현행화(2026-09-23)**: 이 문서의 원문은 Claude API 단일 provider 전제로 작성됐고 현재는 호출 구현체가 런타임에 선택되므로, 아래 각 절의 현행화 블록과 함께 읽어야 한다 — 근거: `LlmClientResolver.resolve()`, 커밋 `0ed4cbb`~`8e9deb7`.
 
 ## 🔧 구현 세부사항
 
@@ -46,7 +48,7 @@ private volatile String lastModelName = "";
 ```
 과거에는 `ThreadLocal<TokenUsage>` 기반이었으나 `ff504e9`(2026-06-22)에서 제거됐다.
 
-#### API 응답에서 토큰 추출
+#### LLM 응답에서 토큰 추출
 ```java
 // Claude API 응답 구조:
 // {
@@ -71,6 +73,7 @@ private void extractAndStoreTokenUsage(Map<?, ?> response) {
     }
 }
 ```
+> **현행화(2026-09-23)**: 위 코드블록은 Claude API 단일 provider 전제의 초기 구현이다. 현재 토큰 추출 필드는 provider별로 다르다 — Anthropic은 `input_tokens`/`output_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`를 읽고, OpenAI 호환은 `prompt_tokens`/`completion_tokens`를 읽으며 캐시 토큰 2개는 항상 0으로 고정된다(OpenAI 호환 API에는 프롬프트 캐싱 개념이 없다). 두 경로 모두 `LlmResult` 하나로 정규화되며, 추출 메서드도 원시 `Map` 파싱이 아니라 `LlmResult`를 받는 형태로 바뀌었다 — 근거: `AnthropicLlmClient.call()`, `OpenAiCompatibleLlmClient.call()`, `ClaudeServiceImpl.extractAndStoreTokenUsage()`, 커밋 `8d43607`.
 
 ### 4. MainApiController 수정
 **finalizeAnalysis 메서드 업데이트**:
@@ -140,6 +143,7 @@ private double calculateEstimatedCost(long inputTokens, long outputTokens, Strin
    - /api/statistics/admin/users
    등의 API로 토큰 통계 확인 가능
 ```
+> **현행화(2026-09-23)**: 위 흐름의 1단계는 현재 `ClaudeServiceImpl.resolveLlmClient(modelKey)` → `LlmClientResolver.resolve(provider)`로 갈라져 호출 구현체가 런타임에 결정된다. provider 판별 기준은 DB `llm_model_options` 테이블의 `provider` 값이고, `llm.provider` 설정값은 DB에 없는 modelKey에 대한 폴백으로만 쓰인다. 2~6단계는 provider 공통이며, 4단계의 `modelName`에는 로컬 모델키가 그대로 들어가고 이 경우 추정 비용은 0으로 계산된다 — 근거: `ClaudeServiceImpl.resolveProvider()`·`resolveLlmClient()`, `LlmClientResolver.resolve()`, 커밋 `0ed4cbb`~`8e9deb7`, `44914f0`.
 
 ## 📈 로그 출력 예
 

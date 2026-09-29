@@ -293,7 +293,7 @@ flowchart TD
 ## 🔧 technical/ - 기술 문서
 
 ### ANALYSIS_METRICS_DB_SCHEMA.md
-- **목적**: Claude API 토큰 메트릭 데이터베이스 설계
+- **목적**: LLM provider 공통 토큰 메트릭 데이터베이스 설계
 - **대상**: 개발자, 시스템 아키텍트
 - **주요 내용**:
   - TokenUsage 엔티티 구조
@@ -302,7 +302,7 @@ flowchart TD
   - DB 스키마 설계
 
 ### TOKEN_EXTRACTION_IMPLEMENTATION.md
-- **목적**: Claude API 토큰 추출 구현 상세 문서
+- **목적**: LLM 토큰 추출 구현 상세 문서 (초기 구현은 Claude API 단일 provider 전제)
 - **대상**: 백엔드 개발자
 - **주요 내용**:
   - API 응답 파싱 방식
@@ -388,11 +388,11 @@ docs/README.md (문서 인덱스)
   - 파일명 규칙 · 실패 시 동작
 
 ### technical/ (기술 문서)
-- `ANALYSIS_METRICS_DB_SCHEMA.md` (8KB)
+- `ANALYSIS_METRICS_DB_SCHEMA.md`
   - 토큰 메트릭 설계
   - DB 스키마
   
-- `TOKEN_EXTRACTION_IMPLEMENTATION.md` (6KB)
+- `TOKEN_EXTRACTION_IMPLEMENTATION.md`
   - 토큰 추출 로직
   - 비용 계산
 
@@ -436,7 +436,7 @@ A: docs/technical/ 디렉터리
 
 ## 📝 문서 유지보수
 
-- **마지막 업데이트**: 2026-09-23 (세션 상태 전이도 `ANALYZING → PAUSED` 전이 3개를 2개로 병합 — `크레딧 소진`·`선택된 파일 전부 실패` 라벨을 `자동 일시정지 2종` 하나로 묶어 GitHub 실렌더 라벨 겹침 2건 해소 + 두 경우의 이름과 상세 위치를 설명 문단에 매핑 문장으로 보존)
+- **마지막 업데이트**: 2026-09-23 (LLM provider 중립화 문서 정정 — 토큰 추출 구현 문서·분석 메트릭 DB 스키마 문서·시나리오 0 완료 보고서의 Claude API 단일 provider 전제 서술을 provider 중립으로 정정하고 코드블록·흐름도 등 원문 보존 구간에는 현행화 블록 추가 + 이 문서의 technical/ 파일 목록 용량 표기 2건 삭제 및 두 기술문서 소개 문구 2줄 정정)
 - **작성자**: 정재훈
 - **관리자**: 정재훈
 

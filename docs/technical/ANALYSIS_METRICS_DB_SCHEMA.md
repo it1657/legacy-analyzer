@@ -1,7 +1,9 @@
 # 분석 메트릭 DB 스키마 설계 문서
 
 ## 📊 개요
-프로젝트 분석 시 Claude API 토큰 사용량, 비용, 모델 정보 등을 추적하고 관리하기 위한 데이터베이스 설계
+프로젝트 분석 시 LLM provider(Anthropic · OpenAI 호환 로컬) 구분 없이 토큰 사용량, 비용, 모델 정보 등을 공통으로 추적하고 관리하기 위한 데이터베이스 설계
+
+> **현행화(2026-09-23)**: 이 문서 원문은 Claude API 단일 provider 전제로 작성됐으므로, 각 절의 현행화 블록과 함께 읽어야 한다.
 
 ## 🗄️ 데이터베이스 구조
 
@@ -29,11 +31,11 @@
 #### 추가된 필드 (신규 💡)
 | 칼럼명 | 타입 | 설명 | 비고 |
 |--------|------|------|------|
-| model_name | VARCHAR(100) | 사용된 Claude 모델명 | 예: claude-haiku-4-5-20251001 |
-| input_tokens | BIGINT | 입력 토큰 수 | Claude API 사용량 |
-| output_tokens | BIGINT | 출력 토큰 수 | Claude API 응답량 |
+| model_name | VARCHAR(100) | 사용된 모델명 | Anthropic 모델키(예: claude-haiku-4-5-20251001) 또는 DB `llm_model_options`에 등록된 로컬 모델키 |
+| input_tokens | BIGINT | 입력 토큰 수 | provider 공통 — `LlmResult.inputTokens` 누적값 |
+| output_tokens | BIGINT | 출력 토큰 수 | provider 공통 — `LlmResult.outputTokens` 누적값 |
 | total_tokens | BIGINT | 총 토큰 수 | input + output |
-| estimated_cost | DOUBLE | 예상 비용 | USD 기준 |
+| estimated_cost | DOUBLE | 예상 비용 | USD 기준. LOCAL provider는 항상 0 |
 
 ### 2. 통계 DTO 확장
 
@@ -177,7 +179,7 @@ CREATE INDEX idx_analysis_history_tokens ON analysis_history(total_tokens);
 
 > **현행화(2026-09-18)**: 초기 설계안에 있던 "`SessionState.metadata`에 `totalInputTokens`/`totalOutputTokens`/`modelName`을 누적하고 완료 시 거기서 읽는다"는 방식은 **구현되지 않았다**(소스 이력 전체에 해당 키가 등장한 적 없음). 실제 누적 위치는 `ClaudeServiceImpl`(`@Service` 싱글턴)의 `AtomicLong` 필드이며, 이 카운터는 세션별이 아니라 애플리케이션 전역 하나다. 아래 흐름은 실제 코드 기준으로 교체했다. 분석 세션 두 개가 동시에 진행될 때 저장되는 집계값이 세션 간에 어떻게 반영되는지는 2026-09-18 시점 확인 대기 상태다.
 
-### 1. Claude API 호출 시
+### 1. LLM API 호출 시
 ```
 ClaudeServiceImpl.analyzeCodeWithClaude()
   ↓
@@ -197,6 +199,8 @@ ClaudeServiceImpl.extractAndStoreTokenUsage() — 싱글턴 빈의 AtomicLong �
   accumulatedOutputTokens.addAndGet(outputTokens)
   lastModelName = modelUsed
 ```
+
+> **현행화(2026-09-23)**: 위 흐름의 호출 단계는 provider에 따라 구현체가 갈린다 — `ClaudeServiceImpl.resolveLlmClient()`가 DB `llm_model_options`의 provider 값으로 provider를 판별하고(`llm.provider` 설정값은 DB에 없는 modelKey에 대한 폴백), `LlmClientResolver.resolve()`가 `LOCAL`이면 `OpenAiCompatibleLlmClient`를, 그 외(미인식·미지정 포함)에는 `AnthropicLlmClient`를 돌려준다. 응답의 토큰 필드명도 provider별로 달라서 Anthropic은 `input_tokens`/`output_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`를, OpenAI 호환은 `prompt_tokens`/`completion_tokens`를 읽으며 **캐시 토큰 2개는 로컬에서 항상 0**이다(OpenAI 호환 API에 프롬프트 캐싱 개념이 없다). 두 구현체가 모두 `LlmResult` 하나로 정규화해 돌려주므로 위 누적 단계는 provider 구분 없이 동일하다 — 근거: `ClaudeServiceImpl.resolveProvider()`, `LlmClientResolver.resolve()`, `AnthropicLlmClient.call()`, `OpenAiCompatibleLlmClient.call()`, 커밋 `0ed4cbb`~`8e9deb7`, `44914f0`, `8d43607`.
 
 ### 2. 분석 완료 시
 ```
@@ -227,6 +231,8 @@ estimatedCost =
   (inputTokens * 모델_입력_요금 / 1,000,000) + 
   (outputTokens * 모델_출력_요금 / 1,000,000)
 ```
+
+> **현행화(2026-09-23)**: 위 단가 계산보다 **0원 분기 2개가 선행**한다 — ① 서버 전역이 Anthropic 모드가 아니면(`!isAnthropicMode()`) 0.0 ② DB에서 해당 modelKey의 provider가 `LOCAL`이면 0.0. 그 뒤에야 모델명 문자열 매칭으로 단가가 적용된다. 한편 통계 집계 쿼리는 **provider를 구분하지 않고 모델명으로만 묶으므로**, `tokens_by_model`에는 로컬 모델키의 토큰이 함께 나타나고 `cost_by_model`에는 그 로컬 모델키가 **비용 0으로 섞여** 집계된다 — 근거: `MainApiController.calculateEstimatedCost()`, `MainApiController.isAnthropicMode()`, `AnalysisHistoryRepository.getTokensByModel()`, `AnalysisHistoryRepository.getCostByModel()`, `StatisticsController`, 커밋 `8d43607`.
 
 ## 📈 통계 활용 사례
 
