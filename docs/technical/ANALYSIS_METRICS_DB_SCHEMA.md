@@ -177,7 +177,7 @@ CREATE INDEX idx_analysis_history_tokens ON analysis_history(total_tokens);
 
 ## 🎯 토큰 정보 수집 흐름
 
-> **현행화(2026-09-18)**: 초기 설계안에 있던 "`SessionState.metadata`에 `totalInputTokens`/`totalOutputTokens`/`modelName`을 누적하고 완료 시 거기서 읽는다"는 방식은 **구현되지 않았다**(소스 이력 전체에 해당 키가 등장한 적 없음). 실제 누적 위치는 `ClaudeServiceImpl`(`@Service` 싱글턴)의 `AtomicLong` 필드이며, 이 카운터는 세션별이 아니라 애플리케이션 전역 하나다. 아래 흐름은 실제 코드 기준으로 교체했다. 분석 세션 두 개가 동시에 진행될 때 저장되는 집계값이 세션 간에 어떻게 반영되는지는 2026-09-18 시점 확인 대기 상태다.
+> **현행화(2026-09-29)**: 초기 설계안에 있던 "`SessionState.metadata`에 `totalInputTokens`/`totalOutputTokens`/`modelName`을 누적하고 완료 시 거기서 읽는다"는 방식은 **구현되지 않았다**(소스 이력 전체에 해당 키가 등장한 적 없음). 실제 누적 위치는 `ClaudeServiceImpl`의 `sessionTokenCounters`(`Map<String, SessionTokenCounter>`, `ConcurrentHashMap`)이며, **카운터는 세션별로 격리**돼 있다 — 맵의 키가 `sourceFolderPath`이고, holder(`SessionTokenCounter`) 하나가 `inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheCreationTokens`(`AtomicLong` 4개)와 `lastModelName`(`volatile String`)을 갖는다. 애플리케이션 전역 `AtomicLong` 필드는 더 이상 없다. 아래 흐름은 실제 코드 기준으로 교체했다. 분석 세션 두 개가 동시에 진행될 때 집계값이 세션 간에 섞이던 문제는 이 세션 키 격리로 **해소됐다.** 다만 잔존 한계가 두 가지 남아 있다 — **X3**: 키가 `sourceFolderPath`이므로 **같은 경로를 두 세션이 동시에 분석하면 여전히 같은 holder에 합산된다**(고치려면 키 체계 자체를 바꿔야 한다). **X1**: 카운터가 인메모리라 **JVM 재시작이 끼면 그 구간 토큰이 소실된다.** 근거: `ClaudeServiceImpl.sessionTokenCounters`, `ClaudeServiceImpl.SessionTokenCounter`, 커밋 `4ffbebf`.
 
 ### 1. LLM API 호출 시
 ```
@@ -194,10 +194,15 @@ Claude API 응답 수신
     "model": "claude-xxx"
   }
   ↓
-ClaudeServiceImpl.extractAndStoreTokenUsage() — 싱글턴 빈의 AtomicLong 필드에 누적
-  accumulatedInputTokens.addAndGet(inputTokens)
-  accumulatedOutputTokens.addAndGet(outputTokens)
-  lastModelName = modelUsed
+ClaudeServiceImpl.extractAndStoreTokenUsage(result, modelUsed, sourceFolderPath)
+  — 세션 키(sourceFolderPath)별 holder에 누적
+  counter = sessionTokenCounters.computeIfAbsent(sourceFolderPath, key -> new SessionTokenCounter())
+  counter.inputTokens.addAndGet(inputTokens)
+  counter.outputTokens.addAndGet(outputTokens)
+  counter.cacheReadTokens.addAndGet(cacheReadTokens)
+  counter.cacheCreationTokens.addAndGet(cacheCreationTokens)
+  counter.lastModelName = modelUsed
+  (sourceFolderPath가 null이면 debug 로그만 남기고 건너뛴다 — 예외를 던지지 않는다)
 ```
 
 > **현행화(2026-09-23)**: 위 흐름의 호출 단계는 provider에 따라 구현체가 갈린다 — `ClaudeServiceImpl.resolveLlmClient()`가 DB `llm_model_options`의 provider 값으로 provider를 판별하고(`llm.provider` 설정값은 DB에 없는 modelKey에 대한 폴백), `LlmClientResolver.resolve()`가 `LOCAL`이면 `OpenAiCompatibleLlmClient`를, 그 외(미인식·미지정 포함)에는 `AnthropicLlmClient`를 돌려준다. 응답의 토큰 필드명도 provider별로 달라서 Anthropic은 `input_tokens`/`output_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`를, OpenAI 호환은 `prompt_tokens`/`completion_tokens`를 읽으며 **캐시 토큰 2개는 로컬에서 항상 0**이다(OpenAI 호환 API에 프롬프트 캐싱 개념이 없다). 두 구현체가 모두 `LlmResult` 하나로 정규화해 돌려주므로 위 누적 단계는 provider 구분 없이 동일하다 — 근거: `ClaudeServiceImpl.resolveProvider()`, `LlmClientResolver.resolve()`, `AnthropicLlmClient.call()`, `OpenAiCompatibleLlmClient.call()`, 커밋 `0ed4cbb`~`8e9deb7`, `44914f0`, `8d43607`.
@@ -206,8 +211,9 @@ ClaudeServiceImpl.extractAndStoreTokenUsage() — 싱글턴 빈의 AtomicLong �
 ```
 MainApiController.finalizeAnalysis()
   ↓
-claudeService.getTotalTokenUsage()로 누적 토큰 조회 (전역 카운터)
-claudeService.getCurrentModel(session.getSourcePath())로 세션 모델 조회
+sessionFolderKey = Path.of(session.getSourcePath()).toString()  ← 세션 키를 한 번만 계산
+claudeService.getTotalTokenUsage(sessionFolderKey)로 그 세션의 누적 토큰만 조회
+claudeService.getCurrentModel(sessionFolderKey)로 같은 세션 키의 모델 조회
   ↓
 AnalysisHistory 객체에 설정
   history.setInputTokens(...)
@@ -232,7 +238,7 @@ estimatedCost =
   (outputTokens * 모델_출력_요금 / 1,000,000)
 ```
 
-> **현행화(2026-09-23)**: 위 단가 계산보다 **0원 분기 2개가 선행**한다 — ① 서버 전역이 Anthropic 모드가 아니면(`!isAnthropicMode()`) 0.0 ② DB에서 해당 modelKey의 provider가 `LOCAL`이면 0.0. 그 뒤에야 모델명 문자열 매칭으로 단가가 적용된다. 한편 통계 집계 쿼리는 **provider를 구분하지 않고 모델명으로만 묶으므로**, `tokens_by_model`에는 로컬 모델키의 토큰이 함께 나타나고 `cost_by_model`에는 그 로컬 모델키가 **비용 0으로 섞여** 집계된다 — 근거: `MainApiController.calculateEstimatedCost()`, `MainApiController.isAnthropicMode()`, `AnalysisHistoryRepository.getTokensByModel()`, `AnalysisHistoryRepository.getCostByModel()`, `StatisticsController`, 커밋 `8d43607`.
+> **현행화(2026-09-29)**: 위 단가 계산보다 **0원 분기 하나가 선행**한다 — `calculateEstimatedCost()`가 `resolveEffectiveProvider(modelName) == LlmProvider.LOCAL`이면 `0.0`을 반환한다. 판정 기준은 **서버 전역 `llm.provider` 설정(`isAnthropicMode()`)이 아니라 이 세션이 실제로 라우팅되는 provider**다. 종전에 이보다 먼저 검사했던 `!isAnthropicMode()` 분기는 **제거됐고, 그 분기가 B2 버그였다** — 로컬 서버 배포에서 세션이 DB상 `ANTHROPIC` provider 모델을 골라 실제 과금이 발생해도 `estimated_cost`가 0원으로 기록됐다(`4ffbebf`에서 수정). `isAnthropicMode()` 자체는 폐기되지 않고 **`resolveEffectiveProvider()`의 폴백**(DB `llm_model_options`에 없는 modelKey일 때)으로 남아 있으며, `ClaudeServiceImpl.resolveProvider()`와 진리표가 어긋나지 않도록 계약 테스트 `LlmRoutingDecisionSingleSourceContractTest`가 두 판정을 고정한다(한쪽만 낡은 것이 B2의 원인이었다). 그 뒤 단가는 모델명 문자열 매칭이 아니라 `AnthropicModelPricing.of()`가 **3단계**로 정한다 — ① 정확 키 매핑(DB 시드 3종) ② 소문자 정규화 후 `claude-opus`/`claude-sonnet`/`claude-haiku` **패밀리 매칭**(`claude-` 접두까지 포함해 좁혔으므로 로컬 모델명이 우연히 걸리지 않는다) ③ **미지 모델은 알려진 단가 중 최댓값(opus $15/$75)으로 추정하고 모델키당 1회 WARN**(`null`·빈 문자열도 예외 없이 ③). 종전의 `contains("opus")`/`contains("sonnet")`/else-haiku 3분기는 폐기됐다(미지 모델이 조용히 최저 단가로 떨어져 과금을 과소 추정했다). **단가 숫자의 정본은 `AnthropicModelPricing`이고, DB 시드 `displayName`과 `static/js/dashboard.js`의 모델 폴백 목록에는 같은 값이 표시용 복제본으로 따로 들어 있다 — 이 3곳의 실제 동기화는 이번 사이클 범위 밖이다.** 한편 통계 집계 쿼리는 **provider를 구분하지 않고 모델명으로만 묶으므로**, `tokens_by_model`에는 로컬 모델키의 토큰이 함께 나타나고 `cost_by_model`에는 그 로컬 모델키가 **비용 0으로 섞여** 집계된다 — 근거: `MainApiController.calculateEstimatedCost()`, `MainApiController.resolveEffectiveProvider()`, `MainApiController.isAnthropicMode()`, `AnthropicModelPricing.of()`, `AnalysisHistoryRepository.getTokensByModel()`, `AnalysisHistoryRepository.getCostByModel()`, `StatisticsController`, 커밋 `8d43607`, `4ffbebf`.
 
 ## 📈 통계 활용 사례
 
