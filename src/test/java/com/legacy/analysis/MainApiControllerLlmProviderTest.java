@@ -46,12 +46,12 @@ class MainApiControllerLlmProviderTest {
     }
 
     @Override
-    public TokenUsage getTotalTokenUsage() {
+    public TokenUsage getTotalTokenUsage(String sourceFolderPath) {
       throw new UnsupportedOperationException();
     }
 
     @Override
-    public void resetTokenUsage() {
+    public void resetTokenUsage(String sourceFolderPath) {
     }
 
     @Override
@@ -207,6 +207,27 @@ class MainApiControllerLlmProviderTest {
     double cost = calculateEstimatedCost(controller, 1_000_000, 1_000_000, "qwen3-32b");
 
     assertEquals(0.0, cost, "DB상 LOCAL provider 모델은 anthropic 모드에서도 과금 대상이 아니어야 함");
+  }
+
+  @Test
+  void local_모드_서버에서_DB상_ANTHROPIC_모델을_쓰면_실제_단가로_과금된다() throws Exception {
+    // B2(REQ-002, 2026-09) 회귀 가드 — 전역 llm.provider=local만 보고 0.0을 반환하던 가드 때문에,
+    // 로컬 서버 배포에서 세션이 DB에 ANTHROPIC으로 등록된 Claude 모델을 선택하면 실제로 Anthropic
+    // API로 과금이 발생하는데도 estimated_cost가 0원으로 기록됐다. 비용 판정은 전역 모드가 아니라
+    // 그 세션이 실제로 라우팅되는 provider(ClaudeServiceImpl.resolveProvider()와 같은 진리표)를
+    // 따라야 한다. 이 칸이 6칸 진리표에서 유일하게 틀려 있던 칸이다.
+    LlmModelOptionService llmModelOptionService = mock(LlmModelOptionService.class);
+    LlmModelOption anthropicModel =
+        new LlmModelOption("claude-sonnet-4-6", "Claude Sonnet", LlmProvider.ANTHROPIC, 0);
+    when(llmModelOptionService.findByModelKey("claude-sonnet-4-6"))
+        .thenReturn(Optional.of(anthropicModel));
+    MainApiController controller = newController(new FakeClaudeService("claude-sonnet-4-6"), "local",
+        llmModelOptionService);
+
+    double cost = calculateEstimatedCost(controller, 1_000_000, 1_000_000, "claude-sonnet-4-6");
+
+    assertEquals(3.00 + 15.00, cost, 0.0001,
+        "로컬 서버 설정이어도 DB상 ANTHROPIC 모델로 라우팅된 세션은 sonnet 단가(입력 $3/출력 $15)로 과금돼야 함");
   }
 
   @Test

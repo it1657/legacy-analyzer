@@ -43,15 +43,33 @@ public interface ClaudeService {
 
     // 토큰 사용량 추적 관련 메서드
     /**
-     * 현재까지 누적된 토큰 사용량 조회
-     * @return 누적된 토큰 정보 (입력, 출력, 총 토큰, 모델명)
+     * 특정 분석 세션(sourceFolderPath)에 누적된 토큰 사용량 조회.
+     * 2026-09(REQ-001): 과거에는 무인자였고 싱글턴 필드 하나에 모든 세션의 토큰이 섞여 누적됐다 —
+     * 세션 A가 조회하면 동시에 분석 중인 세션 B의 토큰까지 합산돼 AnalysisHistory의 토큰/비용이
+     * 오염되고 그 행을 읽는 통계 API까지 전파됐다. 세션 키로 격리해 자기 토큰만 반환한다.
+     *
+     * <p><b>전역(모든 세션 합산) 조회 API는 의도적으로 제공하지 않는다.</b> 그런 값은 어떤 분석 1건의
+     * 비용도 뜻하지 않으므로, 호출 가능한 상태로 두면 이번 결함의 표면이 그대로 남는다.
+     *
+     * @param sourceFolderPath 분석 대상 폴더의 절대 경로(세션 식별 키). 누적·초기화와 반드시 같은 값이어야
+     *                         한다. null이거나 아직 누적이 없는 키면 빈 값을 반환하고 예외를 던지지 않는다
+     * @return 해당 세션의 누적 토큰 정보 (입력, 출력, 총 토큰, 캐시, 모델명)
      */
-    TokenUsage getTotalTokenUsage();
+    TokenUsage getTotalTokenUsage(String sourceFolderPath);
 
     /**
-     * 누적된 토큰 사용량 초기화
+     * 특정 분석 세션(sourceFolderPath)의 누적 토큰 사용량 초기화.
+     * 같은 소스 경로로 "처음부터" 새 분석을 시작할 때 이전 세션의 잔존값을 이어받지 않도록 호출한다.
+     * 일시정지 후 재개하는 경로에서는 <b>호출하지 않는다</b> — 일시정지 구간의 토큰은 DB에 저장되지
+     * 않으므로 리셋하면 그만큼이 영구 소실된다.
+     *
+     * <p><b>전역(모든 세션) 초기화 API는 의도적으로 제공하지 않는다</b> — 남의 세션 누적치를 지우는
+     * 것이 이번에 고친 결함이다.
+     *
+     * @param sourceFolderPath 분석 대상 폴더의 절대 경로(세션 식별 키). null이면 지울 대상을 특정할 수
+     *                         없으므로 아무 일도 하지 않는다(예외 없음)
      */
-    void resetTokenUsage();
+    void resetTokenUsage(String sourceFolderPath);
 
     /**
      * 특정 분석 세션(sourceFolderPath)의 모델명 조회.

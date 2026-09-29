@@ -30,12 +30,24 @@ public class ClaudeServiceImpl implements ClaudeService {
     // Jackson ObjectMapper 글로벌 인스턴스 공유로 불필요한 객체 재생성 경고 차단
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    // 스레드 풀에서 호출되므로 AtomicLong으로 스레드 안전하게 토큰 누적
-    private final AtomicLong accumulatedInputTokens = new AtomicLong(0);
-    private final AtomicLong accumulatedOutputTokens = new AtomicLong(0);
-    private final AtomicLong accumulatedCacheReadTokens = new AtomicLong(0);
-    private final AtomicLong accumulatedCacheCreationTokens = new AtomicLong(0);
-    private volatile String lastModelName = "";
+    // 2026-09(REQ-001): 싱글턴 인스턴스 필드였던 토큰 카운터 5개를 세션별(sourceFolderPath 키) 격리로
+    // 전환했다. 기존에는 모든 세션의 토큰이 전역 통 하나에 누적돼 두 방향으로 깨졌다 —
+    // ① 세션 B가 분석을 시작하면 그 경로의 resetTokenUsage()가 진행 중인 세션 A의 누적치까지 지웠고,
+    // ② 세션 A가 조회하면 세션 B의 토큰까지 합산돼 AnalysisHistory의 토큰/비용과 통계 API로 전파됐다.
+    // 격리 패턴은 2026-08-20 modelOverride 수정(sessionModelOverrides)과 동일하게 맞췄다.
+    private final Map<String, SessionTokenCounter> sessionTokenCounters = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 분석 세션 하나의 토큰 누적 통. 스레드 풀에서 파일별로 동시에 누적하므로 AtomicLong을 쓴다.
+     * (필드명에서 {@code accumulated} 접두를 뗀 것은 holder 자체가 이미 "누적"을 뜻하기 때문이다.)
+     */
+    private static final class SessionTokenCounter {
+        private final AtomicLong inputTokens = new AtomicLong(0);
+        private final AtomicLong outputTokens = new AtomicLong(0);
+        private final AtomicLong cacheReadTokens = new AtomicLong(0);
+        private final AtomicLong cacheCreationTokens = new AtomicLong(0);
+        private volatile String lastModelName = "";
+    }
 
     // API KEY 미설정 가드(isAnthropicMode() 참고)에서만 사용 — 실제 HTTP 호출은 llmClient(AnthropicLlmClient)가 전담
     @Value("${anthropic.api.key}")
@@ -194,21 +206,36 @@ public class ClaudeServiceImpl implements ClaudeService {
     }
 
     @Override
-    public TokenUsage getTotalTokenUsage() {
-        long input = accumulatedInputTokens.get();
-        long output = accumulatedOutputTokens.get();
-        TokenUsage usage = new TokenUsage(input, output, lastModelName);
-        usage.setCacheReadTokens(accumulatedCacheReadTokens.get());
-        usage.setCacheCreationTokens(accumulatedCacheCreationTokens.get());
+    public TokenUsage getTotalTokenUsage(String sourceFolderPath) {
+        // sourceFolderPath가 없으면 조회할 세션이 없고, ConcurrentHashMap은 null 키를 허용하지 않으므로
+        // 조회 전에 걸러낸다(getCurrentModel(null)과 동일한 이유). 아직 누적이 없는 키도 같은 취급이다 —
+        // 예외를 던지면 분석 마무리 단계가 실패하므로 빈 값을 반환한다.
+        SessionTokenCounter counter =
+            sourceFolderPath != null ? sessionTokenCounters.get(sourceFolderPath) : null;
+        if (counter == null) {
+            return new TokenUsage();
+        }
+        long input = counter.inputTokens.get();
+        long output = counter.outputTokens.get();
+        TokenUsage usage = new TokenUsage(input, output, counter.lastModelName);
+        usage.setCacheReadTokens(counter.cacheReadTokens.get());
+        usage.setCacheCreationTokens(counter.cacheCreationTokens.get());
         return usage;
     }
 
     @Override
-    public void resetTokenUsage() {
-        accumulatedInputTokens.set(0);
-        accumulatedOutputTokens.set(0);
-        accumulatedCacheReadTokens.set(0);
-        accumulatedCacheCreationTokens.set(0);
+    public void resetTokenUsage(String sourceFolderPath) {
+        // null 키는 no-op — 지울 대상을 특정할 수 없다(전역 리셋은 의도적으로 제공하지 않는다).
+        SessionTokenCounter counter =
+            sourceFolderPath != null ? sessionTokenCounters.get(sourceFolderPath) : null;
+        if (counter == null) return;
+        // holder를 맵에서 제거하지 않고 값만 0으로 되돌린다 — 이미 holder 참조를 얻어 누적 중인
+        // 스레드가 고아 holder에 계속 쌓는 일을 막기 위함이다. holder 제거는 세션 종료 시점
+        // (clearSessionSystemPrompt)에서 한다.
+        counter.inputTokens.set(0);
+        counter.outputTokens.set(0);
+        counter.cacheReadTokens.set(0);
+        counter.cacheCreationTokens.set(0);
     }
 
     @Override
@@ -265,6 +292,9 @@ public class ClaudeServiceImpl implements ClaudeService {
         // 2026-08-20 긴급수정: 모델 오버라이드도 세션 종료 시 함께 정리해 메모리 누수를 방지한다
         // (sessionSystemPrompts와 동일한 세션 종료 정리 지점을 그대로 재사용).
         sessionModelOverrides.remove(sourceFolderPath);
+        // 2026-09(REQ-001): 세션별 토큰 카운터도 같은 정리 지점에서 함께 제거한다. 이 지점의 호출부는
+        // FAILED/COMPLETED에 한정되므로(PAUSED는 제외) 재개를 기다리는 세션의 누적치는 보존된다.
+        sessionTokenCounters.remove(sourceFolderPath);
     }
 
     @Override
@@ -303,7 +333,7 @@ public class ClaudeServiceImpl implements ClaudeService {
         try {
             String modelToUse = getCurrentModel(sourceFolderPath);
             LlmResult result = resolveLlmClient(modelToUse).call(systemPrompt, userContent, modelToUse, 4096);
-            extractAndStoreTokenUsage(result, modelToUse);
+            extractAndStoreTokenUsage(result, modelToUse, sourceFolderPath);
             String generated = result.text();
             // 소형 로컬 모델은 이 생성 단계에서도 지침 문서 대신 다른 형식(JSON 배열/객체 등)을
             // 뱉어내는 경우가 있다. 명백히 마크다운 문서가 아니면 폐기하고 표준 템플릿으로
@@ -735,7 +765,7 @@ public class ClaudeServiceImpl implements ClaudeService {
                 String aiJsonResponse = result.text();
 
                 // 토큰 사용량 추출 및 저장
-                extractAndStoreTokenUsage(result, modelToUse);
+                extractAndStoreTokenUsage(result, modelToUse, sourceFolderPath);
 
                 log.info("[API 분석 성공] 파일명: {}", fileName);
                 return mergeCommentsIntoCode(sourceCode, aiJsonResponse, extension);
@@ -862,7 +892,7 @@ public class ClaudeServiceImpl implements ClaudeService {
         try {
             String modelToUse = getCurrentModel(sourceFolderPath);
             LlmResult result = resolveLlmClient(modelToUse).call(systemPrompt, userContent, modelToUse, 4096);
-            extractAndStoreTokenUsage(result, modelToUse);
+            extractAndStoreTokenUsage(result, modelToUse, sourceFolderPath);
             log.info("[README 생성 완료] 프로젝트: {}, 길이: {}자", projectName, result.text().length());
             return result.text();
         } catch (Exception e) {
@@ -1428,21 +1458,33 @@ public class ClaudeServiceImpl implements ClaudeService {
      * 바뀌면서, 이 메서드 내부에서 "현재" 모델을 다시 조회하면 호출 시점 사이에 다른 세션이
      * setModel()을 호출했을 때 실제 이 호출에 쓰인 모델과 다른 값이 기록될 위험이 있다.
      * 그래서 호출부가 이미 알고 있는 실제 사용 모델(modelUsed)을 그대로 넘겨받는다.
+     *
+     * 2026-09(REQ-001): 카운터가 세션별로 격리되면서 어느 세션에 누적할지를 나타내는
+     * sourceFolderPath를 함께 받는다. 호출부 3곳 모두 이미 이 값을 스코프에 갖고 있다.
      */
-    private void extractAndStoreTokenUsage(LlmResult result, String modelUsed) {
+    private void extractAndStoreTokenUsage(LlmResult result, String modelUsed, String sourceFolderPath) {
         try {
             if (result == null) return;
+            // 세션을 특정할 수 없으면 누적할 통이 없다(전역 통은 REQ-001에서 제거됐다).
+            // 토큰 집계 실패가 분석 자체를 실패시켜서는 안 되므로 예외 없이 건너뛴다.
+            if (sourceFolderPath == null) {
+                log.debug("[토큰 누적 생략] sourceFolderPath가 없어 세션을 특정할 수 없습니다. model={}", modelUsed);
+                return;
+            }
 
             long inputTokens = result.inputTokens();
             long outputTokens = result.outputTokens();
             long cacheReadTokens = result.cacheReadTokens();
             long cacheCreationTokens = result.cacheCreationTokens();
 
-            long totalInput = accumulatedInputTokens.addAndGet(inputTokens);
-            long totalOutput = accumulatedOutputTokens.addAndGet(outputTokens);
-            accumulatedCacheReadTokens.addAndGet(cacheReadTokens);
-            accumulatedCacheCreationTokens.addAndGet(cacheCreationTokens);
-            lastModelName = modelUsed;
+            // 리셋보다 누적이 먼저 와도 안전하도록 computeIfAbsent로 holder를 얻는다.
+            SessionTokenCounter counter =
+                sessionTokenCounters.computeIfAbsent(sourceFolderPath, key -> new SessionTokenCounter());
+            long totalInput = counter.inputTokens.addAndGet(inputTokens);
+            long totalOutput = counter.outputTokens.addAndGet(outputTokens);
+            counter.cacheReadTokens.addAndGet(cacheReadTokens);
+            counter.cacheCreationTokens.addAndGet(cacheCreationTokens);
+            counter.lastModelName = modelUsed;
 
             if (cacheReadTokens > 0) {
                 log.info("[토큰 사용량] 입력: {}, 출력: {}, 캐시히트: {} (90% 절약), 누적: {}",

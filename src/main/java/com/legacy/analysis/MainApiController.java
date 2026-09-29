@@ -1,5 +1,6 @@
 package com.legacy.analysis;
 
+import com.legacy.analysis.llm.AnthropicModelPricing;
 import com.legacy.analysis.llm.LlmModelOption;
 import com.legacy.analysis.llm.LlmModelOptionService;
 import com.legacy.analysis.llm.LlmProvider;
@@ -202,11 +203,24 @@ public class MainApiController {
    * ClaudeServiceImpl.resolveProvider()와 동일 판정 기준 — modelKey가 없으면(빈 요청) 이 요청이
    * 실제로 라우팅될 provider까지 포함해 판정한다 (REQ-004, 2026-09). 두 클래스 간 판정 로직 중복은
    * isAnthropicMode()와 동일하게 이 코드베이스의 기존 관례다.
+   *
+   * 이 판정은 ClaudeServiceImpl.resolveProvider()와 같은 진리표여야 하며, 두 구현이 어긋나지 않도록
+   * 계약 테스트(LlmRoutingDecisionSingleSourceContractTest)가 이를 고정한다 — 한쪽만 낡는 것이
+   * REQ-002가 다루는 결함의 원인이었다. 판정이 필요한 새 지점이 생기면 별도 메서드를 만들지 말고
+   * 이 메서드를 재사용한다(사본이 늘어나면 같은 결함이 재발한다).
+   *
+   * llmModelOptionService가 null인 인스턴스(구버전 테스트가 이 협력자를 null로 넘겨 생성한 경우)는
+   * DB 조회를 건너뛰고 모드별 기본값을 쓴다 — ClaudeServiceImpl.resolveProvider()의 null 가드와
+   * 동일한 처리다(프로덕션에서는 Spring이 항상 주입하므로 이 분기를 타지 않는다).
    */
   private LlmProvider resolveEffectiveProvider(String modelKey) {
+    LlmProvider fallback = isAnthropicMode() ? LlmProvider.ANTHROPIC : LlmProvider.LOCAL;
+    if (llmModelOptionService == null) {
+      return fallback;
+    }
     return llmModelOptionService.findByModelKey(modelKey)
         .map(LlmModelOption::getProvider)
-        .orElse(isAnthropicMode() ? LlmProvider.ANTHROPIC : LlmProvider.LOCAL);
+        .orElse(fallback);
   }
 
   /**
@@ -1563,7 +1577,10 @@ public class MainApiController {
       // 기존에 처리된 파일 목록을 추적 파일에서 로드 (재분석 스킵용)
       loadTrackerIntoSession(session, finalOutputPath);
 
-      claudeService.resetTokenUsage();
+      // 이 세션(sourceFolderPath)의 카운터만 초기화한다 — 같은 경로로 처음부터 새 분석을 시작하는
+      // 경우 이전 세션의 잔존값을 이어받지 않기 위함이다. 과거의 무인자 리셋은 동시에 분석 중인
+      // 다른 세션의 누적치까지 지웠다(REQ-001). 키는 누적·조회 쪽과 같은 sourceRootPath.toString()이다.
+      claudeService.resetTokenUsage(sourceRootPath.toString());
       AtomicInteger successCount = new AtomicInteger(0);
       AtomicInteger skipCount = new AtomicInteger(0);
       AtomicInteger alreadyProcessedCount = new AtomicInteger(0);
@@ -1861,6 +1878,14 @@ public class MainApiController {
       codeContentRagService.indexProject(sourceRootPath.toString(), fileList);
 
       session.addRecentLog(String.format("[재개] %d개 파일 이어서 분석합니다...", fileList.size()));
+
+      // 재개 경로에는 resetTokenUsage()를 의도적으로 호출하지 않는다 — 토큰/비용은 "이어서 전체 합계"다.
+      //   ① 일시정지 구간의 토큰은 DB 어디에도 저장되지 않는다(PAUSED/CANCELLED로 끝나는 경로는
+      //      AnalysisHistory에 토큰을 기록하지 않는다). 여기서 리셋하면 일시정지 이전 누적치가
+      //      영구 소실되고, finalizeAnalysis()의 절대값 대입 때문에 비용이 과소 기록된다.
+      //   ② 과거에 재개 시 리셋이 필요해 보였던 이유(다른 세션 토큰의 혼입)는 카운터가
+      //      세션 키(sourceFolderPath)로 격리되면서 이미 해소됐다.
+      // runAnalysis()의 리셋은 그대로 유지된다 — 같은 경로로 처음부터 새로 시작하는 경우다.
 
       AtomicInteger successCount = new AtomicInteger(session.getStatistics().getSuccessCount());
       AtomicInteger alreadyProcessedCount = new AtomicInteger(session.getStatistics().getSkipCount());
@@ -2200,15 +2225,19 @@ public class MainApiController {
         history.setCompletedAt(LocalDateTime.now());
         history.setProcessingTimeMs((long) (totalTimeSec * 1000));
         try {
-          TokenUsage tokenUsage = claudeService.getTotalTokenUsage();
+          // 세션 키는 한 번만 계산해 토큰 조회와 모델 조회가 같은 값을 쓰게 한다 — 같은 식이 두 벌이
+          // 되면 다음 사이클에 한쪽만 낡는다. 이 값은 runAnalysis()가 누적·초기화에 쓰는
+          // sourceRootPath.toString()과 반드시 같은 문자열이어야 한다(양쪽 모두 Path.of(...).toString()).
+          String sessionFolderKey =
+              session.getSourcePath() != null ? Path.of(session.getSourcePath()).toString() : null;
+          TokenUsage tokenUsage = claudeService.getTotalTokenUsage(sessionFolderKey);
           if (tokenUsage != null) {
             history.setInputTokens(tokenUsage.getInputTokens());
             history.setOutputTokens(tokenUsage.getOutputTokens());
             history.setTotalTokens(tokenUsage.getTotalTokens());
             // 2026-08-20 긴급수정: 이 세션(session.getSourcePath())에 실제로 설정된 모델을 조회
             // — sourceFolderPath 없이 조회하면 다른 세션의 오버라이드와 뒤섞일 수 있었던 지점.
-            String sessionModel = claudeService.getCurrentModel(
-                session.getSourcePath() != null ? Path.of(session.getSourcePath()).toString() : null);
+            String sessionModel = claudeService.getCurrentModel(sessionFolderKey);
             history.setModelName(sessionModel);
             double cost = calculateEstimatedCost(
                 tokenUsage.getInputTokens(), tokenUsage.getOutputTokens(),
@@ -3144,33 +3173,21 @@ public class MainApiController {
   }
 
   private double calculateEstimatedCost(long inputTokens, long outputTokens, String modelName) {
-    // 로컬/사내 LLM은 자체 호스팅이라 토큰당 과금이 없음 — scenario_0.md
-    if (!isAnthropicMode()) {
+    // 과금 여부는 전역 llm.provider 설정이 아니라 이 세션이 실제로 라우팅되는 provider로 판정한다
+    // (REQ-002, 2026-09). 종전에는 !isAnthropicMode()면 무조건 0을 반환했기 때문에, 로컬 서버
+    // 배포에서 세션이 DB상 ANTHROPIC 모델을 선택해 실제로 과금이 발생해도 estimated_cost가 0원으로
+    // 기록됐다. 자체 호스팅 LLM(LOCAL)만 토큰당 과금이 없다 — scenario_0.md.
+    // 판정은 resolveEffectiveProvider()에 위임해 이 메서드 안에서 같은 판정이 두 번 일어나지 않게 한다.
+    if (resolveEffectiveProvider(modelName) == LlmProvider.LOCAL) {
       return 0.0;
     }
 
-    // REQ-002(2026-09): anthropic 모드에서도 DB에 등록된 LOCAL 모델(failover 대상 등)을 세션이
-    // 실제로 쓸 수 있게 됐으므로, 그 경우도 과금 없음으로 처리한다. 이 분기가 없으면 로컬 모델명이
-    // "opus"/"sonnet" 어디에도 걸리지 않아 haiku 단가로 잘못 과금된다.
-    // llmModelOptionService가 없는(구버전 테스트 등) 경우에는 이 분기를 건너뛰어 기존 동작을 보존한다.
-    if (llmModelOptionService != null) {
-      boolean isLocalModel = llmModelOptionService.findByModelKey(modelName)
-          .map(opt -> opt.getProvider() == LlmProvider.LOCAL)
-          .orElse(false);
-      if (isLocalModel) {
-        return 0.0;
-      }
-    }
-
-    // 모델별 가격 (USD per 1M tokens, 2025 기준)
-    double inputPrice, outputPrice;
-    if (modelName != null && modelName.contains("opus")) {
-      inputPrice = 15.00; outputPrice = 75.00;  // Claude Opus
-    } else if (modelName != null && modelName.contains("sonnet")) {
-      inputPrice = 3.00; outputPrice = 15.00;   // Claude Sonnet
-    } else {
-      inputPrice = 0.80; outputPrice = 4.00;    // Claude Haiku (기본값)
-    }
-    return (inputTokens / 1_000_000.0) * inputPrice + (outputTokens / 1_000_000.0) * outputPrice;
+    // 단가 결정은 AnthropicModelPricing에 위임한다(REQ-003, 2026-09). 종전 contains("opus")/
+    // contains("sonnet") 3분기는 단가를 모르는 모델을 조용히 최저 단가(haiku)로 떨어뜨려 과금을
+    // 과소 추정했고, 매칭이 넓어 로컬 모델명까지 걸렸다 — 두 문제 모두 그 클래스에서 다룬다.
+    // 최종 계산식은 그대로 유지한다.
+    AnthropicModelPricing.Pricing pricing = AnthropicModelPricing.of(modelName);
+    return (inputTokens / 1_000_000.0) * pricing.inputPerMillionTokens()
+        + (outputTokens / 1_000_000.0) * pricing.outputPerMillionTokens();
   }
 }
