@@ -28,7 +28,8 @@ public class LlmModelOption {
   @Column(name = "model_key", nullable = false, length = 200)
   private String modelKey;
 
-  // 사용자 드롭다운에 노출할 표시명 (예: "Claude Sonnet (권장 · $3/$15 per 1M)")
+  // 사용자 드롭다운에 노출할 표시명 (예: "Claude Sonnet (권장)") — 단가는 적지 않는다.
+  // 단가는 AnthropicModelPricing이 정본이고 GET /api/config/llm-models의 pricing 필드로 파생 표시된다.
   @Column(name = "display_name", nullable = false, length = 200)
   private String displayName;
 

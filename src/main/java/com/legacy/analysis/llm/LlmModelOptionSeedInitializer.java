@@ -39,6 +39,13 @@ public class LlmModelOptionSeedInitializer implements CommandLineRunner {
   public void run(String... args) throws Exception {
     log.info("[LLM 모델 기본값 시드] 확인 시작");
     llmModelOptionService.seedDefaultsIfEmpty();
+    // 이미 시드된 DB의 옛 표시명 정리(REQ-001, 2026-09). 표시 개선일 뿐이라 실패해도 기동을 막지
+    // 않는다 — 위 시드와 아래 로컬 시드는 종전처럼 예외를 그대로 전파한다(동작 불변).
+    try {
+      llmModelOptionService.migrateLegacySeedDisplayNames();
+    } catch (RuntimeException e) {
+      log.error("[LLM 모델 표시명 정리] 실패했지만 기동은 계속합니다.", e);
+    }
     llmModelOptionService.seedLocalFromEnvIfConfigured(llmLocalModel);
     log.info("[LLM 모델 기본값 시드] 확인 완료");
   }

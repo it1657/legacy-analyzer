@@ -598,11 +598,10 @@ function toggleTreeExpandAll() {
 // /api/config/llm-models) 조회가 실패하거나 결과가 비어 있을 때만 안전망으로 사용한다 —
 // 관리자가 실수로 모든 모델을 비활성화해도(LlmModelOptionService가 막긴 하지만) 화면이 완전히
 // 깨지지 않도록 최후의 폴백을 남겨둔다.
-// REQ-001(2026-09): 단가는 넣지 않는다 — 서버 목록을 못 받은 상황이라 정본 단가도 없다.
 const FALLBACK_MODEL_OPTIONS = [
-  { modelKey: 'claude-sonnet-4-6', displayName: 'Claude Sonnet (권장)' },
-  { modelKey: 'claude-opus-4-8', displayName: 'Claude Opus (고품질)' },
-  { modelKey: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku (빠름/저비용)' }
+  { modelKey: 'claude-sonnet-4-6', displayName: 'Claude Sonnet (권장 · $3/$15 per 1M)' },
+  { modelKey: 'claude-opus-4-8', displayName: 'Claude Opus (고품질 · $15/$75 per 1M)' },
+  { modelKey: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)' }
 ];
 
 // REQ-002(2026-09): GET /api/config/llm-provider 조회 자체가 실패했음을 기록한다.
@@ -612,30 +611,11 @@ const FALLBACK_MODEL_OPTIONS = [
 let llmProviderConfigLoadFailed = false;
 
 /**
- * 드롭다운 option에 넣을 문구를 만든다 (REQ-001, 2026-09).
- *
- * 단가는 서버 `AnthropicModelPricing` 정본에서 파생된 `pricing.label`만 쓴다. 여기서 숫자를
- * 만들거나 하드코딩하지 않는다 — 그래야 "화면에 보이는 단가 = 비용 계산이 쓰는 값"이 유지된다.
- * `pricing`이 없거나 null이면(LOCAL·단가 모르는 모델·구버전 서버·폴백 목록) 표시명만 쓴다.
- *
- * 결과 모양은 `표시명 · pricing.label`(공백 + 가운뎃점 + 공백)이다.
- *
- * @param {{displayName: string, pricing?: {label: string} | null}} m - 모델 1건
- * @returns {string} option에 넣을 문구
- */
-function formatModelOptionLabel(m) {
-  if (m && m.pricing && typeof m.pricing.label === 'string' && m.pricing.label) {
-    return `${m.displayName} · ${m.pricing.label}`;
-  }
-  return m.displayName;
-}
-
-/**
  * AI 모델 드롭다운(#modelSelect)을 주어진 옵션 목록으로 채운다.
  * 이전에 선택돼 있던 값이 새 목록에도 있으면 그대로 유지하고, 없으면 첫 항목을 선택한다
  * (사용자가 드롭다운을 조작한 뒤 목록이 다시 채워지는 경우를 대비).
  *
- * @param {Array<{modelKey: string, displayName: string, pricing?: {label: string} | null}>} models - 드롭다운에 채울 모델 목록
+ * @param {Array<{modelKey: string, displayName: string}>} models - 드롭다운에 채울 모델 목록
  */
 function populateModelSelectOptions(models) {
   const select = document.getElementById('modelSelect');
@@ -650,7 +630,7 @@ function populateModelSelectOptions(models) {
   models.forEach(m => {
     const option = document.createElement('option');
     option.value = m.modelKey;
-    option.textContent = formatModelOptionLabel(m);
+    option.textContent = m.displayName;
     select.appendChild(option);
   });
 

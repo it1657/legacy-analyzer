@@ -274,7 +274,39 @@ public class MainApiController {
     map.put("displayName", option.getDisplayName());
     map.put("provider", option.getProvider().name());
     map.put("displayOrder", option.getDisplayOrder());
+    map.put("pricing", toPricingResponse(option));
     return map;
+  }
+
+  /**
+   * 표시용 단가 — {@code AnthropicModelPricing}(단가의 유일 정본)에서 파생한다 (REQ-001, 2026-09).
+   * 단가를 모르면 {@code null}이며, 프런트는 그때 표시명만 쓴다.
+   *
+   * <p>세 가지를 의도적으로 하지 않는다.
+   * <ul>
+   *   <li><b>{@code of()}를 부르지 않는다.</b> 그 메서드는 모르는 키에 최고 단가를 추정해 돌려주고
+   *       WARN을 남긴다 — 목록 조회는 화면 진입마다 일어나므로 LOCAL·미지 키마다 경고가 찍히고,
+   *       모델키당 1회 억제 집합이 먼저 채워져 <b>비용 계산 경로의 경고가 사라진다.</b>
+   *       "아는 단가만" 주는 {@code findKnown()}을 쓴다.</li>
+   *   <li><b>단가를 모르는 Claude 모델에 추정치를 붙이지 않는다.</b> 추정치를 확정 단가처럼 보여주면
+   *       "화면에 보이는 단가 = 계산에 쓰는 값"이 깨진다. 안내 문구도 넣지 않고 그냥 {@code null}이다.</li>
+   *   <li><b>provider 판정에 {@code resolveEffectiveProvider()}를 쓰지 않는다.</b> 인자로 받은 행이
+   *       이미 DB 행이므로 같은 행을 다시 조회할 이유가 없다.</li>
+   * </ul>
+   */
+  private Map<String, Object> toPricingResponse(LlmModelOption option) {
+    if (option.getProvider() != LlmProvider.ANTHROPIC) {
+      return null;
+    }
+    return AnthropicModelPricing.findKnown(option.getModelKey())
+        .map(pricing -> {
+          Map<String, Object> map = new HashMap<>();
+          map.put("inputPerMillionTokens", pricing.inputPerMillionTokens());
+          map.put("outputPerMillionTokens", pricing.outputPerMillionTokens());
+          map.put("label", pricing.label());
+          return map;
+        })
+        .orElse(null);
   }
 
   /**

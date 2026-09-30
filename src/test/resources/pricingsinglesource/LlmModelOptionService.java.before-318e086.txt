@@ -7,9 +7,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 /**
  * "선택 가능한 LLM 모델" 목록({@link LlmModelOption})의 CRUD + 도메인 규칙을 담당하는 Service 계층.
@@ -28,11 +26,6 @@ import java.util.regex.Pattern;
  * 열고 그 안에서 카운트를 확인한 뒤 판단한다. 낙관적 잠금(@Version)은 쓰지 않는다 — 관리자
  * 화면이라 동시 요청 경합 가능성이 낮다고 이미 판단됨(근거: 위 문서의 후속 결정,
  * analyzer-plan docs/chat/etc/2026-08-21-llm-model-min-active-guard-and-handoff.md).
- *
- * <p><b>표시명 규칙(REQ-003, 2026-09)</b>: {@code displayName}은 모델 설명만 담는다. 단가는
- * {@link AnthropicModelPricing}이 정본이며 {@code GET /api/config/llm-models}의 {@code pricing}
- * 필드로 파생 표시된다. 표시명에 단가가 남아 있으면 기동 시 {@link #migrateLegacySeedDisplayNames()}가
- * WARN을 남긴다(저장은 거부하지 않는다 — 관리자 재입력 자체는 허용한다).
  */
 @Service
 public class LlmModelOptionService {
@@ -41,43 +34,6 @@ public class LlmModelOptionService {
 
   /** 활성 모델을 전부 비활성화/삭제하려 할 때 공통으로 쓰는 안내 메시지 (관리자 화면에 그대로 노출됨). */
   public static final String MIN_ACTIVE_GUARD_MESSAGE = "최소 1개 모델은 활성 상태여야 합니다.";
-
-  /** 기본 시드 1건. */
-  private record DefaultSeed(String modelKey, String displayName, LlmProvider provider, int displayOrder) {
-  }
-
-  /**
-   * 기동 시 빈 테이블에 넣는 기본 모델 3종 (REQ-001, 2026-09에 단가 제거).
-   *
-   * <p><b>표시명에 단가를 적지 않는다.</b> 단가는 {@link AnthropicModelPricing}이 정본이고, 사용자
-   * 화면에는 {@code GET /api/config/llm-models}의 {@code pricing} 필드로 자동 표시된다. 표시명에
-   * 적어 두면 코드 단가를 고쳐도 이미 시드된 DB 행은 따라오지 않아 조용히 어긋난다(시드는 테이블이
-   * 완전히 비었을 때만 돌기 때문이다 — {@link #seedDefaultsIfEmpty()}의 {@code count() > 0} 가드).
-   */
-  private static final List<DefaultSeed> DEFAULT_SEEDS = List.of(
-      new DefaultSeed("claude-sonnet-4-6", "Claude Sonnet (권장)", LlmProvider.ANTHROPIC, 0),
-      new DefaultSeed("claude-opus-4-8", "Claude Opus (고품질)", LlmProvider.ANTHROPIC, 1),
-      new DefaultSeed("claude-haiku-4-5-20251001", "Claude Haiku (빠름/저비용)", LlmProvider.ANTHROPIC, 2));
-
-  /**
-   * 과거 시드 원문, 기동 시 정리 매칭 전용, 모든 배포가 한 번 기동된 뒤 삭제 가능(삭제 시점은 PM 후속 판단).
-   *
-   * <p>여기 적힌 문자열은 <b>착수 커밋의 시드 문자열을 그대로 복사한 것</b>이다. 새 표시명에 단가
-   * 라벨을 붙여 조립해 만들지 않는다 — 단가가 바뀌면 조립 결과가 옛 DB 값과 달라져 매칭이 조용히
-   * 실패하고, 정리가 안 됐다는 사실조차 드러나지 않는다.
-   */
-  private static final Map<String, String> LEGACY_SEED_DISPLAY_NAMES = Map.of(
-      "claude-sonnet-4-6", "Claude Sonnet (권장 · $3/$15 per 1M)",
-      "claude-opus-4-8", "Claude Opus (고품질 · $15/$75 per 1M)",
-      "claude-haiku-4-5-20251001", "Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)");
-
-  /**
-   * 표시명에 단가가 남아 있는지 판정하는 데만 쓴다 — <b>자동 제거·치환에는 쓰지 않는다.</b>
-   * 패턴으로 일괄 삭제하면 관리자가 의도적으로 넣은 문구까지 말없이 지워지므로, 정리는
-   * "옛 시드 원문과 완전히 같은 행"에만 하고 나머지는 경고만 남긴다.
-   */
-  private static final Pattern DISPLAY_NAME_PRICING_PATTERN =
-      Pattern.compile("\\$\\s?\\d+(?:\\.\\d+)?\\s*/\\s*\\$\\s?\\d+(?:\\.\\d+)?");
 
   private final LlmModelOptionRepository repository;
   // REQ-003(2026-09): 관리자 수동 등록 시 Ollama 실제 설치 여부를 하드 검증하는 데 쓴다.
@@ -142,14 +98,6 @@ public class LlmModelOptionService {
     return repository.findByFailoverTargetTrueAndActiveTrue();
   }
 
-  /**
-   * 모델을 새로 등록한다.
-   *
-   * <p>{@code displayName}은 모델 설명만 담는다. 단가는 {@link AnthropicModelPricing}이 정본이며
-   * {@code GET /api/config/llm-models}의 {@code pricing} 필드로 파생 표시된다. 표시명에 단가가
-   * 남아 있으면 기동 시 {@link #migrateLegacySeedDisplayNames()}가 WARN을 남긴다(저장은 거부하지
-   * 않는다).
-   */
   @Transactional
   public LlmModelOption create(String modelKey, String displayName, LlmProvider provider, int displayOrder) {
     if (modelKey == null || modelKey.isBlank()) {
@@ -203,14 +151,7 @@ public class LlmModelOptionService {
     return create(modelKey, displayName, provider, displayOrder);
   }
 
-  /**
-   * 표시명/노출순서만 수정한다 — modelKey/provider는 생성 후 불변(변경이 필요하면 삭제 후 재등록).
-   *
-   * <p>{@code displayName}은 모델 설명만 담는다. 단가는 {@link AnthropicModelPricing}이 정본이며
-   * {@code GET /api/config/llm-models}의 {@code pricing} 필드로 파생 표시된다. 표시명에 단가가
-   * 남아 있으면 기동 시 {@link #migrateLegacySeedDisplayNames()}가 WARN을 남긴다(저장은 거부하지
-   * 않는다).
-   */
+  /** 표시명/노출순서만 수정한다 — modelKey/provider는 생성 후 불변(변경이 필요하면 삭제 후 재등록). */
   @Transactional
   public LlmModelOption update(Long id, String displayName, int displayOrder) {
     LlmModelOption option = getOrThrow(id);
@@ -288,65 +229,10 @@ public class LlmModelOptionService {
   @Transactional
   public void seedDefaultsIfEmpty() {
     if (repository.count() > 0) return;
-    for (DefaultSeed seed : DEFAULT_SEEDS) {
-      create(seed.modelKey(), seed.displayName(), seed.provider(), seed.displayOrder());
-    }
+    create("claude-sonnet-4-6", "Claude Sonnet (권장 · $3/$15 per 1M)", LlmProvider.ANTHROPIC, 0);
+    create("claude-opus-4-8", "Claude Opus (고품질 · $15/$75 per 1M)", LlmProvider.ANTHROPIC, 1);
+    create("claude-haiku-4-5-20251001", "Claude Haiku (빠름/저비용 · $0.80/$4 per 1M)", LlmProvider.ANTHROPIC, 2);
     log.info("[LLM 모델 기본값 시드 완료] 기존 하드코딩 3종(sonnet/opus/haiku) 삽입");
-  }
-
-  /**
-   * 이미 시드된 DB의 옛 표시명을 새 표시명으로 정리한다 (REQ-001, 2026-09). 기동 시
-   * {@link LlmModelOptionSeedInitializer}가 {@link #seedDefaultsIfEmpty()} 직후에 호출한다.
-   *
-   * <h2>왜 필요한가</h2>
-   * <p>{@link #seedDefaultsIfEmpty()}는 테이블이 <b>완전히 비었을 때만</b> 돈다. 그래서 이미 운영
-   * 중인 DB에는 시드 표시명을 고쳐도 전달되지 않고, 옛 표시명(단가가 박힌 문자열)이 계속 사용자
-   * 화면에 보인다. 스키마 마이그레이션 도구가 없는 이 저장소에서는 기동 시 코드로 정리하는 것이
-   * 유일한 경로다.
-   *
-   * <h2>무엇만 바꾸는가 — 관리자가 고친 행은 건드리지 않는다</h2>
-   * <ol>
-   *   <li>{@code (modelKey, 옛 원문)} 쌍이 <b>글자 하나까지 같은({@code equals})</b> 행만 교체한다.
-   *       trim·대소문자 무시·유니코드 정규화 등 <b>어떤 완화도 하지 않는다</b> — 끝 공백 1개만
-   *       달라도 "관리자가 손댄 행"으로 본다. 관리자의 편집을 말없이 덮어쓰는 것이 옛 표시명이
-   *       남는 것보다 나쁘기 때문이다.</li>
-   *   <li>{@code active}·{@code provider}는 판정 기준이 <b>아니다</b>. 비활성 행도 옛 원문이면
-   *       교체한다 — 관리자가 나중에 다시 켜면 사용자 화면에 보이기 때문이다.</li>
-   *   <li>교체하지 못했는데 표시명에 단가가 남은 행은 <b>WARN만</b> 남기고 그대로 둔다. 패턴으로
-   *       일괄 삭제하지 않는다.</li>
-   * </ol>
-   *
-   * <p>멱등하다 — 교체된 행은 더 이상 옛 원문과 같지 않으므로 2회째 호출은 0건이다.
-   *
-   * @return 실제로 교체한 행 수
-   */
-  @Transactional
-  public int migrateLegacySeedDisplayNames() {
-    int replaced = 0;
-    for (DefaultSeed seed : DEFAULT_SEEDS) {
-      String legacyDisplayName = LEGACY_SEED_DISPLAY_NAMES.get(seed.modelKey());
-      if (legacyDisplayName == null) continue;
-      Optional<LlmModelOption> found = repository.findByModelKey(seed.modelKey());
-      if (found.isEmpty()) continue;
-      LlmModelOption option = found.get();
-      // 완전 일치만 — 어떤 완화도 하지 않는다.
-      if (!legacyDisplayName.equals(option.getDisplayName())) continue;
-      option.setDisplayName(seed.displayName());
-      repository.save(option);
-      replaced++;
-    }
-
-    for (LlmModelOption option : listAll()) {
-      if (DISPLAY_NAME_PRICING_PATTERN.matcher(option.getDisplayName()).find()) {
-        log.warn("[LLM 모델 표시명 정리] 표시명에 단가가 남아 있습니다."
-                + " 단가는 코드 정본(AnthropicModelPricing)에서 사용자 화면에 자동으로 표시되므로"
-                + " 표시명에서 지워 주세요. modelKey={}, displayName={}",
-            option.getModelKey(), option.getDisplayName());
-      }
-    }
-
-    log.info("[LLM 모델 표시명 정리] 옛 시드 원문 일치 {}건 교체", replaced);
-    return replaced;
   }
 
   /**

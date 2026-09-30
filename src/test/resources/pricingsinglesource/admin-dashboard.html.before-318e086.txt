@@ -539,8 +539,6 @@
                     사용자 분석 화면의 AI 모델 드롭다운에 노출되는 목록입니다. 활성 모델은 최소 1개 이상
                     유지되어야 하며(전부 비활성화/삭제 불가), failover 대상은 크레딧 소진 시 컨펌 후
                     전환할 로컬(자체 호스팅) 모델 정확히 1개만 지정할 수 있습니다.
-                    표시명에는 단가를 적지 마세요 — Anthropic 모델의 단가는 코드가 정본이며 사용자
-                    화면에 자동으로 붙어 표시됩니다.
                 </p>
                 <div class="table-container">
                     <table class="table">
@@ -915,11 +913,7 @@
             <form id="llmModelForm" onsubmit="saveLlmModel(event)">
                 <div class="form-group">
                     <label for="llmModelDisplayName">표시명 <span style="color:#999;font-size:12px;">(사용자 드롭다운에 노출)</span></label>
-                    <input type="text" id="llmModelDisplayName" required placeholder="예: Claude Sonnet (권장)">
-                    <!-- 표시명에 단가를 적지 않도록 안내한다(REQ-003, 2026-09). 단가는 코드가 정본이고
-                         사용자 화면에는 API가 내려주는 값으로 자동 표시되므로, 표시명에 적어 두면
-                         코드 단가를 고쳤을 때 DB 행이 따라오지 않아 조용히 어긋난다. 저장은 거부하지 않는다. -->
-                    <div style="color:#999;font-size:12px;margin-top:4px;">단가는 적지 마세요 — Anthropic 모델은 사용자 화면에 코드 기준 단가가 자동으로 붙어 표시됩니다.</div>
+                    <input type="text" id="llmModelDisplayName" required placeholder="예: Claude Sonnet (권장 · $3/$15 per 1M)">
                 </div>
                 <div class="form-group">
                     <label for="llmModelKey">모델 키 <span style="color:#999;font-size:12px;">(실제 LLM 호출 시 전달되는 식별자, 등록 후 변경 불가)</span></label>
