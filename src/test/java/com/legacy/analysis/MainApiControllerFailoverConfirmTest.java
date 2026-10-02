@@ -6,10 +6,12 @@ import com.legacy.analysis.llm.LlmProvider;
 import com.legacy.auth.Role;
 import com.legacy.auth.User;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -35,6 +37,15 @@ import static org.mockito.Mockito.*;
  * docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §4.
  */
 class MainApiControllerFailoverConfirmTest {
+
+  /**
+   * 재개 성공을 단언하는 테스트의 <b>대기 경로 픽스처용 실제 파일</b>을 둘 디렉터리.
+   * 2026-10 REQ-004로 재개·failover 컨펌이 원본 존재를 확인하게 됐으므로, 존재하지 않는 경로
+   * ("/tmp/src/A.java")로는 재개가 정상 거부된다. 세션 {@code sourcePath}와 단언은 그대로 두고
+   * 대기 경로만 실제 파일로 바꾼다.
+   */
+  @TempDir
+  Path pendingSourceDir;
 
   private MainApiController newController(ClaudeService claudeService,
       AnalysisSessionManager sessionManager, AnalysisHistoryRepository analysisHistoryRepository,
@@ -186,7 +197,9 @@ class MainApiControllerFailoverConfirmTest {
     session.setUsername("owner");
     session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
     session.setFailoverModelKey("qwen3-32b");
-    session.setPendingFilePaths(List.of("/tmp/src/A.java", "/tmp/src/B.java"));
+    Path realA = Files.createFile(pendingSourceDir.resolve("A.java"));
+    Path realB = Files.createFile(pendingSourceDir.resolve("B.java"));
+    session.setPendingFilePaths(List.of(realA.toString(), realB.toString()));
     when(sessionManager.getSession("sid")).thenReturn(session);
     MainApiController controller = newController(claudeService, sessionManager, null, null);
 
@@ -255,7 +268,7 @@ class MainApiControllerFailoverConfirmTest {
     session.setUsername("owner");
     session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
     session.setFailoverModelKey("qwen3-32b");
-    session.setPendingFilePaths(List.of("/tmp/src/A.java"));
+    session.setPendingFilePaths(List.of(Files.createFile(pendingSourceDir.resolve("A.java")).toString()));
     when(sessionManager.getSession("sid")).thenReturn(session);
     MainApiController controller = newController(claudeService, sessionManager, null, null);
 

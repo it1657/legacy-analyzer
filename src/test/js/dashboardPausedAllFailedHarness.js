@@ -120,9 +120,11 @@ console.log('\n[TASK-010 DoD 1] 전량실패 PAUSED → 완료 패널 카운터 
   check('(a) cr_failed = 서버 failedCount(3) → "3개"', r.failed, '3개');
   check('(a) 제목이 일시정지 전용 문면이다', r.title, '⏸️ 분석 일시정지 — 전체 파일 처리 실패');
   check('(a) 전량실패 전용 안내(#cr_allFailedNotice)가 표시된다', r.noticeDisplay, 'block');
-  // DoD 8(TASK-009) / 게이트1 ④: 세션 정리·패널 숨김은 그대로
-  check('(a) sessionControlPanel은 종전대로 숨겨진다', r.sessionControlPanelDisplay, 'none');
-  check('(a) currentSessionId는 종전대로 null로 정리된다', r.currentSessionId, null);
+  // (TASK-008, 2026-10 REQ-003 / 게이트1 D4) 확정된 일시정지는 제어 패널을 유지하고 세션 식별자도
+  // 버리지 않는다 — 같은 화면에서 '이어서 분석'을 눌러야 하기 때문이다. 종전(TASK-009/게이트1 ④)에는
+  // 패널을 숨기고 currentSessionId를 null로 정리했다. updateSessionControlPanel()이 패널을 'flex'로 연다.
+  check('(a) sessionControlPanel이 유지된다(flex)', r.sessionControlPanelDisplay, 'flex');
+  check('(a) currentSessionId가 유지된다', r.currentSessionId, 'sess-x');
   // DoD 5: 파일 배지 마킹 로직 무변경 — PAUSED에서는 캐시를 건드리지 않는다("대기중" 유지는 사람 결정 (a))
   check('(a) globalFilesCache는 PAUSED에서 그대로다(isCompleted/status 무변경)', r.cache.map(f => [f.isCompleted, f.status]), [[false, undefined], [false, undefined], [false, undefined]]);
 }
@@ -135,7 +137,8 @@ console.log('\n[TASK-010 DoD 2] 사용자 일시정지 PAUSED → 전량실패 �
   check('(b) 패널이 열리지 않는다(display가 block이 아님)', r.panelDisplay === 'block', false);
   check('(b) 전량실패 안내가 표시되지 않는다', r.noticeDisplay === 'block', false);
   check('(b) 카운터는 채워지지 않는다(현행 그대로 빈 문자열)', [r.success, r.already, r.failed], ['', '', '']);
-  check('(b) 세션 정리는 동일', [r.sessionControlPanelDisplay, r.currentSessionId], ['none', null]);
+  // (TASK-008) phase=PAUSED이면 일시정지 사유와 무관하게 패널을 유지한다(전량실패가 아니어도 동일 — 보정 C5).
+  check('(b) 세션 제어 패널과 세션 식별자가 유지된다', [r.sessionControlPanelDisplay, r.currentSessionId], ['flex', 'sess-x']);
 }
 {
   // (b-2) 경계: 실패가 있어도 이미 처리된 파일이 있으면 전량실패가 아니다(서버 식과 동일: alreadyCount == 0 조건)

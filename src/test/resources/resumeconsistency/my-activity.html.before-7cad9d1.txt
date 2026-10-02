@@ -83,10 +83,6 @@
     /* (REQ-002) 일시정지 미확정 구간 안내 — '이어서 분석' 버튼 자리에 대신 표시 */
     .pause-settling { display: inline-block; padding: 0.35rem 0.7rem; font-size: 11px; border-radius: 4px; background: #fff3e0; color: #e67e22; }
     .pause-settling-hint { display: block; margin-top: 0.25rem; font-size: 10px; color: #7f8c8d; }
-    /* (REQ-004) 원본 소실 — 재개 불가 / 일부 소실 경고 */
-    .source-missing { display: inline-block; padding: 0.35rem 0.7rem; font-size: 11px; border-radius: 4px; background: #fdecea; color: #c0392b; }
-    .source-missing-hint { display: block; margin-top: 0.25rem; font-size: 10px; color: #7f8c8d; }
-    .source-partial { display: inline-block; margin-top: 0.25rem; padding: 0.2rem 0.5rem; font-size: 10px; border-radius: 4px; background: #fff8e1; color: #b9770e; }
     .btn-claudemd { background: #6c5ce7; color: white; }
     .btn-claudemd:hover { background: #5b4bd6; }
 
@@ -391,14 +387,6 @@
       let actionBtn = '-';
       if (h.status === 'COMPLETED') {
         actionBtn = `<button class="btn-sm btn-ppt" onclick="downloadProjectReport(${h.id})" title="프로젝트 구조 · 비즈니스 로직 분석 보고서">📋 보고서 PPT</button>`;
-      } else if (h.status === 'PAUSED' && h.sessionId && h.sourceAvailability === 'MISSING') {
-        // (REQ-004, 2026-10) 분석 대상 원본 파일이 서버에 하나도 남아 있지 않다 — 업로드 원본은 자동 정리기가
-        // 4시간 뒤 지운다. 이 상태에서 재개를 누르면 서버가 거부하므로(reason=SOURCE_MISSING) 버튼 대신
-        // 사유를 보여 준다. 비활성 버튼 + 툴팁 대신 사유를 직접 띄우는 이유는 툴팁을 볼 수 없는 환경
-        // (모바일 등)에서도 이유가 바로 읽혀야 하기 때문이다.
-        // - 이 분기의 조건 줄과 본문 줄에는 pauseSettled라는 글자를 넣지 않는다(기존 계약 테스트의 추출 정규식 보호).
-        // - admin/dashboard.html renderMyHistory()의 조건·문면과 문자 단위로 같아야 한다(한쪽만 고쳐 벌어진 이력 반복).
-        actionBtn = `<span class="source-missing" title="원본 파일이 서버에 남아 있지 않아 이어서 분석할 수 없습니다.">⛔ 원본 소실 — 재개 불가</span><span class="source-missing-hint">이 기록은 그대로 보존됩니다. 같은 프로젝트를 처음부터 새로 분석해 주세요.</span>`;
       } else if (h.status === 'PAUSED' && h.sessionId && h.pauseSettled !== false) {
         actionBtn = `<button class="btn-sm btn-resume" onclick="resumeAnalysis('${h.sessionId}', ${h.id})" title="중단된 시점부터 이어서 분석">▶ 이어서 분석</button>`;
       } else if (h.status === 'PAUSED' && h.sessionId) {
@@ -410,13 +398,6 @@
         //   있어(이번 사이클 범위 밖) 해소되지 않을 때의 대안(처음부터 새 분석)을 함께 안내한다. 자동 재개 호출도 없다.
         // - admin/dashboard.html renderMyHistory()의 판정식·안내 문면과 문자 단위로 같아야 한다(한쪽만 고쳐 벌어진 이력 반복).
         actionBtn = `<span class="pause-settling" title="서버가 진행 중이던 파일 처리를 마무리하고 있습니다.">⏸️ 일시정지 처리 중입니다</span><span class="pause-settling-hint">잠시 후 목록을 새로 고쳐 주세요. 확정되면 '이어서 분석' 버튼이 나타납니다. 시간이 지나도 나타나지 않으면 처음부터 새로 분석해 주세요.</span>`;
-      }
-      // (REQ-004, 2026-10) 일부만 소실 — 남은 파일로 이어서 분석할 수 있으므로(게이트1 D1) 재개 버튼은
-      // 그대로 두고 경고만 덧붙인다. 사라진 파일은 재개 시 "처리 실패"로 기록된다.
-      // 숫자는 서버 값이지만 innerHTML 조립이라 방어적으로 Number()로 감싼다.
-      // admin/dashboard.html renderMyHistory()의 조건·문면과 문자 단위로 같아야 한다.
-      if (h.status === 'PAUSED' && h.sourceAvailability === 'PARTIAL') {
-        actionBtn += `<span class="source-partial" title="원본 파일 일부가 서버에 남아 있지 않습니다. 남은 파일만 이어서 분석하고 사라진 파일은 처리 실패로 기록됩니다.">⚠️ 원본 일부 소실 (${Number(h.missingFileCount) || 0}/${Number(h.pendingFileCount) || 0}개)</span>`;
       }
       // CANCELLED/FAILED는 파일 분석이 실제로 진행되지 못했을 수 있어 다운로드할 의미 있는 결과물이
       // 없다 - CLAUDE.md는 파일 처리 시작 전(취소돼도 이미 저장됨)에 생성되므로 상태와 별개로

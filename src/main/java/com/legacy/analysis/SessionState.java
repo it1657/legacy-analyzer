@@ -180,6 +180,27 @@ public class SessionState {
 
   private static final int MAX_RECENT_LOGS = 300;
 
+  /**
+   * (REQ-002 ④, 2026-10) 파일별 실패 사유 → 건수. <b>전량실패 안내에 "진짜 원인"을 싣기 위한 집계</b>다.
+   *
+   * <p>종전에는 전량실패 안내가 {@code errorLog}의 마지막 줄을 사유로 썼다. 파일 실패는
+   * {@code errorLog}에 남지 않으므로(그 목록에는 크레딧 소진 같은 세션 단위 사건만 들어간다) 대개
+   * 비어 있어 "알 수 없는 오류"가 그대로 사용자에게 보였다 — 정작 원인(예: 로컬 LLM 주소 해석 실패)은
+   * 어디에도 표시되지 않았다.
+   *
+   * <p>{@code @Transient}: DB 컬럼을 만들지 않는다. 이 값은 "이번 실행의 전량실패 안내 문구"를
+   * 만드는 데만 쓰이므로 영속화할 이유가 없고, 재시작 후에는 그 실행의 사유를 알 수 없는 것이 맞다.
+   * Jackson에도 노출되지 않는다 — {@code @JsonProperty}가 없고 {@code get}/{@code is} 접근자를 두지 않았다.
+   */
+  @Transient
+  private final Map<String, Integer> fileFailureReasonCounts = new LinkedHashMap<>();
+
+  /** 요약에 나란히 보여줄 서로 다른 사유의 최대 개수. 그 밖은 "기타"로 묶는다. */
+  private static final int MAX_FAILURE_REASON_KINDS = 5;
+
+  /** 사유 문자열 하나의 최대 길이. 긴 스택 메시지가 안내 문구를 뒤덮지 않게 자른다. */
+  private static final int MAX_FAILURE_REASON_LENGTH = 200;
+
   // 기본 생성자
   public SessionState() {
   }
@@ -469,6 +490,63 @@ public class SessionState {
   // 메타데이터 업데이트
   public void updateMetadata(String key, Object value) {
     this.metadata.put(key, value);
+  }
+
+  /**
+   * (REQ-002 ④) 파일 1건의 실패 사유를 기록한다. <b>같은 사유는 건수만 올린다</b>
+   * (정규화한 메시지 + errorType이 같으면 같은 사유로 본다).
+   *
+   * <p>정규화 규칙: 메시지를 {@code trim}하고, 비어 있으면 {@code errorType}으로 대체하며,
+   * {@value #MAX_FAILURE_REASON_LENGTH}자를 넘으면 자른다. 둘 다 비어 있으면 <b>기록하지 않는다</b> —
+   * "알 수 없는 오류" 같은 무의미한 문자열을 집계에 넣으면 그게 사용자 안내로 그대로 나간다.
+   *
+   * <p>병렬 분석 루프의 여러 스레드가 동시에 부르므로 {@code synchronized}다
+   * ({@code AnalysisStatistics.incrementFailureCount()}와 같은 방식).
+   */
+  public synchronized void recordFileFailureReason(String errorType, String message) {
+    String reason = (message == null || message.isBlank()) ? errorType : message.trim();
+    if (reason == null || reason.isBlank()) return;
+    reason = reason.trim();
+    if (reason.length() > MAX_FAILURE_REASON_LENGTH) {
+      reason = reason.substring(0, MAX_FAILURE_REASON_LENGTH);
+    }
+    fileFailureReasonCounts.merge(reason, 1, Integer::sum);
+  }
+
+  /**
+   * (REQ-002 ④) 기록된 실패 사유를 사람이 읽을 한 줄로 묶는다. 기록이 없으면 {@code null}.
+   *
+   * <p>건수가 많은 사유부터 최대 {@value #MAX_FAILURE_REASON_KINDS}종을 나란히 적고, 나머지는
+   * {@code 기타 n건}으로 묶는다. 예: {@code "Failed to resolve 'ollama' (3건), Read timed out (1건)"}.
+   *
+   * <p>이름에 {@code get}/{@code is} 접두사를 쓰지 않은 이유는 Jackson이 이 값을 세션 DTO의
+   * 프로퍼티로 인식하지 않게 하기 위함이다({@link #hasSettledPause()}와 같은 관례).
+   */
+  public synchronized String summarizeFileFailureReasons() {
+    if (fileFailureReasonCounts.isEmpty()) return null;
+
+    List<Map.Entry<String, Integer>> sorted = new ArrayList<>(fileFailureReasonCounts.entrySet());
+    // 건수 내림차순. 같은 건수는 기록된 순서를 유지한다(sort가 안정 정렬이므로 추가 비교 불필요).
+    sorted.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
+
+    StringBuilder sb = new StringBuilder();
+    int shown = 0;
+    int otherKinds = 0;
+    int otherCount = 0;
+    for (Map.Entry<String, Integer> e : sorted) {
+      if (shown < MAX_FAILURE_REASON_KINDS) {
+        if (sb.length() > 0) sb.append(", ");
+        sb.append(e.getKey()).append(" (").append(e.getValue()).append("건)");
+        shown++;
+      } else {
+        otherKinds++;
+        otherCount += e.getValue();
+      }
+    }
+    if (otherKinds > 0) {
+      sb.append(", 기타 ").append(otherKinds).append("종 ").append(otherCount).append("건");
+    }
+    return sb.toString();
   }
 
   public SessionSummaryDto getSessionSummary() {

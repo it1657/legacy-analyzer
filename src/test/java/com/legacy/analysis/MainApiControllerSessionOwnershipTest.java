@@ -3,9 +3,12 @@ package com.legacy.analysis;
 import com.legacy.auth.Role;
 import com.legacy.auth.User;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -26,6 +29,14 @@ import static org.mockito.Mockito.when;
  * {@code MainApiController#isSessionOwnerOrAdmin}으로 재사용해 추가했다.
  */
 class MainApiControllerSessionOwnershipTest {
+
+  /**
+   * 재개 성공을 단언하는 테스트의 <b>대기 경로 픽스처용 실제 파일</b>을 둘 디렉터리.
+   * 2026-10 REQ-004로 재개가 원본 존재를 확인하게 됐으므로, 존재하지 않는 경로("/tmp/src/A.java")로는
+   * 재개가 정상 거부된다. 거부를 단언하는 테스트들은 소유권 검사가 원본 판정보다 앞이라 그대로 둔다.
+   */
+  @TempDir
+  Path pendingSourceDir;
 
   private MainApiController newController(AnalysisSessionManager sessionManager,
       AnalysisHistoryRepository analysisHistoryRepository) {
@@ -106,11 +117,12 @@ class MainApiControllerSessionOwnershipTest {
   // ===================================================================
 
   @Test
-  void resume_소유자_본인이_호출하면_성공한다() throws InterruptedException {
+  void resume_소유자_본인이_호출하면_성공한다() throws Exception {
     AnalysisSessionManager sessionManager = mock(AnalysisSessionManager.class);
     SessionState session = new SessionState("sid", "/tmp/src", "/tmp/out");
     session.setUsername("owner");
-    session.setPendingFilePaths(java.util.List.of("/tmp/src/A.java"));
+    session.setPendingFilePaths(
+        java.util.List.of(Files.createFile(pendingSourceDir.resolve("A.java")).toString()));
     when(sessionManager.getSession("sid")).thenReturn(session);
     MainApiController controller = newController(sessionManager, mock(AnalysisHistoryRepository.class));
 
@@ -119,7 +131,8 @@ class MainApiControllerSessionOwnershipTest {
     assertEquals(true, response.get("success"));
     assertEquals("ANALYZING", session.getCurrentPhase());
     // resumePendingFilesInThread가 기동한 백그라운드 스레드가 세션 상태를 추가로 건드리기 전에
-    // 어서션이 끝나도록 잠깐 대기(파일이 실제로 존재하지 않아 즉시 빈 목록으로 종료됨).
+    // 어서션이 끝나도록 잠깐 대기(실제 파일 1개로 재개되며, 백그라운드 스레드는 이 테스트가
+    // null로 넘긴 협력자에서 예외로 끝나므로 위 단언에 영향이 없다).
     Thread.sleep(100);
   }
 

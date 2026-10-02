@@ -56,10 +56,9 @@ public class UserActivityController {
       List<AnalysisHistory> histories = analysisHistoryRepository
           .findByUserIdOrderByCreatedAtDesc(user.getSeq());
 
-      // (REQ-002·REQ-004) PAUSED 행의 세션만 모아 findAllById 1회 배치 조회로 읽고, 그 한 번의
-      // 결과에서 ① 미확정 집합(pauseSettled) ② 원본 존재 상태를 함께 계산한다 — 행마다 개별
-      // 조회하면 목록 조회 비용이 이력 수에 비례해 늘어나므로 금지(설계 §4.2).
-      PausedSessionFacts pausedFacts = loadPausedSessionFacts(histories);
+      // (REQ-002) PAUSED 행의 세션만 모아 findAllById 1회 배치 조회로 pauseSettled를 채운다 —
+      // 행마다 개별 조회하면 목록 조회 비용이 이력 수에 비례해 늘어나므로 금지(설계 §4.2).
+      Set<String> unsettledSessionIds = collectUnsettledPausedSessionIds(histories);
 
       List<Map<String, Object>> response = histories.stream()
           .map(h -> {
@@ -85,15 +84,7 @@ public class UserActivityController {
             map.put("hasClaudeMd", h.getClaudeMdContent() != null && !h.getClaudeMdContent().isBlank());
             // (REQ-002) false = 일시정지 요청은 됐지만 pendingFilePaths가 아직 확정되지 않은 구간("멈추는 중").
             // 그 외(확정 후·PAUSED가 아닌 행·세션 행이 없거나 NULL인 기존 세션)는 전부 true.
-            map.put("pauseSettled", !pausedFacts.unsettledSessionIds().contains(h.getSessionId()));
-            // (REQ-004) 원본 존재 상태 — PAUSED이고 확정이며 세션 행과 대기 목록이 있을 때만 값이 있다.
-            // 그 외(완료·취소·미확정·세션 행 없음·대기 목록 빔·판정 실패)는 세 필드 모두 null이고,
-            // 프런트는 null을 "표시할 것 없음"으로 읽는다(기존 동작).
-            SourceAvailabilityInfo source = "PAUSED".equals(h.getStatus())
-                ? pausedFacts.sourceInfoBySessionId().get(h.getSessionId()) : null;
-            map.put("sourceAvailability", source != null ? source.status() : null);
-            map.put("pendingFileCount", source != null ? source.pendingCount() : null);
-            map.put("missingFileCount", source != null ? source.missingCount() : null);
+            map.put("pauseSettled", !unsettledSessionIds.contains(h.getSessionId()));
             return map;
           })
           .toList();
@@ -106,72 +97,38 @@ public class UserActivityController {
     }
   }
 
-  /** (REQ-002·REQ-004) PAUSED 세션 1회 배치 조회로 함께 얻는 두 가지 부가 사실. */
-  private record PausedSessionFacts(Set<String> unsettledSessionIds,
-      Map<String, SourceAvailabilityInfo> sourceInfoBySessionId) {
-  }
-
-  /** (REQ-004) 목록 행에 실릴 원본 존재 상태. {@code status}는 {@code SessionSourceAvailability.Status} 이름. */
-  private record SourceAvailabilityInfo(String status, int pendingCount, int missingCount) {
-  }
-
   /**
    * (REQ-002) 이력 목록 중 {@code status == "PAUSED"}인 행의 sessionId만 모아 {@code findAllById(...)}
    * <b>1회</b>로 세션을 읽고, 그중 {@code pauseSettled == false}(아직 멈추는 중)인 sessionId 집합을 돌려준다.
    * PAUSED 행이 없으면 DB를 조회하지 않는다(0회). NULL/true인 세션·세션 행이 없는 이력은 확정으로 취급돼
    * 집합에 들어가지 않는다({@link SessionState#hasSettledPause()}).
    *
-   * <p>(REQ-004, 2026-10) 같은 조회 결과로 <b>원본 존재 상태</b>도 함께 계산한다 — 추가 DB 조회 0회.
-   * 판정은 {@link SessionSourceAvailability#check(List)} 한 곳에서만 하고(사본·재구현 금지), 결과를
-   * 저장하거나 캐시하지 않는다(게이트1 D2 — 원본은 자동 정리기에 지워지거나 복구될 수 있어 저장된 판정은
-   * 곧 틀린 판정이 된다). <b>미확정 세션은 원본 판정 대상이 아니다</b> — 대기 목록이 아직 확정되지 않아
-   * 그 시점의 목록으로 판정하면 실제와 다른 답이 나온다.
-   *
    * <p>(TASK-002C, v5 §0.22.3 (e)) {@code pauseSettled}는 목록의 <b>부가 필드</b>이므로 그 조회 실패가 목록 전체를
-   * 죽이지 않는다 — 세션 조회 구간만 국소 try/catch로 감싸고, 실패하면 빈 결과(= 전 행 {@code pauseSettled=true}
-   * = 기존 동작 = 재개 버튼 노출, 원본 상태 3필드는 전 행 {@code null})로 강등한 뒤 ERROR 로그를 남긴다. 강등
-   * 방향은 프런트의 {@code !== false} 폴백, 엔티티의 NULL=확정 해석과 같은 "기존 동작" 쪽이다. 2026-09-15
-   * 실배포에서 옛 세션 행의 NULL 컬럼 하나가 {@code findAllById} 하이드레이션에서 예외를 내 이력 94건 전체가
-   * 500이 됐던 회귀의 재발 방지 장치다. 한 세션의 원본 판정만 실패한 경우는 <b>그 행만</b> null로 떨어진다.
+   * 죽이지 않는다 — 세션 조회 구간만 국소 try/catch로 감싸고, 실패하면 빈 집합(= 전 행 {@code pauseSettled=true}
+   * = 기존 동작 = 재개 버튼 노출)으로 강등한 뒤 ERROR 로그를 남긴다. 강등 방향은 프런트의 {@code !== false} 폴백,
+   * 엔티티의 NULL=확정 해석과 같은 "기존 동작" 쪽이다. 2026-09-15 실배포에서 옛 세션 행의 NULL 컬럼 하나가
+   * {@code findAllById} 하이드레이션에서 예외를 내 이력 94건 전체가 500이 됐던 회귀의 재발 방지 장치다.
    */
-  private PausedSessionFacts loadPausedSessionFacts(List<AnalysisHistory> histories) {
+  private Set<String> collectUnsettledPausedSessionIds(List<AnalysisHistory> histories) {
     List<String> pausedSessionIds = histories.stream()
         .filter(h -> "PAUSED".equals(h.getStatus()))
         .map(AnalysisHistory::getSessionId)
         .filter(Objects::nonNull)
         .distinct()
         .toList();
-    if (pausedSessionIds.isEmpty()) {
-      return new PausedSessionFacts(Collections.emptySet(), Collections.emptyMap());
-    }
+    if (pausedSessionIds.isEmpty()) return Collections.emptySet();
 
     try {
       Set<String> unsettled = new HashSet<>();
-      Map<String, SourceAvailabilityInfo> sourceInfo = new HashMap<>();
       for (SessionState session : sessionRepository.findAllById(pausedSessionIds)) {
-        if (!session.hasSettledPause()) {
-          unsettled.add(session.getSessionId());
-          continue;
-        }
-        try {
-          SessionSourceAvailability.Result availability =
-              SessionSourceAvailability.check(session.getPendingFilePaths());
-          if (availability.status() != SessionSourceAvailability.Status.NO_PENDING) {
-            sourceInfo.put(session.getSessionId(), new SourceAvailabilityInfo(
-                availability.status().name(), availability.pendingCount(), availability.missingCount()));
-          }
-        } catch (Exception e) {
-          // 한 행의 판정 실패는 그 행만 null로 떨어뜨린다(목록 전체는 200 유지).
-          log.warn("[내 분석이력 원본 상태 판정 실패] 이 행만 표시를 생략한다 — sessionId={}",
-              session.getSessionId(), e);
-        }
+        if (!session.hasSettledPause()) unsettled.add(session.getSessionId());
       }
-      return new PausedSessionFacts(unsettled, sourceInfo);
+      return unsettled;
     } catch (Exception e) {
       // 부가 필드 조회 실패 → 목록은 살리고 전 행 확정(true)으로 강등. 원인·대상은 로그로만 남긴다.
       log.error("[내 분석이력 pauseSettled 조회 실패] 목록은 기존 동작(전 행 확정)으로 강등 — 대상 sessionIds={}",
           pausedSessionIds, e);
-      return new PausedSessionFacts(Collections.emptySet(), Collections.emptyMap());
+      return Collections.emptySet();
     }
   }
 

@@ -35,7 +35,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  *       해소되지 않을 때의 대안(처음부터 새로 분석)을 함께 제시한다.</li>
  *   <li><b>DoD 11 (v4)</b> — 자동 폴링·타이머 재시도·재개 API 자동 호출이 도입되지 않았다
  *       ({@code setInterval}/{@code setTimeout} 호출 수가 TASK-009 착수 전 기준선과 같다).</li>
- *   <li><b>DoD 8</b> — {@code handleAnalysisPaused()}의 세션 정리 3줄이 그대로다(게이트1 ④ 범위 한계).</li>
+ *   <li><b>DoD 8</b> (2026-10 TASK-008로 교체 — REQ-003 / 게이트1 D4) —
+ *       {@code handleAnalysisPaused()}가 <b>확정된 일시정지에서는 제어 패널과 세션 식별자를 유지</b>하고,
+ *       그 밖의 경우(failover 컨펌 거절·실패, 확정 대기 상한 초과)에는 <b>기존 세션 정리 3줄을 그대로</b>
+ *       쓴다. 패널 숨김 줄이 무조건 실행되는 위치에 없는지도 함께 본다.
+ *       <br>종전 DoD 8은 "세션 정리 3줄이 그대로다(게이트1 ④ 범위 한계)"였다 — 게이트1 D4로
+ *       "분석 화면에서 바로 이어서 분석한다"가 확정되면서 그 범위 한계가 해소됐다.</li>
  *   <li><b>①</b> — {@code updateSessionControlPanel()}의 재개 버튼 노출 판단이
  *       {@code isPausedLocally && lastPolledPauseSettled}로 게이팅되고, 그 값은 폴링 응답의
  *       {@code status.pauseSettled !== false}에서 온다.</li>
@@ -165,18 +170,54 @@ class PauseSettledFrontGatingContractTest {
     assertTrue(index.contains(">⏸️ 일시정지 처리 중입니다</span>"), "①의 안내 문구가 ②③과 같은 본문이 아니다");
   }
 
+  /**
+   * DoD 8 (2026-10 TASK-008로 교체, REQ-003 / 게이트1 D4) —
+   * {@code handleAnalysisPaused()}가 <b>확정된 일시정지에서는 세션을 정리하지 않고</b>,
+   * <b>그 밖의 경우에는 기존 정리 3줄을 그대로</b> 쓴다.
+   *
+   * <p>왜 이 세 가지를 보는가: ⓘ PAUSED 분기에서 {@code currentSessionId}를 버리면 같은 화면의
+   * '이어서 분석' 버튼이 누를 대상을 잃는다. ⓘⓘ 그 밖의 경로(failover 컨펌 거절·실패, 확정 대기
+   * 상한 초과)에서 정리를 빼면 끝난 세션의 패널이 화면에 남는다. ⓘⓘⓘ 패널 숨김 줄이 함수 앞쪽의
+   * 무조건 실행 위치로 되돌아가면 ⓘ이 무의미해진다(패널이 먼저 사라진다).
+   */
   @Test
-  void DoD8_handleAnalysisPaused의_세션_정리_동작은_변경되지_않았다() {
+  void DoD8_v2_handleAnalysisPaused는_확정된_일시정지에서만_세션을_유지하고_그_외에는_기존_정리를_한다() {
     String body = extractFunctionBody(readOrFail(locate(DASHBOARD_JS)), "handleAnalysisPaused");
-    // 게이트1 ④: 폴링이 PAUSED를 보는 즉시 세션을 정리하고 패널을 숨기는 동작은 이 TASK에서 건드리지 않는다.
+
+    // ⓘ phase === 'PAUSED' 분기가 있고, 그 분기는 return으로 끝나며 안에서 currentSessionId를 버리지 않는다.
+    int pausedBranchAt = body.indexOf("if (status.phase === 'PAUSED'");
+    assertTrue(pausedBranchAt >= 0,
+        "handleAnalysisPaused()에 phase === 'PAUSED' 분기가 없다 — 확정된 일시정지에서 패널이 유지되지 않는다:\n"
+            + body);
+    int branchEndAt = body.indexOf("\n  }\n", pausedBranchAt);
+    assertTrue(branchEndAt > pausedBranchAt, "phase === 'PAUSED' 분기의 닫는 중괄호를 찾지 못했다");
+    String pausedBranch = body.substring(pausedBranchAt, branchEndAt);
+    assertFalse(pausedBranch.contains("currentSessionId = null"),
+        "확정된 일시정지 분기에서 currentSessionId를 버리면 같은 화면의 재개 버튼이 대상을 잃는다. 분기 본문:\n"
+            + pausedBranch);
+    assertTrue(pausedBranch.contains("return;"),
+        "확정된 일시정지 분기가 return으로 끝나지 않으면 아래 정리 코드가 이어서 실행돼 패널이 사라진다:\n"
+            + pausedBranch);
+
+    // ⓘⓘ 그 외 경로(분기 뒤 fall-through)에는 기존 정리 3줄이 그 순서·그 모양 그대로 있다.
+    // 이 3줄은 함수의 마지막 3줄이어야 한다 — 같은 단언이 CompletionPanelCounterSingleSourceContractTest
+    // (G-07 화이트리스트 밖, 무수정 보호 대상)에도 있으므로 그 모양을 유지하는 것이 계약이다.
+    String fallThrough = body.substring(branchEndAt);
     String cleanup = "  clearSessionFromStorage();\n  currentSessionId = null;\n  updateSessionControlPanel();\n}";
     assertTrue(body.endsWith(cleanup),
-        "handleAnalysisPaused()의 마지막 세션 정리 3줄이 바뀌었다. 실제 끝부분:\n"
-            + body.substring(Math.max(0, body.length() - 200)));
-    assertTrue(body.contains("if (sessionControlPanel) sessionControlPanel.style.display = \"none\";"),
-        "패널 숨김 줄이 바뀌었다");
-    assertFalse(body.contains("pauseSettled") || body.contains("lastPolledPauseSettled"),
-        "handleAnalysisPaused()에 pauseSettled 관련 코드가 들어갔다(범위 밖)");
+        "함수가 기존 세션 정리 3줄(clearSessionFromStorage / currentSessionId = null /"
+            + " updateSessionControlPanel)로 끝나야 한다. 실제 끝부분:\n"
+            + body.substring(Math.max(0, body.length() - 300)));
+    assertTrue(fallThrough.contains("if (sessionControlPanel) sessionControlPanel.style.display = \"none\";"),
+        "그 외 경로에서 패널을 숨기지 않는다 — 끝난 세션의 패널이 화면에 남는다");
+    assertTrue(fallThrough.contains("isPausedLocally = false;"),
+        "그 외 경로에서 isPausedLocally를 내리지 않으면 다음 분석의 버튼 판정이 오염된다");
+
+    // ⓘⓘⓘ 패널 숨김 줄이 무조건 실행되는 위치(분기보다 앞)에 없다.
+    String beforeBranch = body.substring(0, pausedBranchAt);
+    assertFalse(beforeBranch.contains("sessionControlPanel.style.display = \"none\""),
+        "패널 숨김 줄이 분기보다 앞(무조건 실행 위치)에 있다 — 확정된 일시정지에서도 패널이 먼저 사라진다:\n"
+            + beforeBranch);
   }
 
   // ---------------------------------------------------------------------------------------------

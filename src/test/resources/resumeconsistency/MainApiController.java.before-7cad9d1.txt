@@ -255,9 +255,8 @@ public class MainApiController {
    * 시점의 서로 다른 문제를 다루는 보완 관계이며 중복이 아니다(02-design-v1 §2.4).
    *
    * {@code available=false}는 "설치된 모델이 없음"이 아니라 <b>"확인 불가"</b>(타임아웃/미기동/
-   * 비Ollama 백엔드)를 뜻하며, 이때 {@code models}는 빈 배열이다. 이 엔드포인트는 설치 목록과
-   * 확인 가능 여부만 돌려준다 — 확인 불가일 때 화면을 어떻게 처리할지는 {@code dashboard.js}의
-   * {@code filterInstalledLocalModels()}가 정한다.
+   * 비Ollama 백엔드)를 뜻하며, 이때 {@code models}는 빈 배열이다 — 프런트는 이 경우 DB 목록을
+   * 거르지 않고 그대로 노출하되 경고 문구를 붙인다.
    */
   @GetMapping("/api/config/llm-models/local-installed")
   @ResponseBody
@@ -797,12 +796,6 @@ public class MainApiController {
       dto.setFinalSummary((String) session.getMetadata().get("finalSummary"));
       dto.setReadmePath((String) session.getMetadata().get("readmePath"));
       dto.setReadmeContent((String) session.getMetadata().get("readmeContent"));
-    }
-
-    // (REQ-002 ③) historyId는 PAUSED에서도 싣는다 — 전량실패 PAUSED의 완료 패널이 'PPT 다운로드'를
-    // 이 값으로 호출하기 때문이다. 위 COMPLETED 전용 4개 필드(평균 시간·최종 요약·README)는 정상
-    // 완료에서만 의미가 있어 그대로 COMPLETED 전용으로 둔다.
-    if ("COMPLETED".equals(phase) || "PAUSED".equals(phase)) {
       String historyIdStr = (String) session.getMetadata().get("historyId");
       if (historyIdStr != null) {
         try { dto.setHistoryId(Long.parseLong(historyIdStr)); } catch (NumberFormatException ignored) {}
@@ -1231,47 +1224,6 @@ public class MainApiController {
     if (!isSessionOwnerOrAdmin(session, authentication)) {
       response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
     }
-
-    // (REQ-001 ②) 이미 끝난 분석·이미 일시정지된 분석에 대한 가드 — 어떤 상태 변경보다 먼저 판정한다.
-    // 종전에는 상태를 먼저 바꾼 뒤 이력을 조회했기 때문에, 완료된 분석에 일시정지가 들어오면 세션이
-    // PAUSED로 덮이고 pause_settled에 FALSE가 쓰여 목록이 "멈추는 중"으로 영구히 남았다.
-    // 이력 조회를 판정 앞으로 당겨 1회만 하고, 그 결과를 아래 이력 갱신에서 그대로 재사용한다.
-    AnalysisHistory history = null;
-    try {
-      history = analysisHistoryRepository.findBySessionId(sessionId);
-    } catch (Exception e) {
-      // 이력 조회 실패는 일시정지 자체를 막지 않는다 — 세션 판정만으로 기존 동작대로 진행한다.
-      log.warn("[일시정지 이력 상태 갱신 실패] sessionId={}", sessionId, e);
-    }
-
-    // Arrays.asList를 쓰는 이유: List.of(...)는 contains(null)에서 NPE를 던진다. status/currentPhase는
-    // DB 복원 경로 등에서 null일 수 있어 null을 "해당 없음"으로 조용히 흘려보내야 한다.
-    List<String> terminalStatuses = Arrays.asList("COMPLETED", "CANCELLED", "FAILED");
-    if (terminalStatuses.contains(session.getStatus())
-        || terminalStatuses.contains(session.getCurrentPhase())
-        || (history != null && terminalStatuses.contains(history.getStatus()))) {
-      log.warn("[일시정지 거부] 이미 끝난 분석 — sessionId={}, sessionStatus={}, phase={}, historyStatus={}",
-          sessionId, session.getStatus(), session.getCurrentPhase(),
-          history != null ? history.getStatus() : null);
-      response.put("success", false);
-      response.put("reason", "SESSION_TERMINAL");
-      response.put("message", "이미 끝난 분석은 일시정지할 수 없습니다.");
-      return response;
-    }
-
-    // 이미 일시정지(또는 크레딧 소진 컨펌 대기) 상태면 아무것도 바꾸지 않고 성공으로 돌려준다 —
-    // 프런트는 success=true를 기존 성공 처리로 받으므로 화면 변경이 필요 없다. 여기서 다시
-    // pauseSettled=FALSE를 쓰면 이미 확정된 세션이 "멈추는 중"으로 되돌아간다.
-    List<String> pausedStatuses =
-        Arrays.asList("PAUSED", SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
-    if (pausedStatuses.contains(session.getStatus())
-        || pausedStatuses.contains(session.getCurrentPhase())) {
-      response.put("success", true);
-      response.put("alreadyPaused", true);
-      response.put("message", "이미 일시정지된 분석입니다.");
-      return response;
-    }
-
     session.setPausedAt(LocalDateTime.now());
     session.setCurrentPhase("PAUSED");
     session.setStatus("PAUSED");
@@ -1287,7 +1239,7 @@ public class MainApiController {
     // 저장하므로, 이 즉시 반영이 없으면 클릭 직후 잠깐(길게는 수십 초) "IN_PROGRESS"로 잘못 보인다.
     // 최종 카운트가 반영된 저장은 그 처리 루프가 끝난 뒤 다시 한 번 일어나므로 여기서는 상태만 앞당겨 반영한다.
     try {
-      // 위에서 판정용으로 이미 1회 조회한 결과를 그대로 쓴다(조회 횟수 불변 — 종전에도 1회였다).
+      AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
       if (history != null && !"COMPLETED".equals(history.getStatus())) {
         history.setStatus("PAUSED");
         analysisHistoryRepository.save(history);
@@ -1363,25 +1315,6 @@ public class MainApiController {
       return response;
     }
 
-    // (REQ-004) 모델 전환·컨펌 시각 기록 같은 부작용을 남기기 전에 원본 존재를 확인한다.
-    // 판정은 resumePendingFilesInThread()에서도 다시 일어나지만, 파일 상태는 그사이에도 바뀔 수
-    // 있으므로 두 지점에서 각각 보는 것이 맞다(저장된 판정을 재사용하지 않는다 — 게이트1 D2).
-    SessionSourceAvailability.Result confirmAvailability =
-        SessionSourceAvailability.check(session.getPendingFilePaths());
-    if (confirmAvailability.status() == SessionSourceAvailability.Status.MISSING) {
-      log.warn("[failover 컨펌 거부] 원본 소실 — sessionId={}, 대기={}개, 소실={}개",
-          sessionId, confirmAvailability.pendingCount(), confirmAvailability.missingCount());
-      response.put("success", false);
-      response.put("reason", "SOURCE_MISSING");
-      response.put("pendingCount", confirmAvailability.pendingCount());
-      response.put("missingCount", confirmAvailability.missingCount());
-      response.put("message", String.format(
-          "원본 소실 — 재개 불가: 분석 대상 원본 파일 %d개가 서버에 남아 있지 않습니다."
-              + " 이 분석 기록은 삭제되지 않고 그대로 남습니다. 처음부터 새로 분석해 주세요.",
-          confirmAvailability.missingCount()));
-      return response;
-    }
-
     // setModel()은 sourceFolderPath(세션의 소스 경로)를 키로 세션별 모델 오버라이드를 저장한다
     // (2026-08-20 setModel 레이스컨디션 핫픽스 이후의 세션 격리 컨벤션) — runAnalysis()가
     // claudeService.setModel(Path.of(sourcePath).toString(), ...)로 호출하는 것과 동일한 정규화.
@@ -1413,47 +1346,10 @@ public class MainApiController {
       return response;
     }
 
-    // (REQ-004) 원본이 아직 서버에 남아 있는지 — 세션의 어떤 상태 변경보다 먼저 판정한다.
-    // 종전에는 여기서 .map(Path::of).filter(Files::exists)로 없는 파일을 조용히 버렸다. 그 결과
-    // 업로드 원본이 자동 정리기에 지워진 뒤 재개하면 0개 파일로 "완료" 처리되거나 대기 목록이
-    // 빈 목록으로 덮어써져 분석 기록이 영구 손상됐다. 판정은 SessionSourceAvailability 한 곳에서만
-    // 하고(판정 사본 제거), 그 결과를 그대로 재개 대상으로 쓴다.
-    SessionSourceAvailability.Result availability = SessionSourceAvailability.check(pendingPaths);
-    if (availability.status() == SessionSourceAvailability.Status.MISSING) {
-      log.warn("[재개 거부] 원본 소실 — sessionId={}, 대기={}개, 소실={}개",
-          sessionId, availability.pendingCount(), availability.missingCount());
-      response.put("success", false);
-      response.put("reason", "SOURCE_MISSING");
-      response.put("pendingCount", availability.pendingCount());
-      response.put("missingCount", availability.missingCount());
-      // 이 message는 화면 3곳이 alert('재개 실패: ' + data.message)로 그대로 띄운다 —
-      // 내부 경로·예외 문자열·sessionId를 넣지 않고 개수와 안내만 담는다.
-      response.put("message", String.format(
-          "원본 소실 — 재개 불가: 분석 대상 원본 파일 %d개가 서버에 남아 있지 않습니다."
-              + " 이 분석 기록은 삭제되지 않고 그대로 남습니다. 처음부터 새로 분석해 주세요.",
-          availability.missingCount()));
-      return response;
-    }
-
-    List<Path> pendingFilePaths = availability.existing();
-
-    // 일부만 소실(PARTIAL, 게이트1 D1)이면 남은 파일로 이어서 처리하고, 사라진 파일은 "처리 실패"로
-    // 남긴다. 그냥 버리면 재개가 끝났을 때 "완료"로 보이면서 일부 파일이 말없이 빠져, 데이터가
-    // 사라졌다는 사실 자체가 어디에도 기록되지 않는다.
-    // processedFiles/totalFiles는 건드리지 않는다 — 종전에도 없는 파일은 처리 수에 들어가지
-    // 않았으므로 진행률 표시는 기존과 같다.
-    if (availability.status() == SessionSourceAvailability.Status.PARTIAL) {
-      for (String missingPath : availability.missing()) {
-        session.addFailedFilePath(missingPath);
-        session.getStatistics().incrementFailureCount();
-        // (REQ-002 ④) 소실 파일도 실패 사유로 집계한다 — 남은 파일까지 전부 실패하면
-        // 전량실패 안내에 SOURCE_MISSING이 함께 보인다. 경로는 넣지 않는다(C10).
-        session.recordFileFailureReason("SOURCE_MISSING", "원본 파일 없음");
-      }
-      session.addRecentLog(String.format(
-          "[재개] 원본 소실로 제외: %d개 (남은 %d개로 이어서 분석합니다)",
-          availability.missingCount(), pendingFilePaths.size()));
-    }
+    List<Path> pendingFilePaths = pendingPaths.stream()
+        .map(Path::of)
+        .filter(Files::exists)
+        .collect(Collectors.toList());
 
     session.setResumedAt(LocalDateTime.now());
     session.setPausedAt(null);
@@ -1466,14 +1362,7 @@ public class MainApiController {
     new Thread(() -> runAnalysisResume(sid, filesToProcess)).start();
 
     response.put("success", true);
-    if (availability.missingCount() > 0) {
-      response.put("missingCount", availability.missingCount());
-      response.put("message", String.format(
-          "분석을 재개합니다. (남은 파일: %d개, 원본 소실로 제외: %d개)",
-          pendingFilePaths.size(), availability.missingCount()));
-    } else {
-      response.put("message", String.format("분석을 재개합니다. (남은 파일: %d개)", pendingFilePaths.size()));
-    }
+    response.put("message", String.format("분석을 재개합니다. (남은 파일: %d개)", pendingFilePaths.size()));
     response.put("pendingCount", pendingFilePaths.size());
     response.put("sessionId", sessionId);
     return response;
@@ -1579,11 +1468,6 @@ public class MainApiController {
           "💳 [크레딧 소진] %d개 완료, %d개 미처리. 자체 LLM(%s)으로 이어서 진행하시겠습니까?",
           completedCount, pendingPaths.size(), failoverModelKey));
     } else {
-      // (REQ-001 ⑤) 종단 분기는 저장 직전에 status를 함께 맞춘다. currentPhase는 메모리 전용(@Transient)이라
-      // DB에 남지 않으므로, status를 쓰지 않으면 이 세션의 DB 행이 IN_PROGRESS로 남아 이력(PAUSED)과
-      // 어긋난다 — 재시작 후 "영원히 진행 중"으로 보이는 원인이다. 게이트1 D7로 이 크레딧 소진
-      // (failover 대상 없음) 분기도 함께 고친다. setCurrentPhase/addRecentLog 위치는 바꾸지 않는다.
-      session.setStatus("PAUSED");
       sessionManager.saveSessionState(session);
       session.setCurrentPhase("PAUSED");
       session.addRecentLog(String.format(
@@ -1701,12 +1585,6 @@ public class MainApiController {
             history.setSelectedRelativePaths(selectedRelativePaths);
           }
           analysisHistoryRepository.save(history);
-          // (REQ-002 ③) historyId를 세션 메타데이터에 "분석 시작 시점에" 넣는다. 종전에는
-          // finalizeAnalysis()(정상 완료)에서만 넣었기 때문에, 전량실패로 PAUSED가 되면 폴링 응답에
-          // historyId가 없어 완료 패널의 'PPT 다운로드'가 동작하지 않았다.
-          if (history.getId() != null) {
-            session.updateMetadata("historyId", history.getId().toString());
-          }
         } catch (Exception e) {
           log.error("[분석 기록 생성 실패]", e);
         }
@@ -1800,11 +1678,6 @@ public class MainApiController {
               // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
               session.addFailedFilePath(filePath.toString());
               session.getStatistics().incrementFailureCount();
-              // (REQ-002 ④) 전량실패 안내에 실을 "진짜 원인"을 모은다. 크레딧 소진은 아래에 전용
-              // 안내가 따로 있으므로 사유 요약에 섞지 않는다(기존 크레딧 문구를 오염시키지 않기).
-              if (!"INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
-                session.recordFileFailureReason(fileState.getErrorType(), fileState.getErrorMessage());
-              }
               // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
               // 병렬 처리 중이라 여러 스레드가 동시에 크레딧 소진을 만날 수 있으므로,
               // 로그/에러기록은 가장 먼저 발견한 스레드 1회만 남긴다.
@@ -1900,8 +1773,6 @@ public class MainApiController {
           history.setFailureCount(session.getStatistics().getFailureCount());
           analysisHistoryRepository.save(history);
         }
-        // (REQ-001 ⑤) 저장 직전에 status도 CANCELLED로 맞춘다(이력 status와 일치시킨다).
-        session.setStatus("CANCELLED");
         sessionManager.saveSessionState(session);
         session.setCurrentPhase("CANCELLED");
         return;
@@ -1928,16 +1799,7 @@ public class MainApiController {
           history.setFailureCount(session.getStatistics().getFailureCount());
           analysisHistoryRepository.save(history);
         }
-        // (REQ-001 ⑤) 저장 직전에 status도 PAUSED로 맞춘다(이력 status와 일치시킨다).
-        session.setStatus("PAUSED");
         sessionManager.saveSessionState(session);
-        // (REQ-002 ④) 파일별 실패 사유 요약이 있으면 errorLog 마지막 줄로 1줄 올린다. 파일 실패는
-        // errorLog에 남지 않으므로 종전에는 이 목록이 비어 "알 수 없는 오류"가 그대로 사용자에게
-        // 보였다 — 아래 lastError가 진짜 원인을 쓰게 하려고 계산 직전에 넣는다.
-        String failureSummary = session.summarizeFileFailureReasons();
-        if (failureSummary != null) {
-          session.addErrorLog("전체 실패 원인: " + failureSummary);
-        }
         List<String> errLog = session.getErrorLog();
         String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
         session.addRecentLog(String.format(
@@ -1999,22 +1861,6 @@ public class MainApiController {
     SessionState session = sessionManager.getSession(sessionId);
     if (session == null) { log.error("[재개 오류] 세션 없음: {}", sessionId); return; }
 
-    // (REQ-004 2차 안전장치) 재개할 파일이 0개면 이력 저장·CLAUDE.md 생성·RAG 색인·카운터 초기화·
-    // 전량실패 분기·완료 처리를 전부 건너뛰고 즉시 되돌린다. 정상 경로에서는 위 1차 가드
-    // (resumePendingFilesInThread의 원본 판정)가 막으므로 여기에 도달하지 않는 심층 방어다.
-    //
-    // 여기서 saveSessionState()를 부르지 않는 것이 핵심이다 — resumePendingFilesInThread()가
-    // 스레드 기동 전에 메모리 세션의 대기 목록을 이미 비웠으므로, 저장하면 DB에 남아 있는 원래
-    // 대기 목록까지 빈 목록으로 덮어써 2차 안전장치가 스스로 기록을 영구 손상시킨다.
-    // 메모리 상태만 PAUSED로 되돌리고 끝낸다(DB 행은 재개 호출 전 그대로 남는다).
-    if (fileList == null || fileList.isEmpty()) {
-      log.error("[재개 중단] 재개할 원본 파일이 0개 — sessionId={}", sessionId);
-      session.setStatus("PAUSED");
-      session.setCurrentPhase("PAUSED");
-      session.addRecentLog("[재개 중단] 재개할 원본 파일이 없어 중단했습니다. 분석 기록은 그대로 보존됩니다.");
-      return;
-    }
-
     long startTime = System.currentTimeMillis();
     try {
       String normalizedSourcePath = session.getSourcePath();
@@ -2044,11 +1890,6 @@ public class MainApiController {
       if (history != null) {
         history.setStatus("IN_PROGRESS");
         analysisHistoryRepository.save(history);
-        // (REQ-002 ③) 재개 경로에서도 historyId를 채운다 — 서버 재시작 후 DB에서 복원된 세션은
-        // 메타데이터가 비어 있으므로, 여기서 넣지 않으면 재개 후 전량실패에서 PPT 버튼이 또 죽는다.
-        if (history.getId() != null) {
-          session.updateMetadata("historyId", history.getId().toString());
-        }
       }
 
       // 최초 실행 시 생성해둔 CLAUDE.md를 재사용 (앱 재시작 등으로 메모리에 없을 수 있으므로 DB에서 복원).
@@ -2133,10 +1974,6 @@ public class MainApiController {
               // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
               session.addFailedFilePath(filePath.toString());
               session.getStatistics().incrementFailureCount();
-              // (REQ-002 ④) runAnalysis()의 FAILED 분기와 같은 처리 — 크레딧 소진만 제외한다.
-              if (!"INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
-                session.recordFileFailureReason(fileState.getErrorType(), fileState.getErrorMessage());
-              }
               // 2026-08-21(Phase 4, failover 컨펌): runAnalysis()와 동일한 이유로 session.cancel()
               // 호출을 제거한다 — 재개 흐름에서 또다시 isCancelled가 영구화되는 것을 막기 위함.
               if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
@@ -2216,8 +2053,6 @@ public class MainApiController {
           history.setFailureCount(session.getStatistics().getFailureCount());
           analysisHistoryRepository.save(history);
         }
-        // (REQ-001 ⑤) 저장 직전에 status도 CANCELLED로 맞춘다(이력 status와 일치시킨다).
-        session.setStatus("CANCELLED");
         sessionManager.saveSessionState(session);
         session.setCurrentPhase("CANCELLED");
         return;
@@ -2238,14 +2073,7 @@ public class MainApiController {
           history.setStatus("PAUSED");
           analysisHistoryRepository.save(history);
         }
-        // (REQ-001 ⑤) 저장 직전에 status도 PAUSED로 맞춘다(이력 status와 일치시킨다).
-        session.setStatus("PAUSED");
         sessionManager.saveSessionState(session);
-        // (REQ-002 ④) runAnalysis()의 전량실패 분기와 같은 처리 — lastError 계산 직전에 1줄 올린다.
-        String failureSummary = session.summarizeFileFailureReasons();
-        if (failureSummary != null) {
-          session.addErrorLog("전체 실패 원인: " + failureSummary);
-        }
         List<String> errLog = session.getErrorLog();
         String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
         session.addRecentLog(String.format(
