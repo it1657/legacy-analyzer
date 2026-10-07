@@ -200,7 +200,7 @@ class MainApiControllerResumeSourceMissingTest {
     // 사라진 파일은 실패로 기록된다(원문 경로 그대로).
     assertEquals(Set.of(goneA, goneB), session.getFailedFilePaths());
     assertEquals(2, session.getStatistics().getFailureCount());
-    // C4 — processedFiles/totalFiles는 건드리지 않는다.
+    // 총계가 대기 수보다 작은 픽스처라 재개 카운터 재기준이 생략된다 — 그래서 처리 수는 바뀌지 않는다.
     assertEquals(processedBefore, session.getProcessedFiles(), "processedFiles는 바뀌지 않는다");
 
     // 터미널 안내 1줄

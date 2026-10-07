@@ -111,7 +111,7 @@ class SessionStateFileFailureReasonTest {
 
     String summary = s.summarizeFileFailureReasons();
     System.out.println("[사유 요약] null/공백 메시지 → " + summary);
-    assertEquals("API_AUTHENTICATION (3건)", summary, "세 건이 같은 사유로 묶여야 한다");
+    assertEquals("인증 실패(API 키 확인 필요) (3건)", summary, "세 건이 같은 사유로 묶여야 한다");
   }
 
   @Test

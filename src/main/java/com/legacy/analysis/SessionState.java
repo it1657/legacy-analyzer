@@ -195,11 +195,43 @@ public class SessionState {
   @Transient
   private final Map<String, Integer> fileFailureReasonCounts = new LinkedHashMap<>();
 
+  /**
+   * 사유 집계 키 → 사용자에게 보여줄 표시 문자열. 키는 "유형 + 정규화 메시지"라 사람이 읽을 것이
+   * 아니므로, 표시 문자열을 따로 보관한다(키가 곧 표시였던 종전 구조에서는 식별자만 다른 오류가
+   * 서로 다른 사유로 쪼개졌다).
+   *
+   * <p>{@code @Transient} + 접근자·{@code @JsonProperty} 없음 — {@link #fileFailureReasonCounts}와
+   * 같은 계약이다(세션 DTO 모양을 바꾸지 않는다).
+   */
+  @Transient
+  private final Map<String, String> failureReasonDisplays = new LinkedHashMap<>();
+
   /** 요약에 나란히 보여줄 서로 다른 사유의 최대 개수. 그 밖은 "기타"로 묶는다. */
   private static final int MAX_FAILURE_REASON_KINDS = 5;
 
   /** 사유 문자열 하나의 최대 길이. 긴 스택 메시지가 안내 문구를 뒤덮지 않게 자른다. */
   private static final int MAX_FAILURE_REASON_LENGTH = 200;
+
+  /** 사유 집계 키의 "유형 ↔ 메시지" 구분자. 메시지에 나올 수 없는 문자를 쓴다. */
+  private static final String FAILURE_REASON_KEY_SEPARATOR = "\u0000";
+
+  // 사유 메시지에서 지우는 식별자·시각 패턴. 같은 원인인데 매 호출마다 달라지는 값만 지운다 —
+  // 숫자 일반은 지우지 않는다(지우면 "사유 #1"~"사유 #20"이 한 종으로 뭉쳐 원인이 사라진다).
+  /** JSON 쌍 {@code ,"request_id":"…"} (앞 쉼표 포함). */
+  private static final java.util.regex.Pattern REQUEST_ID_JSON_PAIR =
+      java.util.regex.Pattern.compile(",?\\s*\"request_id\"\\s*:\\s*\"[^\"]*\"");
+  /** 따옴표가 닫히지 않은 경우까지 포함한 {@code request_id: …} / {@code request_id=…}. */
+  private static final java.util.regex.Pattern REQUEST_ID_LOOSE =
+      java.util.regex.Pattern.compile("\"?request_id\"?\\s*[:=]\\s*\"?[A-Za-z0-9_\\-]*\"?");
+  /** 맨몸 {@code req_} 토큰(본문이 잘려 키가 함께 사라진 경우). */
+  private static final java.util.regex.Pattern BARE_REQUEST_ID_TOKEN =
+      java.util.regex.Pattern.compile("req_[A-Za-z0-9]{6,}");
+  private static final java.util.regex.Pattern UUID_TOKEN = java.util.regex.Pattern.compile(
+      "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+  private static final java.util.regex.Pattern ISO_DATETIME = java.util.regex.Pattern.compile(
+      "\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:?\\d{2})?");
+  private static final java.util.regex.Pattern REPEATED_WHITESPACE =
+      java.util.regex.Pattern.compile("\\s+");
 
   // 기본 생성자
   public SessionState() {
@@ -333,6 +365,18 @@ public class SessionState {
 
   public void addErrorLog(String errorMessage) {
     errorLog.add("[" + LocalDateTime.now() + "] " + errorMessage);
+  }
+
+  /**
+   * (REQ-003-b) 타임스탬프 접두사를 붙이지 않고 오류 줄을 1줄 남긴다.
+   *
+   * <p>상태 API의 {@code errorMessage}는 {@code errorLog}의 마지막 줄을 그대로 내려준다. 그래서
+   * {@link #addErrorLog(String)}로 넣은 전량실패 안내는 사용자 화면에서 기계적인 시각 문자열이
+   * 원인보다 먼저 읽혔다. <b>사용자에게 그대로 보이는 안내만</b> 이 메서드를 쓴다 —
+   * 그 밖의 세션 단위 사건(크레딧 소진 등)은 종전처럼 타임스탬프를 남긴다.
+   */
+  public void addErrorLogWithoutTimestamp(String message) {
+    errorLog.add(message);
   }
 
   public boolean isCancelled() {
@@ -493,24 +537,70 @@ public class SessionState {
   }
 
   /**
-   * (REQ-002 ④) 파일 1건의 실패 사유를 기록한다. <b>같은 사유는 건수만 올린다</b>
-   * (정규화한 메시지 + errorType이 같으면 같은 사유로 본다).
+   * (REQ-002 ④, REQ-003-b) 파일 1건의 실패 사유를 기록한다. <b>같은 사유는 건수만 올린다.</b>
    *
-   * <p>정규화 규칙: 메시지를 {@code trim}하고, 비어 있으면 {@code errorType}으로 대체하며,
-   * {@value #MAX_FAILURE_REASON_LENGTH}자를 넘으면 자른다. 둘 다 비어 있으면 <b>기록하지 않는다</b> —
+   * <p><b>집계 키 = {@code errorType} + 정규화 메시지</b>다. 종전에는 표시 문자열 자체가 키여서,
+   * 같은 원인인데 {@code request_id}만 다른 오류 메시지가 N종으로 쪼개졌다 — 전량실패 안내가
+   * "서로 다른 사유 5종 + 기타 …"로 보이고 정작 원인은 읽히지 않았다. 반대로 errorType이 키에
+   * 들어가므로, 메시지가 같아도 유형이 다르면 다른 사유로 센다.
+   *
+   * <p><b>정규화</b>: {@code trim} → {@code request_id} 쌍·맨몸 {@code req_} 토큰·UUID·ISO-8601
+   * 날짜시각 제거 → 연속 공백 1칸 → {@code trim}. <b>숫자 일반은 지우지 않는다</b> — 지우면
+   * 서로 다른 사유가 한 종으로 뭉쳐 사용자에게 보이는 원인이 사라진다.
+   *
+   * <p><b>표시</b>: 유형 이름표가 있으면 {@code 이름표 — 정규화 메시지}, 없으면 정규화 메시지.
+   * 메시지가 비면 이름표만(이름표도 없으면 {@code errorType}) 쓰고, 둘 다 비면 <b>기록하지 않는다</b> —
    * "알 수 없는 오류" 같은 무의미한 문자열을 집계에 넣으면 그게 사용자 안내로 그대로 나간다.
+   * 표시는 {@value #MAX_FAILURE_REASON_LENGTH}자를 넘으면 자른다.
    *
    * <p>병렬 분석 루프의 여러 스레드가 동시에 부르므로 {@code synchronized}다
    * ({@code AnalysisStatistics.incrementFailureCount()}와 같은 방식).
    */
   public synchronized void recordFileFailureReason(String errorType, String message) {
-    String reason = (message == null || message.isBlank()) ? errorType : message.trim();
-    if (reason == null || reason.isBlank()) return;
-    reason = reason.trim();
-    if (reason.length() > MAX_FAILURE_REASON_LENGTH) {
-      reason = reason.substring(0, MAX_FAILURE_REASON_LENGTH);
+    String label = com.legacy.core.ApiErrorHandler.failureReasonLabel(errorType);
+    String normalized = normalizeFailureReasonMessage(message);
+
+    String display;
+    if (normalized.isEmpty()) {
+      if (label != null) {
+        display = label;
+      } else if (errorType != null && !errorType.isBlank()) {
+        display = errorType.trim();
+      } else {
+        return;
+      }
+    } else {
+      display = label != null ? label + " — " + normalized : normalized;
     }
-    fileFailureReasonCounts.merge(reason, 1, Integer::sum);
+    if (display.length() > MAX_FAILURE_REASON_LENGTH) {
+      display = display.substring(0, MAX_FAILURE_REASON_LENGTH);
+    }
+
+    String keyMessage = normalized.length() > MAX_FAILURE_REASON_LENGTH
+        ? normalized.substring(0, MAX_FAILURE_REASON_LENGTH) : normalized;
+    String key = (errorType == null ? "" : errorType.trim())
+        + FAILURE_REASON_KEY_SEPARATOR + keyMessage;
+
+    fileFailureReasonCounts.merge(key, 1, Integer::sum);
+    failureReasonDisplays.putIfAbsent(key, display);
+  }
+
+  /**
+   * 사유 메시지에서 "같은 원인인데 호출마다 달라지는 값"만 지운다. 결과가 같으면 같은 사유다.
+   * 지우는 대상과 지우지 않는 대상은 {@link #recordFileFailureReason}의 정규화 설명 참고.
+   */
+  private static String normalizeFailureReasonMessage(String message) {
+    if (message == null) {
+      return "";
+    }
+    String normalized = message.trim();
+    normalized = REQUEST_ID_JSON_PAIR.matcher(normalized).replaceAll("");
+    normalized = REQUEST_ID_LOOSE.matcher(normalized).replaceAll("");
+    normalized = BARE_REQUEST_ID_TOKEN.matcher(normalized).replaceAll("");
+    normalized = UUID_TOKEN.matcher(normalized).replaceAll("");
+    normalized = ISO_DATETIME.matcher(normalized).replaceAll("");
+    normalized = REPEATED_WHITESPACE.matcher(normalized).replaceAll(" ");
+    return normalized.trim();
   }
 
   /**
@@ -536,7 +626,8 @@ public class SessionState {
     for (Map.Entry<String, Integer> e : sorted) {
       if (shown < MAX_FAILURE_REASON_KINDS) {
         if (sb.length() > 0) sb.append(", ");
-        sb.append(e.getKey()).append(" (").append(e.getValue()).append("건)");
+        sb.append(failureReasonDisplays.getOrDefault(e.getKey(), e.getKey()))
+            .append(" (").append(e.getValue()).append("건)");
         shown++;
       } else {
         otherKinds++;
@@ -547,6 +638,60 @@ public class SessionState {
       sb.append(", 기타 ").append(otherKinds).append("종 ").append(otherCount).append("건");
     }
     return sb.toString();
+  }
+
+  /**
+   * (REQ-001 A, 게이트1 D1) 재개 카운터 재기준의 결과.
+   *
+   * @param applied          재기준을 적용했는지(생략했으면 {@code false}이고 이전 값 == 새 값)
+   * @param previousProcessed 재기준 전 처리 수
+   * @param previousFailure   재기준 전 실패 수
+   * @param newProcessed      재기준 후 처리 수
+   */
+  public record ResumeRebase(boolean applied, int previousProcessed, int previousFailure,
+                             int newProcessed) {
+  }
+
+  /**
+   * (REQ-001 A, 게이트1 D1) <b>재개를 시작할 때 카운터를 다시 센다</b> — 처리 수를
+   * {@code 총계 − 대기 수 + 소실 수}로 바꾸고 실패 수를 0에서 다시 세게 한다.
+   *
+   * <p>왜 필요한가: 재개 루프는 저장돼 있던 처리 수에서 <b>이어서</b> 올린다. 그런데 일시정지·전량실패로
+   * 돌아간 파일은 대기 목록에 그대로 남아 재개 때 <b>다시</b> 처리되므로, 같은 파일이 처리 수를 두 번
+   * 올린다. 재개를 두 번 하면 12개 파일 세션의 처리 수가 24가 되고 진행률이 100%를 넘는다.
+   * "끝난 파일 수 = 총계 − 대기 수"가 유일하게 믿을 수 있는 기준이므로 매 재개 시작에 그 값으로 맞춘다.
+   *
+   * <p>소실 수를 더하는 이유: 원본이 사라진 파일은 다시 처리할 수 없으니 <b>끝난 파일(실패)</b>로 센다
+   * (게이트1 D1 — 직전 사이클의 반대 결정을 번복한 것이다). 실패 목록·실패 수·사유는 호출부의
+   * PARTIAL 처리가 채우므로 여기서는 처리 수만 그 몫까지 포함해 둔다.
+   *
+   * <p><b>건드리지 않는 것</b>: 성공·건너뜀 수, 실패 파일 목록, status·phase·일시정지 확정 플래그,
+   * 대기 목록. 이 메서드는 "다시 세기"만 하고 상태 전이에는 관여하지 않는다.
+   *
+   * @param pendingCount 판정 대상이었던 대기 파일 수(소실 포함 — {@code availability.pendingCount()})
+   * @param missingCount 그중 원본이 사라진 수({@code availability.missingCount()})
+   * @return 적용 여부와 이전·새 값. 입력이 앞뒤가 맞지 않으면 <b>아무것도 바꾸지 않고</b>
+   *         {@code applied=false}를 돌려준다(음수·총계 초과 처리 수를 절대 만들지 않는다).
+   */
+  public synchronized ResumeRebase rebaseCountersForResume(int pendingCount, int missingCount) {
+    int previousProcessed = this.processedFiles;
+    int previousFailure = this.statistics.getFailureCount();
+
+    // 총계가 대기 수보다 작거나 소실 수가 대기 수 범위를 벗어나면, 다시 센 값이 음수이거나 총계를
+    // 넘는다. 그런 값을 만드는 것보다 종전 값을 그대로 두는 쪽이 낫다(호출부가 경고를 남긴다).
+    if (this.totalFiles < pendingCount || missingCount < 0 || missingCount > pendingCount) {
+      return new ResumeRebase(false, previousProcessed, previousFailure, previousProcessed);
+    }
+
+    int newProcessed = this.totalFiles - pendingCount + missingCount;
+    this.processedFiles = newProcessed;
+    this.statistics.resetFailureCount();
+    // 실패 수를 0에서 다시 세므로 사유 집계도 함께 비운다 — 그러지 않으면 지난 실행의 사유가
+    // 이번 실행 건수에 얹혀 "사유 건수 합 == 실패 수"가 깨진다. 키↔표시 두 자료구조를 함께 비운다.
+    fileFailureReasonCounts.clear();
+    failureReasonDisplays.clear();
+
+    return new ResumeRebase(true, previousProcessed, previousFailure, newProcessed);
   }
 
   public SessionSummaryDto getSessionSummary() {

@@ -84,6 +84,15 @@ public class RetryHandler {
    * 예외를 에러 타입으로 분류
    */
   private ApiErrorHandler.ErrorType classifyError(Exception e) {
+    // 응답을 받은 오류(상태 코드가 있는 예외)는 ApiErrorHandler 한 곳에서만 분류한다.
+    // 아래 메시지 규칙과 ApiErrorHandler의 규칙이 서로 달라서, 같은 예외가 여기서는 재시도 불가로,
+    // 안쪽에서는 재시도 가능으로 갈리는 일이 있었다(실측: 401 → 여기 API_AUTHENTICATION /
+    // 안쪽 CONNECT_FAILURE).
+    int status = ApiErrorHandler.httpStatusOf(e);
+    if (status > 0) {
+      return apiErrorHandler.classifyError(e, status);
+    }
+
     String message = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
 
     if (message.contains("timeout") || message.contains("timed out")) {

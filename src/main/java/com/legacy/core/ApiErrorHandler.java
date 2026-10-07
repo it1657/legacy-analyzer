@@ -3,6 +3,7 @@ package com.legacy.core;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import java.util.*;
 
 /**
@@ -12,6 +13,26 @@ import java.util.*;
 public class ApiErrorHandler {
 
   private static final Logger log = LoggerFactory.getLogger(ApiErrorHandler.class);
+
+  /** 원인 사슬을 따라 내려갈 최대 깊이 — 사슬이 서로를 가리키는 경우에도 멈추게 하는 안전장치. */
+  private static final int MAX_CAUSE_DEPTH = 10;
+
+  /**
+   * 실패 사유 요약에 붙이는 유형 이름표. 사용자가 읽는 안내에는 예외 원문만 나가는데, 원문은
+   * 영문·JSON이라 "무슨 종류의 문제인지"가 읽히지 않는다. 여기 없는 유형은 이름표를 붙이지 않는다
+   * (UNKNOWN_ERROR·INSUFFICIENT_CREDITS·SOURCE_MISSING 등 — 전용 안내가 따로 있거나 이름표를 붙여도
+   * 정보가 늘지 않는 경우다).
+   */
+  private static final Map<String, String> FAILURE_REASON_LABELS = Map.of(
+    "API_AUTHENTICATION", "인증 실패(API 키 확인 필요)",
+    "API_FORBIDDEN", "권한 없음(API 접근 권한 확인 필요)",
+    "API_RATE_LIMIT", "요청 한도 초과",
+    "INVALID_REQUEST", "요청 오류",
+    "SERVER_ERROR", "Claude 서버 오류",
+    "NETWORK_TIMEOUT", "응답 시간 초과",
+    "CONNECT_FAILURE", "연결 실패",
+    "FILE_READ_ERROR", "파일 읽기 오류",
+    "FILE_WRITE_ERROR", "파일 쓰기 오류");
 
   public enum ErrorType {
     NETWORK_TIMEOUT,        // 네트워크 타임아웃
@@ -29,14 +50,36 @@ public class ApiErrorHandler {
 
   /**
    * 예외를 분석하여 에러 타입 결정
+   *
+   * 분류 순서가 곧 규칙이다. 응답을 받은 오류(httpStatus > 0)는 상태 코드가 분류를 결정한다 —
+   * 예외 메시지에는 응답 본문이 섞여 들어오기 때문에 본문 글자로 먼저 판단하면 오분류가 난다
+   * (실측: 401 본문의 "authentication_error" 안에 "io"가 있어 아래 "io" 규칙에 걸려
+   * CONNECT_FAILURE로 분류됐고, 재시도 불가인 인증 실패가 재시도 가능으로 뒤집혔다).
+   *
+   * 크레딧 소진만 상태 코드보다 앞에서 본다. 크레딧 소진도 400으로 오는데 상태 코드만으로는
+   * 일반 INVALID_REQUEST와 구별할 수 없고, 구별해야 failover 안내로 갈 수 있다.
+   *
+   * 응답을 받지 못한 오류(httpStatus == 0)는 상태 코드가 없으니 종전처럼 메시지 규칙을 쓴다.
    */
   public ErrorType classifyError(Exception exception, int httpStatus) {
     if (exception == null) {
       return classifyErrorByStatus(httpStatus);
     }
 
-    String exceptionMessage = exception.getMessage().toLowerCase();
+    String exceptionMessage =
+      exception.getMessage() == null ? "" : exception.getMessage().toLowerCase();
 
+    // 크레딧 부족 감지 (400 + "credit balance" 메시지) — 상태 코드보다 메시지가 정확한 유일한 경우
+    if (exceptionMessage.contains("credit balance") || exceptionMessage.contains("too low to access")) {
+      return ErrorType.INSUFFICIENT_CREDITS;
+    }
+
+    // 응답을 받은 오류는 상태 코드가 결정한다
+    if (httpStatus > 0) {
+      return classifyErrorByStatus(httpStatus);
+    }
+
+    // 여기부터는 응답 자체를 받지 못한 오류 — 메시지로만 판단할 수 있다
     // 네트워크 관련 오류
     if (exceptionMessage.contains("timeout") || exceptionMessage.contains("timed out")) {
       return ErrorType.NETWORK_TIMEOUT;
@@ -56,12 +99,40 @@ public class ApiErrorHandler {
       return ErrorType.FILE_READ_ERROR;
     }
 
-    // 크레딧 부족 감지 (400 + "credit balance" 메시지)
-    if (exceptionMessage.contains("credit balance") || exceptionMessage.contains("too low to access")) {
-      return ErrorType.INSUFFICIENT_CREDITS;
-    }
-
     return classifyErrorByStatus(httpStatus);
+  }
+
+  /**
+   * 예외(와 그 원인 사슬)에서 HTTP 상태 코드를 꺼낸다. 응답을 받지 못한 오류는 0이다.
+   *
+   * 재시도 계층이 예외를 여러 겹 감싸므로 자기 자신만 보면 상태 코드를 놓친다.
+   * 사슬이 자기 자신을 가리키거나 서로를 가리키는 경우를 대비해 깊이 상한을 둔다.
+   */
+  public static int httpStatusOf(Throwable t) {
+    Throwable cursor = t;
+    for (int depth = 0; cursor != null && depth < MAX_CAUSE_DEPTH; depth++) {
+      if (cursor instanceof WebClientResponseException responseException) {
+        return responseException.getStatusCode().value();
+      }
+      Throwable cause = cursor.getCause();
+      if (cause == cursor) {
+        break;
+      }
+      cursor = cause;
+    }
+    return 0;
+  }
+
+  /**
+   * 실패 사유 요약에 붙일 유형 이름표. 이름표가 없는 유형이면 {@code null}.
+   *
+   * @param errorTypeName {@link ErrorType}의 이름({@code name()}). null·공백이면 {@code null}
+   */
+  public static String failureReasonLabel(String errorTypeName) {
+    if (errorTypeName == null) {
+      return null;
+    }
+    return FAILURE_REASON_LABELS.get(errorTypeName.trim());
   }
 
   /**

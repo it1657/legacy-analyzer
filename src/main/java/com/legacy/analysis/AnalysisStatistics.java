@@ -25,6 +25,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *       "읽어서 +1 해서 되쓰기" 형태로 쓰면 원자성이 깨진다.
  *       루프 안에 setter 직접 호출이 다시 생기지 않는지는
  *       {@code MainApiControllerCounterIncrementSingleSourceTest}가 감시한다.</li>
+ *   <li><b>재개 재기준 전용 리셋 {@code resetFailureCount()} 하나만 예외로 둔다</b> — 병렬 분석 루프
+ *       <b>밖</b>(재개 요청 스레드)에서만 부르며, 루프가 돌기 전에 실패 수를 0으로 되돌린다.
+ *       재개는 끝나지 않은 파일을 다시 처리하므로 실패 수를 이어서 세면 같은 파일이 두 번 세진다.</li>
  *   <li>필드 타입은 {@code int} 그대로다. {@code @JsonProperty}가 필드에 붙어 있고 이 객체가
  *       {@code SessionDetailDto.statistics}로 API 응답에 실리므로 <b>직렬화 형태를 바꾸지 않는다</b>
  *       (설계 §4.2 A안 = {@code AtomicInteger} 전환은 이 이유로 기각됐다).</li>
@@ -118,6 +121,15 @@ public class AnalysisStatistics {
    */
   public synchronized void incrementFailureCount() {
     this.failureCount++;
+  }
+
+  /**
+   * 실패 건수를 0으로 되돌린다. <b>재개 카운터 재기준 전용</b>이며, 병렬 분석 루프 밖
+   * (재개 요청 스레드)에서 루프가 시작되기 전에만 부른다 — 클래스 Javadoc의 "동시성 계약" 참고.
+   * 증가 메서드와 같은 락(this)에 묶어 둔다.
+   */
+  public synchronized void resetFailureCount() {
+    this.failureCount = 0;
   }
 
   public synchronized int getSkipCount() {

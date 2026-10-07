@@ -1437,11 +1437,51 @@ public class MainApiController {
 
     List<Path> pendingFilePaths = availability.existing();
 
+    // (REQ-001 A, 게이트1 D1) 재개를 시작하기 전에 카운터를 다시 센다. 재개 루프는 저장돼 있던
+    // 처리 수에서 이어서 올리는데, 돌아온 대기 파일을 다시 처리하므로 같은 파일이 두 번 세진다.
+    // "끝난 파일 수 = 총계 − 대기 수"가 유일하게 믿을 수 있는 기준이다. MISSING 거부 판정 뒤에
+    // 두는 이유: 거부된 재개는 세션을 1비트도 바꾸지 않아야 한다(RG-9).
+    // 로그는 서버 로그에만 남긴다 — 세션 터미널에 줄을 더하면 기존 테스트의 줄 계수가 흔들린다.
+    SessionState.ResumeRebase rebase = session.rebaseCountersForResume(
+        availability.pendingCount(), availability.missingCount());
+    if (rebase.applied()) {
+      log.info("[재개 카운터 재기준] sessionId={}, 처리 {}→{}, 실패 {}→0, 대기 {}개(소실 {}개)",
+          sessionId, rebase.previousProcessed(), rebase.newProcessed(), rebase.previousFailure(),
+          availability.pendingCount(), availability.missingCount());
+      if (rebase.previousProcessed() > session.getTotalFiles()) {
+        log.warn("[카운터 불변식 위반 감지] sessionId={}, 저장돼 있던 처리 수 {} > 총계 {} — 재기준값 {}로 교체",
+            sessionId, rebase.previousProcessed(), session.getTotalFiles(), rebase.newProcessed());
+      }
+    } else {
+      log.warn("[재개 카운터 재기준 생략] sessionId={}, 총계 {} < 대기 {}개 — 카운터 그대로",
+          sessionId, session.getTotalFiles(), availability.pendingCount());
+    }
+
+    // (REQ-001 A 보완, D1′) 이전 재개에서 원본이 사라져 실패로 확정된 파일은 대기 목록에 남지 않는다
+    // (재개 대상이 "존재하는 파일"뿐이고 종료 시 대기 목록이 그 목록에서 만들어진다). 그래서 바로 위
+    // 재기준이 실패 수를 0으로 되돌린 뒤 이번 대기 목록만 다시 세면 그 파일들의 실패가 사라진다.
+    // 처리 수는 손대지 않는다 — 재기준의 "총계 − 대기 수"에 이미 들어가 있다. 재기준을 생략했으면
+    // 실패 수가 리셋되지 않았으므로 더하면 이중 계산이 된다.
+    if (rebase.applied()) {
+      int carriedMissingCount = 0;
+      for (String failedPath : session.getFailedFilePaths()) {
+        if (!pendingPaths.contains(failedPath)) {
+          session.getStatistics().incrementFailureCount();
+          session.recordFileFailureReason("SOURCE_MISSING", "원본 파일 없음");
+          carriedMissingCount++;
+        }
+      }
+      if (carriedMissingCount > 0) {
+        log.info("[재개 이월 실패] sessionId={}, 이전 재개에서 원본 소실로 확정된 {}개를 실패로 다시 셈",
+            sessionId, carriedMissingCount);
+      }
+    }
+
     // 일부만 소실(PARTIAL, 게이트1 D1)이면 남은 파일로 이어서 처리하고, 사라진 파일은 "처리 실패"로
     // 남긴다. 그냥 버리면 재개가 끝났을 때 "완료"로 보이면서 일부 파일이 말없이 빠져, 데이터가
     // 사라졌다는 사실 자체가 어디에도 기록되지 않는다.
-    // processedFiles/totalFiles는 건드리지 않는다 — 종전에도 없는 파일은 처리 수에 들어가지
-    // 않았으므로 진행률 표시는 기존과 같다.
+    // 소실 파일은 처리됨(실패)으로 센다 — 처리 수는 바로 앞 재기준이 소실 수까지 넣어 두었고,
+    // 여기서는 실패 목록·실패 수·사유만 채운다.
     if (availability.status() == SessionSourceAvailability.Status.PARTIAL) {
       for (String missingPath : availability.missing()) {
         session.addFailedFilePath(missingPath);
@@ -1936,7 +1976,7 @@ public class MainApiController {
         // 보였다 — 아래 lastError가 진짜 원인을 쓰게 하려고 계산 직전에 넣는다.
         String failureSummary = session.summarizeFileFailureReasons();
         if (failureSummary != null) {
-          session.addErrorLog("전체 실패 원인: " + failureSummary);
+          session.addErrorLogWithoutTimestamp("전체 실패 원인: " + failureSummary);
         }
         List<String> errLog = session.getErrorLog();
         String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
@@ -2195,6 +2235,10 @@ public class MainApiController {
         session.setPauseSettled(Boolean.TRUE);
         if (history != null) {
           history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
           analysisHistoryRepository.save(history);
         }
         sessionManager.saveSessionState(session);
@@ -2236,6 +2280,10 @@ public class MainApiController {
         session.setPendingFilePaths(newPending);
         if (history != null) {
           history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
           analysisHistoryRepository.save(history);
         }
         // (REQ-001 ⑤) 저장 직전에 status도 PAUSED로 맞춘다(이력 status와 일치시킨다).
@@ -2244,7 +2292,7 @@ public class MainApiController {
         // (REQ-002 ④) runAnalysis()의 전량실패 분기와 같은 처리 — lastError 계산 직전에 1줄 올린다.
         String failureSummary = session.summarizeFileFailureReasons();
         if (failureSummary != null) {
-          session.addErrorLog("전체 실패 원인: " + failureSummary);
+          session.addErrorLogWithoutTimestamp("전체 실패 원인: " + failureSummary);
         }
         List<String> errLog = session.getErrorLog();
         String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);

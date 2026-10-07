@@ -185,15 +185,15 @@ class HistoryIdPausedExposureContractTest {
 
     assertEquals(2, countOccurrences(source, "session.summarizeFileFailureReasons()"),
         "사유 요약 호출은 두 전량실패 분기 2곳이어야 한다");
-    assertEquals(3, countOccurrences(source, "session.recordFileFailureReason("),
-        "사유 기록 호출은 두 루프의 FAILED 분기 2곳 + PARTIAL 처리 1곳 = 3곳이어야 한다");
+    assertEquals(4, countOccurrences(source, "session.recordFileFailureReason("),
+        "사유 기록 호출은 두 루프의 FAILED 분기 2곳 + PARTIAL 처리 1곳 + 재개 이월 실패 1곳 = 4곳이어야 한다");
 
     // 사유 기록은 크레딧 소진을 제외해야 한다 — 두 FAILED 분기의 가드 존재 확인.
     assertEquals(2, countOccurrences(source,
             "if (!\"INSUFFICIENT_CREDITS\".equals(fileState.getErrorType())) {"),
         "두 FAILED 분기에 크레딧 소진 제외 가드가 각각 있어야 한다");
 
-    System.out.println("[006 계약] summarize 2곳 / record 3곳 / 크레딧 제외 가드 2곳"
+    System.out.println("[006 계약] summarize 2곳 / record 4곳 / 크레딧 제외 가드 2곳"
         + " — 보증 범위: MainApiController 전체 텍스트에서의 호출 수(주석 제외)");
   }
 
