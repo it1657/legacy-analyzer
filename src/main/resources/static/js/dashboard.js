@@ -1216,6 +1216,10 @@ function startPolling() {
   if (progressPanel) progressPanel.style.display = 'block';
   const overlay = document.getElementById('analysisOverlay');
   if (overlay) overlay.style.display = 'flex';
+  // 직전 실행의 실패 안내는 새 폴링 세션 시작과 함께 닫는다 — 남겨두면 이번 분석 중에 누른 닫기 버튼이
+  // dismissError() → stopAnalysis()로 이어져 진행 중인 세션의 폴링을 끊는다.
+  const errorPanel = document.getElementById('errorPanel');
+  if (errorPanel) errorPanel.style.display = 'none';
 
   if (pollingIntervalId) clearInterval(pollingIntervalId);
   isAnalysisComplete = false;
@@ -1286,6 +1290,8 @@ function startPolling() {
           handleAnalysisPaused(status);
         } else if (status.phase === 'CANCELLED') {
           handleAnalysisCancelled(status);
+        } else if (status.phase === 'FAILED') {
+          handleAnalysisFailed(status);
         } else {
           handleAnalysisCompletion(status);
         }
@@ -1522,6 +1528,54 @@ function handleAnalysisCancelled(status) {
   setExtraControlsLocked(false);
 
   // 업로드 분석이 취소된 경우: 서버에 남은 스테이징 파일을 정리한다 (write-back은 하지 않음 - 결과가 불완전하므로).
+  if (isUploadModeSession && uploadSessionIdForWriteback) {
+    fetch(`/api/upload-session/${uploadSessionIdForWriteback}/cleanup`, { method: 'POST' }).catch(() => {});
+  }
+  uploadSessionIdForWriteback = null;
+  isUploadModeSession = false;
+
+  clearSessionFromStorage();
+  currentSessionId = null;
+  updateSessionControlPanel();
+}
+
+// ===================================================================
+// 분석 실패 처리 (phase === 'FAILED')
+// ===================================================================
+// 종전에는 폴링의 completed 분기가 PAUSED/CANCELLED만 따로 처리하고 FAILED를 완료 처리로 보냈다.
+// 그래서 0건·수집 예외·분석 중 예외로 끝난 실행이 "분석 완료 결과" 패널과 "패치 완료" 그리드로 보였고,
+// 업로드 분석이면 불완전한 결과가 원본 폴더에 write-back됐다. 실패는 실패로 보여야 하므로 완료 패널을
+// 재활용하지 않고, 이미 템플릿에 있는 실패 안내 영역(#errorPanel)과 터미널 한 줄만 쓴다.
+const ANALYSIS_FAILED_FALLBACK_REASON = '서버가 실패 사유를 보내지 않았습니다. 서버 로그를 확인해 주세요.';
+function handleAnalysisFailed(status) {
+  isAnalysisComplete = true;
+  if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+
+  const progressPanel = document.getElementById('progressPanel');
+  const overlay = document.getElementById('analysisOverlay');
+  const sessionControlPanel = document.getElementById('sessionControlPanel');
+  const completionPanel = document.getElementById('completionResultPanel');
+  const logConsole = document.getElementById('terminalLog');
+
+  if (progressPanel) progressPanel.style.display = "none";
+  if (overlay) overlay.style.display = "none";
+  if (sessionControlPanel) sessionControlPanel.style.display = "none";
+  // 분석 시작(runBatchAnalysis)은 이 패널을 닫지 않으므로 직전 실행의 결과가 남아 있을 수 있다.
+  if (completionPanel) completionPanel.style.display = "none";
+
+  const reason = (status && status.errorMessage) ? status.errorMessage : ANALYSIS_FAILED_FALLBACK_REASON;
+
+  if (logConsole) {
+    appendTerminalLine(logConsole, '❌ [분석 실패] ' + reason);
+  }
+  showError('❌ 분석 실패: ' + reason);
+
+  setLocalPathControlsDisabled(false);
+  setUploadControlsDisabled(false);
+  setExtraControlsLocked(false);
+
+  // 업로드 분석이 실패로 끝난 경우: 결과가 불완전하므로 원본 폴더에 반영하지 않고(write-back 없음)
+  // 서버에 남은 스테이징 파일만 정리한다 — 취소 경로와 같은 처리다.
   if (isUploadModeSession && uploadSessionIdForWriteback) {
     fetch(`/api/upload-session/${uploadSessionIdForWriteback}/cleanup`, { method: 'POST' }).catch(() => {});
   }

@@ -26,11 +26,17 @@
  * 시나리오 C) 몫이다. `load` 이벤트 콜백은 **호출하지 않는다**(실제 fetch 유발 방지).
  *
  * 실행: node src/test/js/historyListSourceBadgeHarness.js [my-activity 경로] [admin/dashboard 경로]
- *   - 인자 없음: 실제 템플릿 — **화면당 10케이스(S0·S1·S2·S3a~d·S4a~c), 두 화면 합 20 PASS / exit 0**
+ *   - 인자 없음: 실제 템플릿 — **화면당 19케이스(S0·S1·S2·S3a~d·S4a~c·S5a·S5b1~S5b4·S5c1·S5c2·S5d·S5e),
+ *     두 화면 합 38 PASS / exit 0**
  *   - 고정본 2개를 주면 양성 대조군: 두 화면 S0·S3a~S3d·**S4c** PASS /
  *     **S1·S2·S4a·S4b FAIL → 실패 8건**(고정본엔 MISSING 분기·PARTIAL 경고가 없고 CLAUDE.md 블록은 있다)
- *   - H5·H6 변이 사본을 주면 각각 **S2·S4b FAIL** / **S0 FAIL(SyntaxError) + 9건 평가 불가**
- *   - CLAUDE.md 블록의 `+=`를 `=`로 바꾼 사본(M-C1)을 주면 그 화면의 **S4a·S4b·S4c FAIL**
+ *     — 이 기대값은 TASK-012/013 시점 고정본 기준이며 **S5 신규 케이스는 포함하지 않는다**
+ *     (이번 사이클이 쓴 실물 고정본 `9d89c50^` admin 대조 결과는 05-dev-progress.md 참고)
+ *   - H5·H6 변이 사본을 주면 각각 **S2·S4b FAIL** / **S0 FAIL(SyntaxError) + 18건 평가 불가**
+ *   - CLAUDE.md 블록의 `+=`를 `=`로 바꾼 사본(M-C1)을 주면 그 화면의
+ *     **S4a·S4b·S4c·S5a·S5d FAIL**(앞서 쌓인 PPT·일시정지 안내까지 통째로 지워진다)
+ *   - CLAUDE.md **조건식** 변이(TASK-004 A4·A5·A6·A6′·A10·A11)는 각각
+ *     **S5a / S5b1·S5b2 / S5c1 / S5c2 / S5d / S5e** 를 잡는다
  * 종료코드 0 = 전 케이스 통과, 1 = 실패. 렌더 함수가 예외를 던져도 그 케이스만 FAIL로 기록하고
  * `[케이스별 결과]` JSON 줄과 종료코드는 그대로 나온다(TASK-013 — TASK-010이 이 줄을 기계로 대조한다).
  */
@@ -251,7 +257,8 @@ function runCase(screen, caseId, body) {
 function runCases(screen) {
   if (!screen.ok) {
     // S0가 실패하면 나머지 케이스는 평가할 수 없으므로 FAIL로 집계한다(work-order 지시).
-    for (const c of ['S1', 'S2', 'S3a', 'S3b', 'S3c', 'S3d', 'S4a', 'S4b', 'S4c']) {
+    for (const c of ['S1', 'S2', 'S3a', 'S3b', 'S3c', 'S3d', 'S4a', 'S4b', 'S4c',
+      'S5a', 'S5b1', 'S5b2', 'S5b3', 'S5b4', 'S5c1', 'S5c2', 'S5d', 'S5e']) {
       failures++;
       caseResults[`${screen.screen}/${c}`] = 'FAIL';
       console.log(`  FAIL  [${screen.screen}] ${c} S0 실패로 평가 불가`);
@@ -370,6 +377,175 @@ function runCases(screen) {
       hasResumeCall && hasResumeLabel && noPartial && noMissing && hasClaudeMdBtn,
       `AVAILABLE+CLAUDE.md → 재개 호출(${hasResumeCall}) / 재개 라벨(${hasResumeLabel}) / `
         + `"원본 일부 소실" 없음(${noPartial}) / "원본 소실" 없음(${noMissing}) / CLAUDE.md(${hasClaudeMdBtn})`,
+      html);
+  });
+
+  // ── S5 CLAUDE.md 버튼 조건식 자체를 고정 (TASK-004, REQ-002-a)
+  //    두 화면의 조건은 `h.hasClaudeMd && (h.status === 'COMPLETED' || h.status === 'PAUSED')`다.
+  //    S1~S4c는 **전부 PAUSED 행**이라 상태 조건의 어느 절이 바뀌어도(COMPLETED를 지우거나,
+  //    CANCELLED/FAILED/IN_PROGRESS를 더해도) 아무 케이스도 FAIL이 되지 않는다. S5는 그 조합을
+  //    직접 지나가게 해서 조건식의 절마다 양성·음성 케이스를 갖춘다.
+  //    - 음성 케이스("버튼 없음")가 공허해지지 않게, 같은 행에서 **배지·프로젝트명·행동 칸**을 함께
+  //      단언한다(렌더 자체가 돌았다는 증거). 블록에 도달할 수 있다는 것은 같은 실행의 양성 케이스
+  //      (S5a·S4c·S5d)가 PASS하는 것으로 보인다.
+  //    - 배지는 클래스명이 화면마다 다르므로(my `badge-ok/badge-ing/badge-err`,
+  //      admin `badge-active/badge-inactive`) `>{상태}</span>` 형태로만 단언한다.
+  //    - 행동 칸의 `-`는 시간·비용 칸에도 찍히므로 `html.includes('-')`가 아니라 `>-</div>`로 단언한다.
+  //      `<div style=...>`의 공백도 화면마다 달라 style 문자열로 단언하지 않는다.
+  //    - 버튼은 onclick 함수명이 화면마다 다르므로(`openClaudeMdModal` / `openMyClaudeMdModal`)
+  //      기존 S4 관례대로 `📝 CLAUDE.md` 텍스트로 단언한다.
+  //    - **S5d·S5e는 "의도 문면이 없는 소스 판독값 고정"이다.** S5d(일시정지 미확정 + CLAUDE.md)에서
+  //      버튼이 나오는 것도, S5e(IN_PROGRESS + CLAUDE.md)에서 안 나오는 것도 어느 문서에도 "이렇게
+  //      해야 한다"고 적혀 있지 않다. 지금 소스가 그렇게 동작한다는 사실만 고정한다 — 나중에
+  //      "멈추는 중엔 숨기자" 같은 정책이 생기면 이 기대값을 고치는 것이 맞다.
+
+  // S5a 양성 — COMPLETED + CLAUDE.md: PPT와 CLAUDE.md가 **둘 다** 나온다(A4 대응).
+  //   기존 S3d는 hasClaudeMd=false라 상태 조건에서 COMPLETED가 빠져도 못 잡는다.
+  runCase(screen, 'S5a', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'COMPLETED', successCount: 5, completedAt: '2026-10-01T09:30:00',
+      sourceAvailability: null, pauseSettled: true, hasClaudeMd: true,
+    }));
+    const hasPpt = html.includes('📋 보고서 PPT');
+    const hasClaudeMdBtn = html.includes('📝 CLAUDE.md');
+    record(screen.screen, 'S5a',
+      hasPpt && hasClaudeMdBtn,
+      `COMPLETED+CLAUDE.md → "📋 보고서 PPT"(${hasPpt}) / CLAUDE.md(${hasClaudeMdBtn})`,
+      html);
+  });
+
+  // S5b1 음성 — COMPLETED인데 CLAUDE.md 없음: hasClaudeMd 절이 살아 있어야 미노출(A5 대응).
+  runCase(screen, 'S5b1', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'COMPLETED', successCount: 5, completedAt: '2026-10-01T09:30:00',
+      sourceAvailability: null, pauseSettled: true, hasClaudeMd: false,
+    }));
+    const hasPpt = html.includes('📋 보고서 PPT');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>COMPLETED</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5b1',
+      hasPpt && noClaudeMdBtn && hasBadge && hasProject,
+      `COMPLETED+md없음 → PPT(${hasPpt}) / CLAUDE.md 없음(${noClaudeMdBtn}) / `
+        + `배지 ">COMPLETED</span>"(${hasBadge}) / 프로젝트명 ">myproj</td>"(${hasProject})`,
+      html);
+  });
+
+  // S5b2 음성 — PAUSED인데 CLAUDE.md 없음: 재개 버튼은 그대로, 버튼만 미노출(A5 대응).
+  runCase(screen, 'S5b2', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'PAUSED', sourceAvailability: null, pauseSettled: true, hasClaudeMd: false,
+    }));
+    const hasResumeCall = html.includes(resumeCall);
+    const hasResumeLabel = html.includes('▶ 이어서 분석');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>PAUSED</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5b2',
+      hasResumeCall && hasResumeLabel && noClaudeMdBtn && hasBadge && hasProject,
+      `PAUSED+md없음 → 재개 호출(${hasResumeCall}) / 재개 라벨(${hasResumeLabel}) / `
+        + `CLAUDE.md 없음(${noClaudeMdBtn}) / 배지 ">PAUSED</span>"(${hasBadge}) / `
+        + `프로젝트명 ">myproj</td>"(${hasProject})`,
+      html);
+  });
+
+  // S5b3 음성 — CANCELLED + md 없음: 행동 칸은 `-`뿐이고 버튼 없음(A5 보강).
+  runCase(screen, 'S5b3', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'CANCELLED', sourceAvailability: null, pauseSettled: true, hasClaudeMd: false,
+    }));
+    const dashOnly = html.includes('>-</div>');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>CANCELLED</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5b3',
+      dashOnly && noClaudeMdBtn && hasBadge && hasProject,
+      `CANCELLED+md없음 → 행동 칸 ">-</div>"(${dashOnly}) / CLAUDE.md 없음(${noClaudeMdBtn}) / `
+        + `배지 ">CANCELLED</span>"(${hasBadge}) / 프로젝트명 ">myproj</td>"(${hasProject})`,
+      html);
+  });
+
+  // S5b4 음성 — FAILED + md 없음(A5 보강).
+  runCase(screen, 'S5b4', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'FAILED', sourceAvailability: null, pauseSettled: true, hasClaudeMd: false,
+    }));
+    const dashOnly = html.includes('>-</div>');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>FAILED</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5b4',
+      dashOnly && noClaudeMdBtn && hasBadge && hasProject,
+      `FAILED+md없음 → 행동 칸 ">-</div>"(${dashOnly}) / CLAUDE.md 없음(${noClaudeMdBtn}) / `
+        + `배지 ">FAILED</span>"(${hasBadge}) / 프로젝트명 ">myproj</td>"(${hasProject})`,
+      html);
+  });
+
+  // S5c1 음성(핵심) — CANCELLED인데 CLAUDE.md가 **있는** 행: 상태 조건이 막아 미노출이어야 한다.
+  //   이것이 이번 요구사항의 본래 버그 모양이다(A6 대응 — 조건에 CANCELLED를 더하면 여기서 FAIL).
+  runCase(screen, 'S5c1', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'CANCELLED', sourceAvailability: null, pauseSettled: true, hasClaudeMd: true,
+    }));
+    const dashOnly = html.includes('>-</div>');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>CANCELLED</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5c1',
+      dashOnly && noClaudeMdBtn && hasBadge && hasProject,
+      `CANCELLED+md있음 → 행동 칸 ">-</div>"(${dashOnly}) / CLAUDE.md 없음(${noClaudeMdBtn}) / `
+        + `배지 ">CANCELLED</span>"(${hasBadge}) / 프로젝트명 ">myproj</td>"(${hasProject})`,
+      html);
+  });
+
+  // S5c2 음성(핵심) — FAILED인데 CLAUDE.md가 있는 행(A6′ 대응).
+  runCase(screen, 'S5c2', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'FAILED', sourceAvailability: null, pauseSettled: true, hasClaudeMd: true,
+    }));
+    const dashOnly = html.includes('>-</div>');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>FAILED</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5c2',
+      dashOnly && noClaudeMdBtn && hasBadge && hasProject,
+      `FAILED+md있음 → 행동 칸 ">-</div>"(${dashOnly}) / CLAUDE.md 없음(${noClaudeMdBtn}) / `
+        + `배지 ">FAILED</span>"(${hasBadge}) / 프로젝트명 ">myproj</td>"(${hasProject})`,
+      html);
+  });
+
+  // S5d 양성 — PAUSED 미확정 + CLAUDE.md: 일시정지 안내는 그대로, 재개 수단은 없고,
+  //   CLAUDE.md 버튼은 **나온다**(A10 대응 — 블록 안에서 행동 칸을 비우는 변이를 잡는다).
+  //   "버튼이 나온다"는 의도 문면이 없는 소스 판독값 고정이다(위 S5 머리 주석 참고).
+  runCase(screen, 'S5d', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'PAUSED', sourceAvailability: null, pauseSettled: false, hasClaudeMd: true,
+    }));
+    const hasSettlingNotice = html.includes('⏸️ 일시정지 처리 중입니다');
+    const noResumeCall = !html.includes(resumeCall);
+    const noResumeLabel = !html.includes('▶ 이어서 분석');
+    const hasClaudeMdBtn = html.includes('📝 CLAUDE.md');
+    record(screen.screen, 'S5d',
+      hasSettlingNotice && noResumeCall && noResumeLabel && hasClaudeMdBtn,
+      `PAUSED 미확정+CLAUDE.md → "⏸️ 일시정지 처리 중입니다"(${hasSettlingNotice}) / `
+        + `재개 호출 없음(${noResumeCall}) / 재개 라벨 없음(${noResumeLabel}) / CLAUDE.md(${hasClaudeMdBtn})`,
+      html);
+  });
+
+  // S5e 음성 — IN_PROGRESS + CLAUDE.md: 어느 분기에도 걸리지 않아 행동 칸이 `-`뿐이다(A11 대응).
+  //   이 기대값도 의도 문면 없음(소스 판독값).
+  runCase(screen, 'S5e', () => {
+    const html = renderRow(screen, baseRow({
+      status: 'IN_PROGRESS', sourceAvailability: null, pauseSettled: true, hasClaudeMd: true,
+    }));
+    const dashOnly = html.includes('>-</div>');
+    const noClaudeMdBtn = !html.includes('📝 CLAUDE.md');
+    const hasBadge = html.includes('>IN_PROGRESS</span>');
+    const hasProject = html.includes('>myproj</td>');
+    record(screen.screen, 'S5e',
+      dashOnly && noClaudeMdBtn && hasBadge && hasProject,
+      `IN_PROGRESS+md있음 → 행동 칸 ">-</div>"(${dashOnly}) / CLAUDE.md 없음(${noClaudeMdBtn}) / `
+        + `배지 ">IN_PROGRESS</span>"(${hasBadge}) / 프로젝트명 ">myproj</td>"(${hasProject})`,
       html);
   });
 }

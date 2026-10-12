@@ -1150,7 +1150,7 @@ public class MainApiController {
       try (Stream<Path> stream = Files.walk(folderPath)) {
         List<Path> fileList = stream
             .filter(Files::isRegularFile)
-            .filter(this::isSupportedFile)
+            .filter(p -> isAnalysisTarget(folderPath, p))
             .toList();
 
         // 추적 파일 로드 (완료 여부 확인용) - 계정별 경로 기준
@@ -1728,7 +1728,13 @@ public class MainApiController {
       if (fileList.isEmpty()) {
         session.setCurrentPhase("FAILED");
         session.addErrorLog("분석 대상 파일이 없습니다. 지원되는 확장자의 파일이 없거나 모두 제외 대상(폴더/확장자)입니다.");
-        sessionManager.failSession(sessionId, "분석 대상 파일 없음");
+        // 분석 루트는 서버 로그에만 남긴다 — 업로드 세션의 서버 내부 경로를 사용자 문구에 노출하지 않는다.
+        log.warn("[분석 대상 없음] sessionId={}, analysisRoot={}", sessionId,
+            isCopyMode ? finalProjectOutputPath : sourceRootPath);
+        // 화면이 읽는 errorMessage는 세션 오류 로그의 마지막 줄(= failSession이 붙이는 줄)이므로,
+        // 사용자에게 보여야 하는 원인 힌트는 위 첫 줄이 아니라 이 사유 문자열에 넣는다.
+        sessionManager.failSession(sessionId, "분석 대상 파일 없음 — 지원되는 확장자의 파일이 없거나 모두 제외 폴더"
+            + "(build·target·node_modules·out 등) 안에 있습니다. 소스 경로와 선택한 파일을 확인해 주세요.");
         return;
       }
 
@@ -2403,16 +2409,10 @@ public class MainApiController {
       for (Path source : allPaths) {
         try {
           String sourceStr = source.toString();
-          if (sourceStr.contains(".git") || sourceStr.contains(".gradle") ||
-              sourceStr.contains(".idea") || sourceStr.contains(".claude") ||
-              sourceStr.contains(".vscode") || sourceStr.contains("target") ||
-              sourceStr.contains("build") || sourceStr.contains("node_modules") ||
-              sourceStr.contains(".next") || sourceStr.contains(".nuxt") || sourceStr.contains("dist") ||
-              sourceStr.contains("coverage") || sourceStr.contains(".turbo") ||
-              sourceStr.contains(".vercel") || sourceStr.contains("storybook-static") ||
-              sourceStr.contains(".venv") || sourceStr.contains("__pycache__") ||
-              sourceStr.contains(".pytest_cache") || sourceStr.contains(".tox") ||
-              sourceStr.contains(".mypy_cache") ||
+          // 폴더 제외는 수집 단계와 같은 판정(원본 루트 기준 상대경로의 요소)을 쓴다 — 종전의 부분 문자열
+          // 검사는 rebuild/ 처럼 이름만 겹치는 폴더에서도 복사를 통째로 건너뛰어 사본이 비게 만들었다.
+          Path dirToCheck = Files.isDirectory(source) ? source : source.getParent();
+          if (isUnderExcludedDirectory(sourceRootPath, dirToCheck, COPY_EXCLUDED_DIR_NAMES) ||
               sourceStr.endsWith(".mv.db") || sourceStr.endsWith(".trace.db") ||
               sourceStr.endsWith(".lock.db") || sourceStr.endsWith(".env") ||
               sourceStr.endsWith(".log")) {
@@ -2599,23 +2599,64 @@ public class MainApiController {
   // 파일 분석 관련 내부 메서드 (기존 로직 유지)
   // ===================================================================
 
+  /**
+   * 스캔 단계에서 제외하는 폴더 이름(소문자). 이름 목록의 단일 출처이며
+   * {@link #isSupportedFile(Path)}와 {@link #isAnalysisTarget(Path, Path)}가 같은 벌을 쓴다.
+   */
+  private static final List<String> SCAN_EXCLUDED_DIR_NAMES = List.of(
+      ".git", ".settings", ".metadata", "node_modules", ".gradle", ".idea", ".claude", ".vscode",
+      "build", "target", "out", "bin",
+      // 프론트엔드 빌드/테스트 산출물 - 소스가 아니라 생성된 결과물이므로 분석 대상에서 제외
+      ".next", ".nuxt", "dist", "coverage", ".turbo", ".vercel", "storybook-static",
+      // Python 가상환경/캐시 산출물
+      ".venv", "venv", "__pycache__", ".pytest_cache", ".tox", ".mypy_cache");
+
+  /**
+   * 복사 단계에서 제외하는 폴더 이름(소문자). 스캔용과 달리 {@code .settings}·{@code .metadata}·
+   * {@code out}·{@code bin}·{@code venv}는 넣지 않는다 — 사본은 원본 구조를 그대로 미러링하는 것이
+   * 목적이고, 이 폴더들은 분석 대상 수집 단계에서 걸러지므로 사본에 남아도 분석 결과가 달라지지 않는다.
+   */
+  private static final List<String> COPY_EXCLUDED_DIR_NAMES = List.of(
+      ".git", ".gradle", ".idea", ".claude", ".vscode", "target", "build", "node_modules",
+      ".next", ".nuxt", "dist", "coverage", ".turbo", ".vercel", "storybook-static",
+      ".venv", "__pycache__", ".pytest_cache", ".tox", ".mypy_cache");
+
+  /**
+   * {@code dir}가 {@code root} 기준 상대경로의 어느 디렉터리 요소로든 제외 이름을 가지면 true.
+   *
+   * <p>왜 "루트 기준"인가(O23·O26, 2026-10 TASK-006): 종전에는 절대경로 문자열 전체를 봤기 때문에
+   * 사용자가 고른 출력 폴더명이 {@code out}이거나 업로드 프로젝트명이 {@code dist}이기만 해도 그 아래
+   * 전부가 제외되어 "분석 대상 파일 0개"로 끝났다. 분석 루트 자신과 그 위쪽(조상)은 사용자가 고른
+   * 경로이므로 제외 사유가 아니고, 제외해야 하는 것은 프로젝트 <b>안</b>의 빌드 산출물 폴더다.
+   * {@code dir == root}면 상대경로가 빈 이름 한 개라 어느 이름과도 같지 않아 false가 된다.
+   */
+  private static boolean isUnderExcludedDirectory(Path root, Path dir, List<String> names) {
+    if (dir == null) return false;
+    for (Path element : root.relativize(dir)) {
+      if (names.contains(element.toString().toLowerCase())) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 네 스캔 지점(1단계 스캔·분석 대상 목록·구조 요약 2종)이 공유하는 분석 대상 판정 —
+   * 폴더 제외는 분석 루트 기준으로 보고, 파일명 규칙은 {@link #isSupportedFile(Path)}에 맡긴다.
+   *
+   * <p>{@code isSupportedFile()}에 <b>상대경로</b>를 넘기는 이유: 파일명 규칙(추적파일·바이너리·
+   * 지원 확장자 화이트리스트)을 한 곳에서만 쓰기 위해서다. 상대경로 문자열은 앞에 구분자가 없으므로
+   * 그 메서드의 폴더 검사가 보는 요소는 {@code isUnderExcludedDirectory()}가 이미 본 요소의
+   * 부분집합이고(첫 요소는 {@code /이름/} 형태가 아니라 걸리지 않는다) 판정 결과는 달라지지 않는다.
+   */
+  private boolean isAnalysisTarget(Path root, Path file) {
+    if (isUnderExcludedDirectory(root, file.getParent(), SCAN_EXCLUDED_DIR_NAMES)) return false;
+    return isSupportedFile(root.relativize(file));
+  }
+
   private boolean isSupportedFile(Path path) {
     String pathStr = path.toString().replace("\\", "/").toLowerCase();
-    if (pathStr.contains("/.git/") || pathStr.contains("/.settings/") ||
-        pathStr.contains("/.metadata/") || pathStr.contains("/node_modules/") ||
-        pathStr.contains("/.gradle/") || pathStr.contains("/.idea/") ||
-        pathStr.contains("/.claude/") || pathStr.contains("/.vscode/") ||
-        pathStr.contains("/build/") || pathStr.contains("/target/") ||
-        pathStr.contains("/out/") || pathStr.contains("/bin/") ||
-        // 프론트엔드 빌드/테스트 산출물 - 소스가 아니라 생성된 결과물이므로 분석 대상에서 제외
-        pathStr.contains("/.next/") || pathStr.contains("/.nuxt/") ||
-        pathStr.contains("/dist/") || pathStr.contains("/coverage/") ||
-        pathStr.contains("/.turbo/") || pathStr.contains("/.vercel/") ||
-        pathStr.contains("/storybook-static/") ||
-        // Python 가상환경/캐시 산출물
-        pathStr.contains("/.venv/") || pathStr.contains("/venv/") ||
-        pathStr.contains("/__pycache__/") || pathStr.contains("/.pytest_cache/") ||
-        pathStr.contains("/.tox/") || pathStr.contains("/.mypy_cache/")) return false;
+    for (String excludedDirName : SCAN_EXCLUDED_DIR_NAMES) {
+      if (pathStr.contains("/" + excludedDirName + "/")) return false;
+    }
 
     // 분석 완료 추적파일(TRACKER_FILE_NAME)은 파일명이 완전일치할 때만 제외한다 — 확장자 판정보다 앞.
     // 왜 여기(단일 출처)인가: 이 메서드는 getDashboardStatus()(1단계 스캔), collectFileList()(runAnalysis()의
@@ -2652,7 +2693,8 @@ public class MainApiController {
 
   private List<Path> collectFileList(Path sourceRootPath) throws Exception {
     try (Stream<Path> stream = Files.walk(sourceRootPath)) {
-      return stream.filter(Files::isRegularFile).filter(this::isSupportedFile).toList();
+      return stream.filter(Files::isRegularFile)
+          .filter(p -> isAnalysisTarget(sourceRootPath, p)).toList();
     }
   }
 
@@ -2943,7 +2985,7 @@ public class MainApiController {
 
     try (Stream<Path> stream = Files.walk(outputPath)) {
       stream.filter(Files::isRegularFile)
-            .filter(this::isSupportedFile)
+            .filter(p -> isAnalysisTarget(outputPath, p))
             .forEach(path -> {
               String name = path.getFileName().toString();
               String lw = name.toLowerCase();
@@ -3059,7 +3101,7 @@ public class MainApiController {
               String dirName = dir.getFileName().toString();
               try (Stream<Path> files = Files.walk(dir, 4)) {
                 List<String> names = files.filter(Files::isRegularFile)
-                    .filter(this::isSupportedFile)
+                    .filter(p -> isAnalysisTarget(root, p))
                     .map(p -> p.getFileName().toString())
                     .collect(Collectors.toList());
                 // 서로 다른 scanRoot(예: pages/api, src/api)에 같은 이름의 디렉토리가 있으면 병합한다.

@@ -1,0 +1,3445 @@
+package com.legacy.analysis;
+
+import com.legacy.analysis.llm.AnthropicModelPricing;
+import com.legacy.analysis.llm.LlmModelOption;
+import com.legacy.analysis.llm.LlmModelOptionService;
+import com.legacy.analysis.llm.LlmProvider;
+import com.legacy.analysis.llm.OllamaModelDiscoveryCache;
+import com.legacy.auth.JwtTokenProvider;
+import com.legacy.auth.User;
+import com.legacy.core.ApiErrorHandler;
+import com.legacy.core.FileIoErrorHandler;
+import com.legacy.core.PresentationGeneratorService;
+import com.legacy.core.ProjectStructureSnapshot;
+import com.legacy.core.ProjectTypeDetector;
+import com.legacy.notification.NotificationService;
+import com.github.difflib.DiffUtils;
+import com.github.difflib.UnifiedDiffUtils;
+import com.github.difflib.patch.Patch;
+import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+@Controller
+public class MainApiController {
+  private static final Logger log = LoggerFactory.getLogger(MainApiController.class);
+
+  private final ClaudeService claudeService;
+  private final AsyncTaskExecutor applicationTaskExecutor;
+  private final AnalysisSessionManager sessionManager;
+  private final ApiErrorHandler apiErrorHandler;
+  private final FileIoErrorHandler fileIoErrorHandler;
+  private final RetryHandler retryHandler;
+  private final AnalysisHistoryRepository analysisHistoryRepository;
+  private final JwtTokenProvider jwtTokenProvider;
+  private final NotificationService notificationService;
+  private final ProjectTypeDetector projectTypeDetector;
+  private final PresentationGeneratorService presentationGeneratorService;
+  // 사용자 드롭다운(GET /api/config/llm-models)이 조회할 활성 모델 목록 — Phase 3(2026-08-21).
+  private final LlmModelOptionService llmModelOptionService;
+  // 로컬 모델 드롭다운(GET /api/config/llm-models/local-installed)이 "실제 설치 여부"를 확인할 때
+  // 쓰는 discovery 캐시 — REQ-002(2026-09). 관리자 등록 폼과 달리 사용자 화면은 호출 빈도가 높아
+  // OllamaModelDiscoveryClient를 직접 부르지 않고 TTL 캐시를 거친다(02-design-v1 §2.1/§2.4).
+  private final OllamaModelDiscoveryCache ollamaModelDiscoveryCache;
+  // rag.enabled=false(기본값)면 이 빈이 아예 등록되지 않으므로 ObjectProvider로 선택 주입한다
+  // (일반 생성자 주입이면 빈이 없을 때 컨텍스트 기동 자체가 실패함) — appendJavaStructure()에서
+  // getIfAvailable()로 안전하게 사용.
+  private final org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider;
+  // RAG "B안"(코드 내용 청킹/인덱싱) — CodeContentRagService는 항상 빈으로 등록되고 내부에서
+  // rag.content.enabled/인프라 유무를 스스로 판단해 no-op하므로(REQ-5), ProjectStructureRagService와
+  // 달리 ObjectProvider 없이 일반 생성자 주입으로 받는다.
+  private final com.legacy.rag.CodeContentRagService codeContentRagService;
+
+  @Value("${app.analysis.max-file-size-bytes:524288}")
+  private long maxFileSizeBytes;
+
+  @Value("${app.analysis.thread-pool-size:0}")
+  private int threadPoolSize;
+
+  @Value("${app.analysis.chunk-size-lines:1000}")
+  private int chunkSizeLines;
+
+  @Value("${app.analysis.chunk-overlap-lines:100}")
+  private int chunkOverlapLines;
+
+  @Value("${app.analysis.chunking-threshold-bytes:153600}")
+  private long chunkingThresholdBytes;
+
+  @Value("${app.analysis.upload-storage-path:.uploads}")
+  private String uploadStoragePath;
+
+  // Claude API ↔ 로컬/사내 LLM 전환 스위치 (ClaudeServiceImpl.isAnthropicMode()와 동일 기준)
+  @Value("${llm.provider:anthropic}")
+  private String llmProvider;
+
+  // availableProviders 계산용 — anthropic이 실제로 쓸 수 있는 배포인지 판정한다(REQ-001, 2026-09).
+  // ClaudeServiceImpl의 기존 API 키 가드와 동일 기준(빈 값/MOCK 접두사 제외)을 사용한다.
+  @Value("${anthropic.api.key:}")
+  private String anthropicApiKey;
+
+  @Autowired
+  public MainApiController(
+      ClaudeService claudeService,
+      @Qualifier("applicationTaskExecutor") AsyncTaskExecutor applicationTaskExecutor,
+      AnalysisSessionManager sessionManager,
+      ApiErrorHandler apiErrorHandler,
+      FileIoErrorHandler fileIoErrorHandler,
+      RetryHandler retryHandler,
+      AnalysisHistoryRepository analysisHistoryRepository,
+      JwtTokenProvider jwtTokenProvider,
+      NotificationService notificationService,
+      ProjectTypeDetector projectTypeDetector,
+      PresentationGeneratorService presentationGeneratorService,
+      org.springframework.beans.factory.ObjectProvider<com.legacy.rag.ProjectStructureRagService> ragServiceProvider,
+      com.legacy.rag.CodeContentRagService codeContentRagService,
+      LlmModelOptionService llmModelOptionService,
+      OllamaModelDiscoveryCache ollamaModelDiscoveryCache) {
+    this.claudeService = claudeService;
+    this.applicationTaskExecutor = applicationTaskExecutor;
+    this.sessionManager = sessionManager;
+    this.apiErrorHandler = apiErrorHandler;
+    this.fileIoErrorHandler = fileIoErrorHandler;
+    this.retryHandler = retryHandler;
+    this.analysisHistoryRepository = analysisHistoryRepository;
+    this.jwtTokenProvider = jwtTokenProvider;
+    this.notificationService = notificationService;
+    this.projectTypeDetector = projectTypeDetector;
+    this.presentationGeneratorService = presentationGeneratorService;
+    this.ragServiceProvider = ragServiceProvider;
+    this.codeContentRagService = codeContentRagService;
+    this.llmModelOptionService = llmModelOptionService;
+    this.ollamaModelDiscoveryCache = ollamaModelDiscoveryCache;
+  }
+
+  @GetMapping("/")
+  public String index() {
+    return "index";
+  }
+
+  /**
+   * 현재 활성화된 LLM provider와 모델을 프런트엔드에 알려주는 조회 엔드포인트 (scenario_0.md).
+   * provider가 local이면 모델 드롭다운을 고정 표시로 바꾸는 등 UI 분기에 사용한다.
+   *
+   * 2026-09(REQ-001) 확장: 기존 필드(provider/model/containerized)는 그대로 두고
+   * {@code availableProviders}(이 배포에서 실제로 선택 가능한 provider 목록)를 추가한다.
+   *
+   * 2026-09(REQ-003) 확장: anthropic은 서버 전역 조건(API 키 설정)에 더해 **요청한 사용자별 권한**
+   * (admin이거나 ANTHROPIC_USER Role 보유)까지 만족해야 목록에 포함된다. local은 기존과 동일하게
+   * 전역 조건(DB 활성 LOCAL 모델 존재)만으로 판정한다.
+   */
+  @GetMapping("/api/config/llm-provider")
+  @ResponseBody
+  public Map<String, Object> getLlmProviderConfig(Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    result.put("provider", isAnthropicMode() ? "anthropic" : "local");
+    // 특정 세션에 종속되지 않은 전역 설정 조회이므로 sourceFolderPath 없이(null) 기본 모델을 조회한다.
+    result.put("model", claudeService.getCurrentModel(null));
+    // Docker 컨테이너로 구동 중이면 관리자 전용 "서버 경로 직접 지정" 기능이 무의미하다
+    // (app 컨테이너에 임의 호스트 경로 bind mount가 없어 필연적으로 오류남 — 2026-07 확인).
+    // 프런트엔드가 이 값을 보고 해당 UI 섹션을 숨긴다.
+    result.put("containerized", isRunningInContainer());
+    // 순서는 ["anthropic", "local"] 고정 — 프런트가 이 순서 그대로 토글 버튼을 렌더링한다.
+    // 결과가 1개 이하면 프런트는 토글을 숨기고 기존 동작을 그대로 유지한다(scenario_1 등).
+    List<String> availableProviders = new ArrayList<>();
+    if (isAnthropicApiKeyConfigured() && hasAnthropicAccess(authentication)) {
+      availableProviders.add("anthropic");
+    }
+    if (llmModelOptionService != null && llmModelOptionService.hasActiveLocalModel()) {
+      availableProviders.add("local");
+    }
+    result.put("availableProviders", availableProviders);
+    return result;
+  }
+
+  /**
+   * anthropic을 실제 선택지로 제공할 수 있는 배포인지 판정한다.
+   * ClaudeServiceImpl의 기존 API 키 가드와 동일 기준(빈 값 또는 "MOCK" 접두사면 미설정으로 간주).
+   * 두 클래스에 판정 로직이 중복되지만 {@code isAnthropicMode()}도 이미 동일하게 중복돼 있어
+   * 이 프로젝트의 기존 관례를 벗어나지 않는다.
+   */
+  private boolean isAnthropicApiKeyConfigured() {
+    return anthropicApiKey != null && !anthropicApiKey.isBlank() && !anthropicApiKey.startsWith("MOCK");
+  }
+
+  /**
+   * 이 요청을 보낸 사용자가 Anthropic(Claude API)을 쓸 수 있는지 판정한다(REQ-003/004, 2026-09).
+   * admin은 Role 보유 여부와 무관하게 무조건 통과하고, 그 외에는 ANTHROPIC_USER Role 보유 여부로 판정한다.
+   * 인증 정보가 없거나 principal이 User가 아니면(비정상 상황 안전망) 권한 없음으로 본다.
+   */
+  private boolean hasAnthropicAccess(Authentication authentication) {
+    if (authentication == null || !(authentication.getPrincipal() instanceof User user)) return false;
+    if (isAdmin(authentication)) return true;
+    return user.getRoles().stream().anyMatch(r -> "ANTHROPIC_USER".equals(r.getName()));
+  }
+
+  /**
+   * ClaudeServiceImpl.resolveProvider()와 동일 판정 기준 — modelKey가 없으면(빈 요청) 이 요청이
+   * 실제로 라우팅될 provider까지 포함해 판정한다 (REQ-004, 2026-09). 두 클래스 간 판정 로직 중복은
+   * isAnthropicMode()와 동일하게 이 코드베이스의 기존 관례다.
+   *
+   * 이 판정은 ClaudeServiceImpl.resolveProvider()와 같은 진리표여야 하며, 두 구현이 어긋나지 않도록
+   * 계약 테스트(LlmRoutingDecisionSingleSourceContractTest)가 이를 고정한다 — 한쪽만 낡는 것이
+   * REQ-002가 다루는 결함의 원인이었다. 판정이 필요한 새 지점이 생기면 별도 메서드를 만들지 말고
+   * 이 메서드를 재사용한다(사본이 늘어나면 같은 결함이 재발한다).
+   *
+   * llmModelOptionService가 null인 인스턴스(구버전 테스트가 이 협력자를 null로 넘겨 생성한 경우)는
+   * DB 조회를 건너뛰고 모드별 기본값을 쓴다 — ClaudeServiceImpl.resolveProvider()의 null 가드와
+   * 동일한 처리다(프로덕션에서는 Spring이 항상 주입하므로 이 분기를 타지 않는다).
+   */
+  private LlmProvider resolveEffectiveProvider(String modelKey) {
+    LlmProvider fallback = isAnthropicMode() ? LlmProvider.ANTHROPIC : LlmProvider.LOCAL;
+    if (llmModelOptionService == null) {
+      return fallback;
+    }
+    return llmModelOptionService.findByModelKey(modelKey)
+        .map(LlmModelOption::getProvider)
+        .orElse(fallback);
+  }
+
+  /**
+   * 사용자 화면(index.html)의 AI 모델 드롭다운을 채우는 조회 엔드포인트 (Phase 3, 2026-08-21).
+   * 기존에 index.html에 하드코딩돼 있던 하이쿠/소넷/오퍼스 3개 &lt;option&gt;을 대체한다.
+   * 관리자 CRUD API({@code /api/admin/llm-models}, {@code @PreAuthorize("hasRole('ADMIN')")})와
+   * 달리 이 엔드포인트는 인증만 필요하고 관리자 권한은 요구하지 않는다 — 일반 사용자도 드롭다운을
+   * 채워야 하기 때문이다. 활성(active=true) 모델만, 관리자가 지정한 노출 순서(displayOrder)대로 반환한다.
+   *
+   * provider/모드({@code isAnthropicMode()}) 와 무관하게 항상 DB 활성 목록 전체를 반환하며,
+   * 프런트(dashboard.js)가 이를 provider 토글에 맞게 그룹핑해 소비한다(REQ-001, 2026-09).
+   * 즉 백엔드는 provider별 필터링을 하지 않는다 — 목록 크기가 작아 전체 조회 후 클라이언트에서
+   * 필터링하는 편이 왕복 횟수를 늘리지 않아 유리하다는 설계 판단(02-design-v2 §2.2).
+   */
+  @GetMapping("/api/config/llm-models")
+  @ResponseBody
+  public List<Map<String, Object>> getLlmModelOptions() {
+    return llmModelOptionService.listActive().stream()
+        .map(this::toModelOptionResponse)
+        .collect(Collectors.toList());
+  }
+
+  /**
+   * 이 배포가 접속하는 Ollama에 <b>실제로 설치된</b> 모델 목록을 반환한다 (REQ-002, 2026-09).
+   * 프런트(dashboard.js)가 위 {@code /api/config/llm-models}(DB 활성 목록)를 이 결과로 한 번 더
+   * 걸러, 등록 후 환경이 바뀌어 더 이상 설치돼 있지 않은 모델을 드롭다운에서 숨기는 데 쓴다.
+   *
+   * 관리자 전용 {@code /api/admin/llm-models/ollama-installed}와 응답 스키마는 동일하지만
+   * ({@code {available, models}}) 두 가지가 다르다: (1) 이 엔드포인트는 인증만 요구해 일반 사용자도
+   * 호출할 수 있고, (2) 매 화면 진입마다 호출되므로 무캐시 직접 호출 대신 TTL 캐시를 거친다.
+   * 등록 시점 하드 검증(무캐시, 즉시성 우선)과 로드 시점 소프트 필터(캐시, 빈도 우선)는 서로 다른
+   * 시점의 서로 다른 문제를 다루는 보완 관계이며 중복이 아니다(02-design-v1 §2.4).
+   *
+   * {@code available=false}는 "설치된 모델이 없음"이 아니라 <b>"확인 불가"</b>(타임아웃/미기동/
+   * 비Ollama 백엔드)를 뜻하며, 이때 {@code models}는 빈 배열이다. 이 엔드포인트는 설치 목록과
+   * 확인 가능 여부만 돌려준다 — 확인 불가일 때 화면을 어떻게 처리할지는 {@code dashboard.js}의
+   * {@code filterInstalledLocalModels()}가 정한다.
+   */
+  @GetMapping("/api/config/llm-models/local-installed")
+  @ResponseBody
+  public Map<String, Object> getLocalInstalledModels() {
+    Optional<List<String>> discovered = ollamaModelDiscoveryCache.getInstalledModelsCached();
+    Map<String, Object> result = new HashMap<>();
+    result.put("available", discovered.isPresent());
+    result.put("models", discovered.orElse(List.of()));
+    return result;
+  }
+
+  private Map<String, Object> toModelOptionResponse(LlmModelOption option) {
+    Map<String, Object> map = new HashMap<>();
+    map.put("modelKey", option.getModelKey());
+    map.put("displayName", option.getDisplayName());
+    map.put("provider", option.getProvider().name());
+    map.put("displayOrder", option.getDisplayOrder());
+    map.put("pricing", toPricingResponse(option));
+    return map;
+  }
+
+  /**
+   * 표시용 단가 — {@code AnthropicModelPricing}(단가의 유일 정본)에서 파생한다 (REQ-001, 2026-09).
+   * 단가를 모르면 {@code null}이며, 프런트는 그때 표시명만 쓴다.
+   *
+   * <p>세 가지를 의도적으로 하지 않는다.
+   * <ul>
+   *   <li><b>{@code of()}를 부르지 않는다.</b> 그 메서드는 모르는 키에 최고 단가를 추정해 돌려주고
+   *       WARN을 남긴다 — 목록 조회는 화면 진입마다 일어나므로 LOCAL·미지 키마다 경고가 찍히고,
+   *       모델키당 1회 억제 집합이 먼저 채워져 <b>비용 계산 경로의 경고가 사라진다.</b>
+   *       "아는 단가만" 주는 {@code findKnown()}을 쓴다.</li>
+   *   <li><b>단가를 모르는 Claude 모델에 추정치를 붙이지 않는다.</b> 추정치를 확정 단가처럼 보여주면
+   *       "화면에 보이는 단가 = 계산에 쓰는 값"이 깨진다. 안내 문구도 넣지 않고 그냥 {@code null}이다.</li>
+   *   <li><b>provider 판정에 {@code resolveEffectiveProvider()}를 쓰지 않는다.</b> 인자로 받은 행이
+   *       이미 DB 행이므로 같은 행을 다시 조회할 이유가 없다.</li>
+   * </ul>
+   */
+  private Map<String, Object> toPricingResponse(LlmModelOption option) {
+    if (option.getProvider() != LlmProvider.ANTHROPIC) {
+      return null;
+    }
+    return AnthropicModelPricing.findKnown(option.getModelKey())
+        .map(pricing -> {
+          Map<String, Object> map = new HashMap<>();
+          map.put("inputPerMillionTokens", pricing.inputPerMillionTokens());
+          map.put("outputPerMillionTokens", pricing.outputPerMillionTokens());
+          map.put("label", pricing.label());
+          return map;
+        })
+        .orElse(null);
+  }
+
+  /**
+   * Docker(또는 호환 컨테이너 런타임)로 구동 중인지 판별한다. `/.dockerenv`는 Docker가
+   * 컨테이너 생성 시 항상 심어주는 표준 마커 파일이라 별도 환경변수 설정 없이도 동작한다.
+   */
+  private boolean isRunningInContainer() {
+    return new File("/.dockerenv").exists();
+  }
+
+  // ===================================================================
+  // 2단계: 분석 시작 (폴링 방식)
+  // ===================================================================
+
+  /**
+   * 분석 시작 - 즉시 sessionId를 반환하고 비동기로 분석 수행
+   */
+  @PostMapping("/api/start-analysis")
+  @ResponseBody
+  public Map<String, Object> startAnalysis(
+      @RequestBody Map<String, String> request,
+      Authentication authentication) {
+
+    Map<String, Object> result = new HashMap<>();
+
+    if (authentication == null || !(authentication.getPrincipal() instanceof User)) {
+      result.put("error", "인증이 필요합니다. 다시 로그인해주세요.");
+      return result;
+    }
+    if (!isAdmin(authentication)) {
+      result.put("error", "서버 경로 직접 지정 분석은 관리자만 사용할 수 있습니다. 원격 업로드 분석을 이용해 주세요.");
+      return result;
+    }
+
+    User user = (User) authentication.getPrincipal();
+    Long userSeq = user.getSeq();
+    String userLoginId = user.getUserId();
+
+    // 입력값 정규화(REQ-009, 2026-09): sourcePath/outputPath 양쪽 모두 읽기 직후에 trim한다.
+    // - 왜 "저장 직전"이 아니라 "읽기 직후"인가: 아래 setModel(Path.of(sourcePath)) / isBlank 검사 /
+    //   new File(sourcePath) / createSession(...)이 세션 저장보다 먼저 이 값을 소비한다. 저장 직전에만
+    //   정규화하면 그 사이 소비자들은 후행 공백이 붙은 원문을 그대로 받는다.
+    // - 읽기 측 trim(isCopyModeOutput / resolveUserOutputRoot / resolveProjectOutputRoot /
+    //   runAnalysis / runAnalysisResume)은 제거하지 않는다. 이 변경은 그 방어의 "대체"가 아니라 "예방"이다.
+    // - 이미 저장된 세션 값의 소급 정규화는 하지 않는다(기동 시 보정·마이그레이션 없음).
+    // - trim을 구분자 치환보다 먼저 두는 이유: 치환은 공백에 영향이 없으므로 순서가 결과를 바꾸지 않지만,
+    //   "원문 → trim → 치환"이 읽기에 자연스럽다.
+    String sourcePath = request.getOrDefault("sourcePath", "").trim().replace("\\", "/");
+    String outputPath = request.getOrDefault("outputPath", "").trim().replace("\\", "/");
+
+    // 진입 가드(REQ-006 2단계, 2026-09, TASK-004): 정규화 직후 sourcePath가 Path로 파싱 가능한지만 검사한다.
+    // - 왜 여기인가: 아래 setModel(Path.of(sourcePath).toString(), ...)은 어떤 try에도 감싸여 있지 않고
+    //   이 프로젝트에는 @ControllerAdvice가 없어, 파싱 불가 문자열(Windows 파서 기준 '|' 등 금지문자)이 오면
+    //   InvalidPathException이 컨트롤러 밖으로 그대로 전파돼 응답 자체가 만들어지지 않았다
+    //   (TASK-003 하네스 R4가 재현 — 첫 컨트롤러 프레임이 바로 그 setModel 줄이었다).
+    // - trim 뒤의 값을 검사한다: REQ-009(위 두 줄)로 하류가 실제 파싱하는 문자열은 trim된 값이므로
+    //   "검사 대상 = 파싱 대상"이 성립한다. isParsablePath()는 검사만 하고 값을 바꾸지 않는다.
+    // - 빈 문자열은 Path.of("")가 파싱되므로 여기서 걸리지 않고, 아래 "원본 소스 경로가 필요합니다." 검사가 그대로 맡는다.
+    // - 문구는 아래 존재 검사와 같은 기존 문구를 재사용한다(새 문구를 늘리지 않는다).
+    if (!isParsablePath(sourcePath)) {
+      result.put("error", "올바르지 않은 원본 소스 경로입니다.");
+      return result;
+    }
+
+    String clientSessionId = request.getOrDefault("sessionId", "");
+    String selectedModel = request.getOrDefault("model", "").trim();
+    String requirements = request.getOrDefault("requirements", "").trim();
+    boolean forceActive = "true".equalsIgnoreCase(request.getOrDefault("forceActive", "false"));
+    // 프론트 파일 트리에서 일부만 선택했을 때만 값이 실려 온다 (없으면 전체 분석)
+    final Set<String> selectedRelativePaths = parseSelectedPaths(request.get("selectedPaths"));
+    boolean isPartialSelection = selectedRelativePaths != null && !selectedRelativePaths.isEmpty();
+    // README(최종 보고서) 생성 여부 - 프론트가 명시적으로 값을 실어보내면 그 값을 그대로 따르고,
+    // 값이 없으면 기본 정책을 적용한다: 전체 분석은 기존과 동일하게 자동 생성(true),
+    // 부분 선택 분석은 LLM 호출 비용을 아끼도록 기본 생략(false, 옵트인 - 체크박스로 켜야 생성됨).
+    String generateReadmeParam = request.get("generateReadme");
+    final boolean generateReadme = (generateReadmeParam == null || generateReadmeParam.isBlank())
+        ? !isPartialSelection
+        : "true".equalsIgnoreCase(generateReadmeParam);
+
+    // Anthropic 사용 권한 가드 (REQ-004, 2026-09) — 부작용이 있는 setModel() 호출 전에 먼저 검증한다
+    // (confirmFailover가 이미 쓰고 있는 관례와 동일). 이 메서드는 위쪽 isAdmin 게이트를 통과한 뒤라
+    // 실행상 no-op이지만, 향후 admin 제한이 완화될 때를 대비한 심층 방어로 유지한다.
+    String effectiveModelKey = !selectedModel.isBlank() ? selectedModel : claudeService.getCurrentModel(sourcePath);
+    if (resolveEffectiveProvider(effectiveModelKey) == LlmProvider.ANTHROPIC && !hasAnthropicAccess(authentication)) {
+      result.put("error", "Anthropic 모델을 사용할 권한이 없습니다. 관리자에게 Anthropic 사용 권한을 요청하세요.");
+      return result;
+    }
+
+    // 모델 선택 적용 (2026-08-20 긴급수정: 세션별 격리 — sourcePath를 키로 등록해
+    // 동시에 분석 중인 다른 세션의 모델이 함께 바뀌는 레이스 컨디션을 방지)
+    if (!selectedModel.isBlank()) {
+      claudeService.setModel(Path.of(sourcePath).toString(), selectedModel);
+      log.info("[모델 선택] user={}, model={}", userLoginId, selectedModel);
+    }
+
+    if (sourcePath.isBlank()) {
+      result.put("error", "원본 소스 경로가 필요합니다.");
+      return result;
+    }
+
+    File sourceFolder = new File(sourcePath);
+    if (!sourceFolder.exists() || !sourceFolder.isDirectory()) {
+      result.put("error", "올바르지 않은 원본 소스 경로입니다.");
+      return result;
+    }
+
+    final String sessionId = clientSessionId.isBlank()
+        ? UUID.randomUUID().toString() : clientSessionId;
+    final String finalSourcePath = sourcePath;
+    final String finalOutputPath = outputPath.isBlank() ? null : outputPath;
+
+    // 세션 생성
+    SessionState session = sessionManager.createSession(sessionId, finalSourcePath,
+        finalOutputPath != null ? finalOutputPath : finalSourcePath);
+    session.setUserId(userSeq);
+    session.setUsername(userLoginId);
+    session.setForceActive(forceActive);
+    session.setGenerateReadme(generateReadme);
+    if (!requirements.isBlank()) session.setRequirements(requirements);
+    session.setCurrentPhase("STARTING");
+    session.addRecentLog("[세션 시작] 사용자: " + userLoginId);
+
+    final Long finalUserId = userSeq;
+    final String finalUsername = userLoginId;
+    final boolean isForce = forceActive;
+
+    // 비동기 분석 시작
+    new Thread(() -> runAnalysis(sessionId, finalSourcePath, finalOutputPath, isForce,
+        finalUserId, finalUsername, selectedRelativePaths, generateReadme)).start();
+
+    result.put("sessionId", sessionId);
+    result.put("message", "분석을 시작했습니다.");
+    log.info("[분석 시작] sessionId={}, user={}, source={}", sessionId, userLoginId, finalSourcePath);
+    return result;
+  }
+
+  // ===================================================================
+  // 브라우저 폴더 업로드 분석 (File System Access API 연동)
+  // 소스가 이 서버가 아닌 다른 PC/서버에 있을 때, 경로 문자열 대신
+  // 브라우저가 직접 읽은 파일 바이트를 업로드받아 분석하고,
+  // 결과는 write-back용으로 파일 단위 재다운로드를 지원한다.
+  // ===================================================================
+
+  /**
+   * 업로드 세션의 임시 저장 루트 절대경로 (샌드박스 경계)
+   */
+  private Path getUploadStorageRoot() {
+    return Path.of(uploadStoragePath).toAbsolutePath().normalize();
+  }
+
+  /**
+   * relativePath가 업로드 루트 밖을 가리키지 않는지 검증 후 실제 경로로 변환한다.
+   * (".." 등을 이용한 업로드 경로 조작으로 서버 임의 파일에 쓰거나 읽는 것을 방지)
+   */
+  private Path resolveWithinRoot(Path root, String relativePath) {
+    String cleaned = relativePath.replace("\\", "/");
+    Path resolved = root.resolve(cleaned).normalize();
+    if (!resolved.startsWith(root)) {
+      throw new SecurityException("허용되지 않은 경로입니다: " + relativePath);
+    }
+    return resolved;
+  }
+
+  /**
+   * 세션의 sourcePath가 업로드 샌드박스(uploadStoragePath) 하위인지 확인한다.
+   * 일반 경로 입력 방식 세션에 대해 파일 원문 조회 엔드포인트가 악용되는 것을 막는다.
+   */
+  private Path getValidatedUploadRoot(SessionState session) {
+    if (session == null || session.getSourcePath() == null) return null;
+    Path uploadBase = getUploadStorageRoot();
+    Path sessionSource = Path.of(session.getSourcePath()).toAbsolutePath().normalize();
+    return sessionSource.startsWith(uploadBase) ? sessionSource : null;
+  }
+
+  /**
+   * 서버 파일시스템 경로를 직접 입력해 분석하는 기능은 이 앱이 떠 있는 서버 자체에서
+   * 접근했을 때만 의미가 있고, 임의 경로 읽기/쓰기가 가능해 보안 위험이 있으므로 ADMIN 전용으로 제한한다.
+   */
+  private boolean isAdmin(Authentication authentication) {
+    return authentication != null && authentication.getAuthorities().stream()
+        .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+  }
+
+  /**
+   * 세션 관련 API(제어: pause/resume/cancel/failover confirm, 조회/정리: 파일목록/미리보기/업로드
+   * manifest·원문·cleanup)의 소유자 또는 ADMIN 여부를 확인한다.
+   * 로그인만 하면 sessionId를 아는 임의 사용자가 남의 세션을 제어하거나(2026-08-21 최초 수정,
+   * analyzer-plan bug-suspects.md) 남의 세션 파일/업로드 원문을 조회·삭제할 수 있던(같은 날 추가 확인,
+   * bug-suspects.md 두 번째 항목) 인가 우회 버그를 막기 위해 추가했다. 업로드 세션(getUploadManifest 등
+   * /api/upload-session/**)도 별도 엔티티가 아니라 sourcePath가 업로드 샌드박스 하위인 동일한
+   * SessionState이므로(getValidatedUploadRoot 참고) 소유자 필드(username)와 조회 방식이 완전히 같아
+   * 이 헬퍼를 그대로 재사용한다.
+   * com.legacy.api.monitoring.MonitoringController#isOwnerOrAdmin과 동일한 패턴(세션 소유자 or ADMIN
+   * 허용, user.getUserId() ↔ session.getUsername() 비교)을 그대로 재사용한다 — 이 프로젝트에 이미 확립된
+   * "세션 소유자 검증" 컨벤션.
+   */
+  private boolean isSessionOwnerOrAdmin(SessionState session, Authentication authentication) {
+    if (authentication == null || !(authentication.getPrincipal() instanceof User user)) return false;
+    if (isAdmin(authentication)) return true;
+    return user.getUserId().equals(session.getUsername());
+  }
+
+  /**
+   * 프론트엔드 파일 트리에서 선택된 상대경로 목록(JSON 배열 문자열)을 파싱한다.
+   * 비어있거나 파싱 실패 시 null을 반환하며, 이는 "선택 없음 = 전체 분석"을 의미한다.
+   */
+  private Set<String> parseSelectedPaths(String selectedPathsJson) {
+    if (selectedPathsJson == null || selectedPathsJson.isBlank()) return null;
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+      List<String> list = mapper.readValue(selectedPathsJson,
+          new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+      Set<String> normalized = list.stream()
+          .map(s -> s.replace("\\", "/"))
+          .collect(Collectors.toSet());
+      return normalized.isEmpty() ? null : normalized;
+    } catch (Exception e) {
+      log.warn("[선택 경로 파싱 실패] {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * 브라우저가 File System Access API로 읽은 폴더 파일들을 업로드받아 분석을 시작한다.
+   * 각 파일의 원본 파일명에는 상대 경로(예: src/main/Foo.java)가 그대로 담겨 전송된다.
+   */
+  @PostMapping("/api/upload-analysis")
+  @ResponseBody
+  public Map<String, Object> uploadAnalysis(
+      @RequestParam("files") MultipartFile[] files,
+      @RequestParam(value = "sessionId", required = false) String clientSessionId,
+      @RequestParam(value = "model", required = false) String selectedModel,
+      @RequestParam(value = "projectName", required = false) String projectName,
+      @RequestParam(value = "requirements", required = false) String requirements,
+      @RequestParam(value = "generateReadme", required = false) String generateReadmeParam,
+      Authentication authentication) {
+
+    Map<String, Object> result = new HashMap<>();
+
+    if (authentication == null || !(authentication.getPrincipal() instanceof User)) {
+      result.put("error", "인증이 필요합니다. 다시 로그인해주세요.");
+      return result;
+    }
+    if (files == null || files.length == 0) {
+      result.put("error", "업로드된 파일이 없습니다.");
+      return result;
+    }
+
+    User user = (User) authentication.getPrincipal();
+    Long userSeq = user.getSeq();
+    String userLoginId = user.getUserId();
+
+    final String sessionId = (clientSessionId == null || clientSessionId.isBlank())
+        ? UUID.randomUUID().toString() : clientSessionId;
+
+    // 업로드된 폴더의 실제 이름(예: legacy-analyzer)을 그대로 저장 디렉터리명으로 사용한다.
+    // README/PPT/이력 목록 등 여러 화면이 sourcePath의 마지막 경로 조각을 "프로젝트명"으로 뽑아쓰기 때문에,
+    // sessionId를 폴더명으로 쓰면 그 사용자에게 무의미한 문자열이 프로젝트명으로 노출된다.
+    String safeProjectName = (projectName == null || projectName.isBlank())
+        ? "project" : projectName.replace("\\", "_").replace("/", "_").trim();
+    if (safeProjectName.isBlank()) safeProjectName = "project";
+
+    Path uploadRoot;
+    try {
+      Path sessionRoot = resolveWithinRoot(getUploadStorageRoot(), sessionId);
+      uploadRoot = resolveWithinRoot(sessionRoot, safeProjectName);
+      Files.createDirectories(uploadRoot);
+      for (MultipartFile file : files) {
+        String relativeName = file.getOriginalFilename();
+        if (relativeName == null || relativeName.isBlank()) continue;
+        Path targetPath = resolveWithinRoot(uploadRoot, relativeName);
+        Files.createDirectories(targetPath.getParent());
+        file.transferTo(targetPath);
+      }
+    } catch (Exception e) {
+      log.error("[업로드 분석] 파일 저장 실패 sessionId={}", sessionId, e);
+      result.put("error", "업로드된 파일 저장에 실패했습니다: " + e.getMessage());
+      return result;
+    }
+
+    // Anthropic 사용 권한 가드 (REQ-004, 2026-09) — 모델 전환/분석 스레드 기동 전에 차단한다.
+    // 업로드 파일 저장은 이미 끝난 뒤라 임시 파일이 남지만, 기존 실패 경로들도 동일하게 정리하지 않는다.
+    String effectiveModelKey = (selectedModel != null && !selectedModel.isBlank())
+        ? selectedModel : claudeService.getCurrentModel(uploadRoot.toString());
+    if (resolveEffectiveProvider(effectiveModelKey) == LlmProvider.ANTHROPIC && !hasAnthropicAccess(authentication)) {
+      result.put("error", "Anthropic 모델을 사용할 권한이 없습니다. 관리자에게 Anthropic 사용 권한을 요청하세요.");
+      return result;
+    }
+
+    // 2026-08-20 긴급수정: 세션별 격리 — uploadRoot(이 세션의 sourcePath가 될 경로)를 키로 등록
+    if (selectedModel != null && !selectedModel.isBlank()) {
+      claudeService.setModel(uploadRoot.toString(), selectedModel);
+    }
+
+    String uploadRootStr = uploadRoot.toString().replace("\\", "/");
+    SessionState session = sessionManager.createSession(sessionId, uploadRootStr, uploadRootStr);
+    session.setUserId(userSeq);
+    session.setUsername(userLoginId);
+    if (requirements != null && !requirements.isBlank()) session.setRequirements(requirements.trim());
+    session.setCurrentPhase("STARTING");
+    session.addRecentLog("[세션 시작] 업로드 분석 - 사용자: " + userLoginId + ", 파일 " + files.length + "개");
+
+    // 업로드 모드는 프론트에서 이미 선택된 파일만 올라오므로 서버 단에서 추가 필터링할 필요가 없다.
+    // README 생성 여부는 서버 경로 직접 지정 분석과 같은 체크박스(UI 공용)를 그대로 사용하므로,
+    // 프론트가 값을 명시하지 않은 경우(구버전 클라이언트 등)에만 기존 동작(자동 생성)으로 폴백한다.
+    boolean generateReadme = (generateReadmeParam == null || generateReadmeParam.isBlank())
+        ? true
+        : "true".equalsIgnoreCase(generateReadmeParam);
+    session.setGenerateReadme(generateReadme);
+    new Thread(() -> runAnalysis(sessionId, uploadRootStr, null, false, userSeq, userLoginId, null, generateReadme)).start();
+
+    result.put("sessionId", sessionId);
+    result.put("message", "업로드 분석을 시작했습니다.");
+    log.info("[업로드 분석 시작] sessionId={}, user={}, 파일수={}", sessionId, userLoginId, files.length);
+    return result;
+  }
+
+  /**
+   * write-back 대상 파일 목록(분석 완료 후 실제로 디스크에 존재하는 상대경로들)을 반환한다.
+   */
+  @GetMapping("/api/upload-session/{sessionId}/manifest")
+  @ResponseBody
+  public Map<String, Object> getUploadManifest(@PathVariable String sessionId, Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    SessionState session = sessionManager.getSession(sessionId);
+    Path uploadRoot = getValidatedUploadRoot(session);
+    if (uploadRoot == null) {
+      result.put("error", "업로드 분석 세션이 아니거나 찾을 수 없습니다.");
+      return result;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      result.put("error", "이 세션에 접근할 권한이 없습니다.");
+      return result;
+    }
+
+    try (Stream<Path> stream = Files.walk(uploadRoot)) {
+      List<String> relativePaths = stream.filter(Files::isRegularFile)
+          .map(p -> uploadRoot.relativize(p).toString().replace("\\", "/"))
+          .toList();
+      result.put("files", relativePaths);
+      return result;
+    } catch (Exception e) {
+      result.put("error", "파일 목록 조회 실패: " + e.getMessage());
+      return result;
+    }
+  }
+
+  /**
+   * write-back을 위해 분석 완료된 파일 하나의 원문 바이트를 반환한다.
+   */
+  @GetMapping("/api/upload-session/{sessionId}/file")
+  public ResponseEntity<byte[]> getUploadedFileContent(
+      @PathVariable String sessionId, @RequestParam String path, Authentication authentication) {
+    SessionState session = sessionManager.getSession(sessionId);
+    Path uploadRoot = getValidatedUploadRoot(session);
+    if (uploadRoot == null) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+    }
+    try {
+      Path filePath = resolveWithinRoot(uploadRoot, path);
+      if (!Files.exists(filePath) || !Files.isRegularFile(filePath)) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+      }
+      byte[] content = Files.readAllBytes(filePath);
+      return ResponseEntity.ok()
+          .contentType(MediaType.APPLICATION_OCTET_STREAM)
+          .body(content);
+    } catch (SecurityException e) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+    } catch (Exception e) {
+      log.error("[업로드 파일 조회 실패] sessionId={}, path={}", sessionId, path, e);
+      return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+  }
+
+  /**
+   * write-back까지 끝난 뒤 브라우저가 호출 - 서버에 임시로 남아있던 업로드 원본을 정리한다.
+   */
+  @PostMapping("/api/upload-session/{sessionId}/cleanup")
+  @ResponseBody
+  public Map<String, Object> cleanupUploadSession(@PathVariable String sessionId, Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    SessionState session = sessionManager.getSession(sessionId);
+    if (getValidatedUploadRoot(session) == null) {
+      result.put("error", "업로드 분석 세션이 아니거나 찾을 수 없습니다.");
+      return result;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      result.put("error", "이 세션에 접근할 권한이 없습니다.");
+      return result;
+    }
+    // sourcePath는 {sessionId}/{projectName} 하위 폴더이므로, 정리할 때는
+    // sessionId 폴더 자체(프로젝트명 폴더의 부모)를 지워 잔여물 없이 완전히 제거한다.
+    Path uploadRoot = resolveWithinRoot(getUploadStorageRoot(), sessionId);
+    try (Stream<Path> stream = Files.walk(uploadRoot)) {
+      stream.sorted(Comparator.reverseOrder()).forEach(p -> {
+        try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+      });
+      result.put("success", true);
+      log.info("[업로드 세션 정리] sessionId={}", sessionId);
+      return result;
+    } catch (Exception e) {
+      result.put("error", "정리 실패: " + e.getMessage());
+      return result;
+    }
+  }
+
+  /**
+   * 분석 진행 상태 폴링 엔드포인트 (2초 간격으로 프론트에서 호출)
+   */
+  @GetMapping("/api/analysis/status/{sessionId}")
+  @ResponseBody
+  public AnalysisStatusDto getAnalysisStatus(
+      @PathVariable String sessionId,
+      @RequestParam(defaultValue = "80") int logLines,
+      Authentication authentication) {
+
+    AnalysisStatusDto dto = new AnalysisStatusDto();
+    dto.setSessionId(sessionId);
+
+    String loginId = (authentication != null && authentication.getPrincipal() instanceof User u)
+        ? u.getUserId() : "";
+
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      dto.setPhase("NOT_FOUND");
+      dto.setErrorMessage("세션을 찾을 수 없습니다.");
+      dto.setCompleted(true);
+      return dto;
+    }
+
+    String phase = session.getCurrentPhase();
+    dto.setPhase(phase);
+    dto.setTotalFiles(session.getTotalFiles());
+    dto.setProcessedFiles(session.getProcessedFiles());
+    dto.setSuccessCount(session.getStatistics().getSuccessCount());
+    dto.setFailedCount(session.getStatistics().getFailureCount());
+    dto.setAlreadyCount(session.getStatistics().getSkipCount());
+    dto.setRecentLogs(session.getRecentLogLines(logLines));
+    dto.setLoginId(loginId);
+    // (REQ-002) 일시정지 확정 여부 — NULL/true는 확정으로 읽힌다(SessionState.hasSettledPause()).
+    dto.setPauseSettled(session.hasSettledPause());
+
+    // PAUSED(사용자 일시정지 또는 크레딧 소진 등)도 폴링을 멈춰야 하는 종료 상태다.
+    // 여기 빠져있으면 서버는 이미 멈췄는데 화면은 계속 "처리 중" 스피너를 돌리게 된다.
+    //
+    // AWAITING_FAILOVER_CONFIRM(Phase 4, 2026-08-21)은 의도적으로 이 목록에 넣지 않는다 — 지금
+    // 프런트(dashboard.js)의 폴링 로직은 completed=true를 받으면 phase가 'PAUSED'/'CANCELLED'가
+    // 아닌 한 무조건 handleAnalysisCompletion()(정상 완료 처리, write-back까지 트리거)으로 빠지므로,
+    // 여기서 completed=true를 반환하면 컨펌 대기 상태를 "분석 완료"로 오인하는 회귀가 생긴다.
+    // 대신 Phase 5(dashboard.js startPolling())가 completed 여부와 무관하게 phase 값 자체를
+    // 직접 확인해 컨펌 모달을 띄우고 폴링을 멈춘다.
+    boolean isDone = "COMPLETED".equals(phase) || "FAILED".equals(phase)
+        || "CANCELLED".equals(phase) || "PAUSED".equals(phase);
+    dto.setCompleted(isDone);
+
+    if ("FAILED".equals(phase) || "CANCELLED".equals(phase) || "PAUSED".equals(phase)) {
+      List<String> errors = session.getErrorLog();
+      if (!errors.isEmpty()) {
+        dto.setErrorMessage(errors.get(errors.size() - 1));
+      }
+    }
+
+    // 컨펌 모달이 "자체 LLM({modelKey})으로 진행하시겠습니까?"처럼 대상 모델명을 보여줄 수 있도록
+    // AWAITING_FAILOVER_CONFIRM 상태일 때만 failoverModelKey를 함께 내려준다.
+    if (SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(phase)) {
+      dto.setFailoverModelKey(session.getFailoverModelKey());
+    }
+
+    // 분석이 끝난 시점(정상 완료/치명적 실패)에만 파일별 실패 목록을 내려준다.
+    // 프런트(handleAnalysisCompletion)가 완료 처리 시 실패 파일을 "패치완료"로 덮어쓰지 않게 하기 위한 것이라
+    // 진행 중(ANALYZING 등) 폴링 응답에는 넣지 않는다.
+    if ("COMPLETED".equals(phase) || "FAILED".equals(phase)) {
+      Path analysisRoot = resolveFailedFilesRoot(session);
+      List<String> failedFiles = new ArrayList<>();
+      for (String abs : session.getFailedFilePaths()) {
+        failedFiles.add(toDisplayPath(analysisRoot, abs));
+      }
+      dto.setFailedFiles(failedFiles);
+    }
+
+    if ("COMPLETED".equals(phase)) {
+      dto.setAvgTimePerFile((String) session.getMetadata().get("avgTimePerFile"));
+      dto.setFinalSummary((String) session.getMetadata().get("finalSummary"));
+      dto.setReadmePath((String) session.getMetadata().get("readmePath"));
+      dto.setReadmeContent((String) session.getMetadata().get("readmeContent"));
+    }
+
+    // (REQ-002 ③) historyId는 PAUSED에서도 싣는다 — 전량실패 PAUSED의 완료 패널이 'PPT 다운로드'를
+    // 이 값으로 호출하기 때문이다. 위 COMPLETED 전용 4개 필드(평균 시간·최종 요약·README)는 정상
+    // 완료에서만 의미가 있어 그대로 COMPLETED 전용으로 둔다.
+    if ("COMPLETED".equals(phase) || "PAUSED".equals(phase)) {
+      String historyIdStr = (String) session.getMetadata().get("historyId");
+      if (historyIdStr != null) {
+        try { dto.setHistoryId(Long.parseLong(historyIdStr)); } catch (NumberFormatException ignored) {}
+      }
+    }
+
+    return dto;
+  }
+
+  /**
+   * 세션의 완료/대기 파일 목록 조회 (재개 진입 시 우측 그리드를 채우기 위한 용도).
+   * '이어서 분석' 화면은 /?sessionId=...로 바로 진입해서 1단계 조회를 거치지 않으므로,
+   * 세션에 이미 기록된 patchedFilePaths(완료)/pendingFilePaths(대기)로 그리드를 복원한다.
+   */
+  @GetMapping("/api/session/{sessionId}/files")
+  @ResponseBody
+  public Map<String, Object> getSessionFileList(@PathVariable String sessionId, Authentication authentication) {
+    Map<String, Object> result = new HashMap<>();
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      result.put("error", "세션을 찾을 수 없습니다.");
+      return result;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      result.put("error", "이 세션에 접근할 권한이 없습니다.");
+      return result;
+    }
+
+    Path analysisRoot = resolveAnalysisRoot(session);
+
+    List<Map<String, Object>> files = new ArrayList<>();
+    for (String abs : session.getPatchedFilePaths()) {
+      files.add(toSessionFileEntry(analysisRoot, abs, true));
+    }
+    for (String abs : session.getPendingFilePaths()) {
+      files.add(toSessionFileEntry(analysisRoot, abs, false));
+    }
+
+    result.put("files", files);
+    return result;
+  }
+
+  // ===================================================================
+  // 경로 계산 공용 헬퍼 (읽기 측 3곳의 단일 산식 출처)
+  //
+  // 이 산식들의 **정답 출처는 runAnalysis()**다. runAnalysis()가 copy 모드에서 실제로 파일을 쓰는
+  // 위치가 곧 정답이고, 아래 헬퍼들은 그 위치를 세션 저장값만으로 다시 계산해 맞히기 위한 것이다.
+  // 따라서 runAnalysis()의 경로 계산이 바뀌면 **여기도 반드시 함께 바꿔야 한다**(반대 방향이 아니다).
+  // 그 계약은 MainApiControllerCopyModeOutputRootContractTest가 실행 결과로 고정하고 있으므로,
+  // 한쪽만 바뀌면 그 테스트가 RED로 알려준다.
+  // (라인 번호는 이 파일에서 반복적으로 썩어왔으므로 메서드명으로만 참조한다.)
+  // ===================================================================
+
+  /**
+   * copy 모드(= 원본을 건드리지 않고 출력 폴더에 복사본을 만들어 분석) 판정.
+   * runAnalysis()의 isCopyMode 판정과 동일하다 — null/blank 가드와 outputPath.trim() 비교까지 같다.
+   * (runAnalysis()는 {@code source.equals(output.trim())} 순서로 쓰지만 동치이며, 이 순서가
+   * sourcePath까지 null인 경우에도 NPE 없이 판정된다.)
+   */
+  private static boolean isCopyModeOutput(String sourcePath, String outputPath) {
+    return outputPath != null && !outputPath.isBlank() && !outputPath.trim().equals(sourcePath);
+  }
+
+  /**
+   * 출력 경로의 계정별 분리 세그먼트로 쓸 수 있게 사용자명을 정규화한다.
+   * runAnalysis()의 safeUsername 규칙과 동일 — 이 정규식을 그대로 복제해야 실제 저장 경로와 일치한다.
+   */
+  private static String sanitizeUsername(String username) {
+    return (username != null && !username.isBlank())
+        ? username.replaceAll("[^a-zA-Z0-9_\\-]", "_") : "unknown";
+  }
+
+  /**
+   * 계정 루트({@code {outputPath}/{safeUsername}}) — runAnalysis()의 finalOutputPath와 동일하다.
+   * <b>추적 파일({@code .ai-analysis-done.txt})의 기준 경로</b>이자 loadTrackerIntoSession()/analyzeFile()에
+   * 넘어가는 outputRoot다. 비-copy 모드면 sourcePath 자체가 기준이 된다.
+   */
+  private static String resolveUserOutputRoot(String sourcePath, String outputPath, String username) {
+    return isCopyModeOutput(sourcePath, outputPath)
+        ? Path.of(outputPath.trim()).resolve(sanitizeUsername(username)).toString().replace("\\", "/")
+        : sourcePath;
+  }
+
+  /**
+   * 프로젝트 루트({@code {outputPath}/{safeUsername}/{sourceFolderName}}) — runAnalysis()의
+   * finalProjectOutputPath와 동일하다. <b>분석 대상 파일이 실제로 놓이는 루트</b>이며,
+   * 화면 표시용 상대경로(relativize)의 기준도 이 값이어야 프런트 파일명과 매칭된다.
+   */
+  private static Path resolveProjectOutputRoot(String sourcePath, String outputPath, String username) {
+    Path sourceRootPath = Path.of(sourcePath);
+    return isCopyModeOutput(sourcePath, outputPath)
+        ? Path.of(resolveUserOutputRoot(sourcePath, outputPath, username))
+            .resolve(sourceRootPath.getFileName().toString())
+        : sourceRootPath;
+  }
+
+  /**
+   * 세션에 저장된 값으로 프로젝트 루트를 계산하는 편의 오버로드.
+   * 분석 루프의 지역변수가 아니라 세션 저장값만 쓰므로 분석 종료 후(폴링 시점)에도 동일하게 계산된다.
+   */
+  private static Path resolveProjectOutputRoot(SessionState session) {
+    return resolveProjectOutputRoot(
+        session.getSourcePath(), session.getOutputPath(), session.getUsername());
+  }
+
+  /**
+   * getSessionFileList()가 그리드 파일명(상대경로)을 만들 때 쓰는 기준 루트.
+   * 분석 루프의 지역변수가 아니라 세션에 저장된 값만 사용하므로 분석 종료 후(폴링 시점)에도 동일하게 계산된다.
+   *
+   * <p>예전에는 여기서 계정 분리 세그먼트({username})를 빼고 {@code {out}/{srcName}}으로 계산해,
+   * copy 모드 재개 화면의 파일명이 {@code ../{username}/{srcName}/...} 형태로 내려왔다. 그러면
+   * 폴링 응답의 failedFiles(= resolveFailedFilesRoot 기준)와 <b>한 건도 매칭되지 않아</b>
+   * 프런트(dashboard.js)가 실패 파일을 "패치완료"로 덮어쓴다 — 표시상의 어색함이 아니라 기능 결함이었다.
+   * 이제 failedFiles와 같은 산식(resolveProjectOutputRoot)을 쓰므로 두 값이 항상 같은 문자열이 된다.
+   */
+  private Path resolveAnalysisRoot(SessionState session) {
+    return resolveProjectOutputRoot(session);
+  }
+
+  /**
+   * 문자열이 {@link Path}로 <b>파싱 가능한지</b>만 확인한다(존재 여부·권한은 보지 않는다).
+   *
+   * <p>왜 필요한가: {@code new File(path).exists() && isDirectory()} 가드와 {@code Path.of(path)}는
+   * <b>받아들이는 문자열이 다르다.</b> Windows 파일 API는 경로 컴포넌트의 후행 공백을 스스로 잘라내
+   * {@code "C:/proj "}를 실디렉터리로 인정하지만, {@code java.nio.file.Path} 파서는 후행 공백을
+   * 불법 문자로 보고 {@link InvalidPathException}을 던진다. 이 비대칭 때문에 "File 가드는 통과했는데
+   * 뒤쪽 {@code Path.of()}에서 터지는" 입력이 실제로 존재했고, 그 예외가 컨트롤러 밖으로 나가
+   * (이 프로젝트에는 {@code @ControllerAdvice}가 없다) 응답 자체가 만들어지지 않았다.
+   *
+   * <p>그래서 <b>진입 가드에서 File 검사와 함께</b> 이 검사를 세워 파싱 불가 경로를 사용자 문구로
+   * 흡수한다. 값을 바꾸지 않는다는 점이 중요하다 — 여기서 {@code trim()} 같은 정규화를 하면
+   * copy 모드 판정(문자열 비교)이 API마다 갈리므로, <b>하류가 실제로 파싱하는 그 문자열</b>을
+   * 그대로 받아 검사만 한다.
+   */
+  private static boolean isParsablePath(String path) {
+    if (path == null) {
+      return false;
+    }
+    try {
+      Path.of(path);
+      return true;
+    } catch (InvalidPathException e) {
+      return false;
+    }
+  }
+
+  /**
+   * 폴링 DTO의 failedFiles 전용 analysisRoot 계산. 계정별 분리 세그먼트({username})까지 포함해
+   * runAnalysis()의 실제 파일 저장 경로(finalProjectOutputPath)와 정확히 일치해야, 실패 파일의
+   * 상대경로가 프런트 globalFilesCache.fileName(소스 폴더 기준 상대경로)과 매칭된다.
+   * 산식 자체는 resolveProjectOutputRoot()에 단일 출처로 모여 있고, resolveAnalysisRoot()도
+   * 같은 산식을 쓴다(그래서 두 API의 상대경로가 문자열로 일치한다).
+   */
+  private Path resolveFailedFilesRoot(SessionState session) {
+    return resolveProjectOutputRoot(session);
+  }
+
+  /** 절대경로를 analysisRoot 기준 상대경로('/' 구분자)로 변환한다. relativize 실패 시 절대경로로 폴백. */
+  private String toDisplayPath(Path analysisRoot, String absPathStr) {
+    try {
+      return analysisRoot.relativize(Path.of(absPathStr)).toString().replace("\\", "/");
+    } catch (Exception e) {
+      return absPathStr;
+    }
+  }
+
+  private Map<String, Object> toSessionFileEntry(Path analysisRoot, String absPathStr, boolean isCompleted) {
+    Map<String, Object> entry = new HashMap<>();
+    String display = toDisplayPath(analysisRoot, absPathStr);
+    entry.put("fileName", display);
+    entry.put("isCompleted", isCompleted);
+    return entry;
+  }
+
+  /**
+   * 완료 파일 미리보기/Diff 조회 (1단계, 세션 한정).
+   * write-back 직후 세션 메모리(previewCache)에 캐시해 둔 원본/결과 전체 텍스트로 unified diff를
+   * 그 자리에서 생성해 반환한다. 세션이 종료(재시작 포함)되면 캐시가 GC로 소멸하므로 조회 불가.
+   */
+  @GetMapping("/api/session/{sessionId}/preview")
+  @ResponseBody
+  public ResponseEntity<Map<String, Object>> getFilePreview(
+      @PathVariable String sessionId, @RequestParam String path, Authentication authentication) {
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND)
+          .body(Map.of("error", "세션을 찾을 수 없습니다. 이번 분석 세션 동안만 확인할 수 있습니다."));
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      return ResponseEntity.status(HttpStatus.FORBIDDEN)
+          .body(Map.of("error", "이 세션에 접근할 권한이 없습니다."));
+    }
+    SessionState.PreviewEntry entry = session.getPreviewEntry(path);
+    if (entry == null) {
+      return ResponseEntity.status(HttpStatus.NOT_FOUND)
+          .body(Map.of("error", "미리보기 캐시를 찾을 수 없습니다. 이번 분석 세션에서 처리된 파일만 확인할 수 있습니다."));
+    }
+
+    // 원본은 파일 그대로(CRLF일 수 있음)인데 write-back 로직(mergeCommentsIntoCode)이 결과물을
+    // 항상 LF로 정규화해서 쓰기 때문에, 줄바꿈 문자만 다르고 내용은 같은 줄까지 전부 변경된 것처럼
+    // diff가 나오는 문제가 있었다(QA 중 발견). write-back 자체는 건드리지 않고, 미리보기/Diff 표시용
+    // 텍스트만 양쪽 다 CRLF로 통일해서 비교한다.
+    String original = normalizeToCrlf(entry.original());
+    String commented = normalizeToCrlf(entry.commented());
+
+    Map<String, Object> result = new HashMap<>();
+    result.put("original", original);
+    result.put("commented", commented);
+    result.put("diff", buildUnifiedDiff(path, original, commented));
+    return ResponseEntity.ok(result);
+  }
+
+  // 줄바꿈을 CRLF로 통일한다 (먼저 LF로 접었다가 다시 CRLF로 펼쳐서 원본이 LF/CRLF 혼용이어도 안전)
+  private String normalizeToCrlf(String text) {
+    if (text == null) return null;
+    return text.replace("\r\n", "\n").replace("\n", "\r\n");
+  }
+
+  // 원본/결과 전체 텍스트로 unified diff 텍스트를 생성한다 (java-diff-utils)
+  private String buildUnifiedDiff(String fileName, String original, String commented) {
+    List<String> originalLines = Arrays.asList(original.split("\n", -1));
+    List<String> commentedLines = Arrays.asList(commented.split("\n", -1));
+    Patch<String> patch = DiffUtils.diff(originalLines, commentedLines);
+    List<String> unified = UnifiedDiffUtils.generateUnifiedDiff(
+        fileName, fileName, originalLines, patch, 3);
+    return String.join("\n", unified);
+  }
+
+  /**
+   * CLAUDE.md 내용 단독 조회 (완료 화면 표시용)
+   */
+  @GetMapping("/api/analysis/claude-md")
+  @ResponseBody
+  public Map<String, Object> getClaudeMdContent() {
+    Map<String, Object> result = new HashMap<>();
+    try {
+      File mdFile = new File("src/main/resources/CLAUDE.md");
+      if (mdFile.exists()) {
+        result.put("content", Files.readString(mdFile.toPath(), StandardCharsets.UTF_8));
+      } else {
+        InputStream is = getClass().getClassLoader().getResourceAsStream("CLAUDE.md");
+        if (is != null) {
+          result.put("content", new String(is.readAllBytes(), StandardCharsets.UTF_8));
+        } else {
+          result.put("content", "(CLAUDE.md 파일을 찾을 수 없습니다)");
+        }
+      }
+    } catch (Exception e) {
+      result.put("content", "(CLAUDE.md 로드 실패: " + e.getMessage() + ")");
+    }
+    return result;
+  }
+
+  // ===================================================================
+  // 파일 상태 조회 (1단계 - 기존 유지)
+  // ===================================================================
+
+  /**
+   * 파일시스템 루트(드라이브 루트·{@code /})를 원본 경로로 지정했을 때의 전용 거부 문구(REQ-008, 2026-09).
+   * 기존 두 문구("올바르지 않은 원본 디렉터리 경로입니다." / "올바르지 않은 출력 디렉터리 경로입니다.")와
+   * 문자열이 겹치지 않는다 — 어느 검사에서 걸렸는지 응답만으로 구분되게 한다. 계약 테스트가 이 상수를
+   * 문자 단위로 대조하므로 문면을 바꾸면 테스트도 함께 바꾼다.
+   */
+  private static final String ROOT_SOURCE_PATH_ERROR =
+      "최상위 경로(드라이브 루트)는 분석 대상으로 지정할 수 없습니다. 하위 프로젝트 폴더를 지정해 주세요.";
+
+  @PostMapping("/api/dashboard-status")
+  @ResponseBody
+  public Map<String, Object> getDashboardStatus(@RequestBody Map<String, String> request,
+      Authentication authentication) {
+    Map<String, Object> resultData = new HashMap<>();
+    if (!isAdmin(authentication)) {
+      resultData.put("error", "서버 경로 직접 지정 분석은 관리자만 사용할 수 있습니다. 원격 업로드 분석을 이용해 주세요.");
+      return resultData;
+    }
+    String folderPathStr = request.get("folderPath");
+    String outputPathStr = request.get("outputPath");
+
+    if (folderPathStr == null || folderPathStr.trim().isEmpty()) {
+      resultData.put("error", "디렉터리 경로가 비어있습니다.");
+      return resultData;
+    }
+
+    // isParsablePath()는 raw 문자열 그대로 검사한다 — 아래 Path.of(folderPathStr)과
+    // resolveProjectOutputRoot()의 Path.of(sourcePath)가 trim 없이 이 값을 그대로 파싱하므로,
+    // 검사 대상과 실제 파싱 대상이 같아야 "가드는 통과시켰는데 뒤에서 터지는" 구멍이 생기지 않는다.
+    File folder = new File(folderPathStr);
+    if (!folder.exists() || !folder.isDirectory() || !isParsablePath(folderPathStr)) {
+      resultData.put("error", "올바르지 않은 원본 디렉터리 경로입니다.");
+      return resultData;
+    }
+
+    if (outputPathStr == null || outputPathStr.trim().isEmpty()) {
+      outputPathStr = folderPathStr;
+    }
+
+    // 요청 파라미터 경로 구분자 정규화 — startAnalysis()가 분석 본체에 넘기기 전에 적용하는 규칙과 같다.
+    // 아래 헬퍼가 copy 모드 여부를 두 경로의 "문자열 비교"로 판정하므로, 사용자가 같은 경로를
+    // 한쪽은 \, 다른쪽은 / 로 입력하면 정규화 없이는 실제 분석과 정반대의 모드로 판정된다.
+    folderPathStr = folderPathStr.replace("\\", "/");
+    outputPathStr = outputPathStr.replace("\\", "/");
+
+    // 출력 경로도 같은 이유로 진입에서 막는다 — 아래 resolveUserOutputRoot()가
+    // Path.of(outputPath.trim())으로 파싱하는데, 그 지점 역시 try 밖이라 예외가 그대로 새어나간다.
+    // 검사 대상이 outputPathStr.trim()인 것은 하류가 파싱하는 문자열이 바로 그 값이기 때문이다
+    // (후행 공백이 붙은 출력 경로는 지금도 정상 동작해야 한다 — 계약 테스트 C2/C3).
+    if (!isParsablePath(outputPathStr.trim())) {
+      resultData.put("error", "올바르지 않은 출력 디렉터리 경로입니다.");
+      return resultData;
+    }
+
+    // (게이트1 ⑧(a), 심층 방어) try 범위를 위임 호출 앞까지 끌어올린다 —
+    // resolveUserOutputRoot()/resolveProjectOutputRoot()/Path.of(folderPathStr)는 전부
+    // 요청 파라미터를 그대로 파싱하므로, 진입 가드가 미처 거르지 못한 형태(예: 파일시스템 루트 경로는
+    // getFileName()이 null이라 NPE)가 남는다. 이 프로젝트에는 전역 예외 처리기가 없어 그 예외는
+    // 응답 없이 그대로 빠져나간다(HTTP 500). 아래 catch (Exception e)가 흡수하게 한다.
+    try {
+      // 루트 경로 조기 거부(REQ-008, 2026-09): 드라이브 루트("C:/", "/")는 File 존재 검사도 파싱 검사도 통과한다
+      // (직전 사이클 R6 실측). 이 가드가 여기에 있는 이유 세 가지:
+      //  ① 왜 try 안인가 — 요청 파라미터를 파싱하는 코드(Path.of(folderPathStr) 포함)는 기존 catch (Exception e)의
+      //     보호 범위 안에 둔다(직전 사이클 게이트1 ⑧(a)). 이 프로젝트에는 전역 예외 처리기가 없어 try 밖에서 던지면
+      //     응답 없이 HTTP 500이 된다. MainApiControllerDashboardStatusTryScopeSingleSourceTest가 이 위치를
+      //     소스 텍스트로 감시한다(토큰의 첫 출현이 try 안이어야 한다).
+      //  ② 왜 resolve*()·Files.walk()보다 앞인가 — copy 모드면 resolveProjectOutputRoot()의
+      //     getFileName().toString()이 NPE, 비-copy 모드면 Files.walk(루트)가 드라이브 전체를 순회한다.
+      //     어느 쪽도 사용자가 의도한 요청이 아니므로 둘 다 도달하기 전에 전용 문구로 거부한다.
+      //  ③ 왜 구분자 정규화 이후 값을 검사하는가 — 검사 대상 = 하류 파싱 대상. 위 replace("\\","/")를 거친
+      //     folderPathStr이 바로 아래 resolve*()와 Files.walk()가 실제로 파싱하는 값이다. trim은 하지 않는다
+      //     (하류도 trim하지 않으므로 검사 대상과 파싱 대상이 같아야 "가드는 통과했는데 뒤에서 터지는" 구멍이 없다).
+      Path folderPath = Path.of(folderPathStr);
+      if (folderPath.getFileName() == null) {
+        resultData.put("error", ROOT_SOURCE_PATH_ERROR);
+        return resultData;
+      }
+
+      // 계정별 출력 경로의 산식은 공용 헬퍼가 단일 출처다 — 이 메서드는 산식을 따로 갖지 않고 위임한다.
+      // (과거 이 자리에 인라인 사본이 있었고, 거기엔 outputPath.trim()과 구분자 정규화가 빠져 있어
+      //  실제 저장 위치와 어긋났다. 완료 판정이 절대경로 문자열 비교라 한 글자만 달라도 전부 미완료가 된다.)
+      // 1단계 스캔 시점이라 세션이 아직 없으므로 SessionState 오버로드가 아닌 3-arg 오버로드를 쓴다.
+      String requestUsername = (authentication != null
+          && authentication.getPrincipal() instanceof User u) ? u.getUserId() : null;
+      String userOutputPathStr = resolveUserOutputRoot(folderPathStr, outputPathStr, requestUsername);
+      Path outputRootPath = resolveProjectOutputRoot(folderPathStr, outputPathStr, requestUsername);
+
+      try (Stream<Path> stream = Files.walk(folderPath)) {
+        List<Path> fileList = stream
+            .filter(Files::isRegularFile)
+            .filter(this::isSupportedFile)
+            .toList();
+
+        // 추적 파일 로드 (완료 여부 확인용) - 계정별 경로 기준
+        java.util.Set<String> trackedPaths = new java.util.HashSet<>();
+        Path trackerFile = getTrackerFilePath(userOutputPathStr);
+        if (Files.exists(trackerFile)) {
+          try {
+            Files.readAllLines(trackerFile, StandardCharsets.UTF_8).stream()
+                .map(String::trim).filter(l -> !l.isEmpty())
+                .forEach(trackedPaths::add);
+          } catch (Exception ignored) {}
+        }
+
+        List<Map<String, Object>> fileStatusList = new ArrayList<>();
+        int completeCount = 0;
+        int waitCount = 0;
+
+        for (Path path : fileList) {
+          Map<String, Object> fileMap = new HashMap<>();
+          boolean isCompleted = false;
+
+          Path relativeSubPath = folderPath.relativize(path);
+          Path targetPath = outputRootPath.resolve(relativeSubPath);
+
+          // 추적 파일 기반 완료 여부 확인
+          String absTarget = targetPath.toAbsolutePath().normalize().toString();
+          if (trackedPaths.contains(absTarget)) {
+            isCompleted = true;
+          } else if (targetPath.toFile().exists()) {
+            // 하위 호환: 이전 마커 문자열 체크
+            String targetContent = readFileStrictSafely(targetPath);
+            if (targetContent.contains("[AI 한글 주석 보완 완료]") ||
+                targetContent.contains("[AI 한글 주석 가상 시뮬레이션 완료]")) {
+              isCompleted = true;
+            }
+          }
+
+          fileMap.put("fileName", relativeSubPath.toString());
+          fileMap.put("isCompleted", isCompleted);
+          fileStatusList.add(fileMap);
+
+          if (isCompleted) completeCount++;
+          else waitCount++;
+        }
+
+        resultData.put("totalCount", fileList.size());
+        resultData.put("completeCount", completeCount);
+        resultData.put("waitCount", waitCount);
+        resultData.put("files", fileStatusList);
+        resultData.put("outputPath", userOutputPathStr);
+        resultData.put("consoleLog",
+            "[안내] 원본 레거시 구조 스캔 완료.\n- 실시간 검증 대상 위치: [" + userOutputPathStr + "]");
+
+        return resultData;
+      }
+    } catch (Exception e) {
+      resultData.put("error", e.getMessage());
+      return resultData;
+    }
+  }
+
+  // ===================================================================
+  // 세션 제어 (일시 중지 / 재개 / 취소)
+  // ===================================================================
+
+  @PostMapping("/api/session/pause")
+  @ResponseBody
+  public Map<String, Object> pauseSession(@RequestBody Map<String, String> request, Authentication authentication) {
+    Map<String, Object> response = new HashMap<>();
+    String sessionId = request.get("sessionId");
+    if (sessionId == null || sessionId.isEmpty()) {
+      response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
+    }
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+    }
+
+    // (REQ-001 ②) 이미 끝난 분석·이미 일시정지된 분석에 대한 가드 — 어떤 상태 변경보다 먼저 판정한다.
+    // 종전에는 상태를 먼저 바꾼 뒤 이력을 조회했기 때문에, 완료된 분석에 일시정지가 들어오면 세션이
+    // PAUSED로 덮이고 pause_settled에 FALSE가 쓰여 목록이 "멈추는 중"으로 영구히 남았다.
+    // 이력 조회를 판정 앞으로 당겨 1회만 하고, 그 결과를 아래 이력 갱신에서 그대로 재사용한다.
+    AnalysisHistory history = null;
+    try {
+      history = analysisHistoryRepository.findBySessionId(sessionId);
+    } catch (Exception e) {
+      // 이력 조회 실패는 일시정지 자체를 막지 않는다 — 세션 판정만으로 기존 동작대로 진행한다.
+      log.warn("[일시정지 이력 상태 갱신 실패] sessionId={}", sessionId, e);
+    }
+
+    // Arrays.asList를 쓰는 이유: List.of(...)는 contains(null)에서 NPE를 던진다. status/currentPhase는
+    // DB 복원 경로 등에서 null일 수 있어 null을 "해당 없음"으로 조용히 흘려보내야 한다.
+    List<String> terminalStatuses = Arrays.asList("COMPLETED", "CANCELLED", "FAILED");
+    if (terminalStatuses.contains(session.getStatus())
+        || terminalStatuses.contains(session.getCurrentPhase())
+        || (history != null && terminalStatuses.contains(history.getStatus()))) {
+      log.warn("[일시정지 거부] 이미 끝난 분석 — sessionId={}, sessionStatus={}, phase={}, historyStatus={}",
+          sessionId, session.getStatus(), session.getCurrentPhase(),
+          history != null ? history.getStatus() : null);
+      response.put("success", false);
+      response.put("reason", "SESSION_TERMINAL");
+      response.put("message", "이미 끝난 분석은 일시정지할 수 없습니다.");
+      return response;
+    }
+
+    // 이미 일시정지(또는 크레딧 소진 컨펌 대기) 상태면 아무것도 바꾸지 않고 성공으로 돌려준다 —
+    // 프런트는 success=true를 기존 성공 처리로 받으므로 화면 변경이 필요 없다. 여기서 다시
+    // pauseSettled=FALSE를 쓰면 이미 확정된 세션이 "멈추는 중"으로 되돌아간다.
+    List<String> pausedStatuses =
+        Arrays.asList("PAUSED", SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+    if (pausedStatuses.contains(session.getStatus())
+        || pausedStatuses.contains(session.getCurrentPhase())) {
+      response.put("success", true);
+      response.put("alreadyPaused", true);
+      response.put("message", "이미 일시정지된 분석입니다.");
+      return response;
+    }
+
+    session.setPausedAt(LocalDateTime.now());
+    session.setCurrentPhase("PAUSED");
+    session.setStatus("PAUSED");
+    // (REQ-002) 사용자 일시정지 요청 시점 = "아직 멈추는 중". pauseSettled를 false로 내리는 곳은 여기 한 곳뿐이며,
+    // 처리 루프의 pauseDetected 블록이 pendingFilePaths를 확정한 직후 true로 되돌린다. 목록 API
+    // (GET /api/my/analysis-history)는 이 값을 DB(SessionRepository)에서 읽으므로 여기서 바로 저장해 둔다 —
+    // 저장하지 않으면 확정 전 구간에 DB 행이 여전히 NULL(=확정)로 읽혀 이 신호가 프런트에 전달되지 않는다.
+    session.setPauseSettled(Boolean.FALSE);
+    sessionManager.saveSessionState(session);
+
+    // AnalysisHistory("내 분석 이력" 목록에 표시되는 값)도 즉시 갱신한다. 실제 파일 처리 루프는
+    // 이미 진행 중이던 파일들(스레드풀 동시 처리분)이 다 끝나야 pauseDetected를 감지해 history를
+    // 저장하므로, 이 즉시 반영이 없으면 클릭 직후 잠깐(길게는 수십 초) "IN_PROGRESS"로 잘못 보인다.
+    // 최종 카운트가 반영된 저장은 그 처리 루프가 끝난 뒤 다시 한 번 일어나므로 여기서는 상태만 앞당겨 반영한다.
+    try {
+      // 위에서 판정용으로 이미 1회 조회한 결과를 그대로 쓴다(조회 횟수 불변 — 종전에도 1회였다).
+      if (history != null && !"COMPLETED".equals(history.getStatus())) {
+        history.setStatus("PAUSED");
+        analysisHistoryRepository.save(history);
+      }
+    } catch (Exception e) {
+      log.warn("[일시정지 이력 상태 갱신 실패] sessionId={}", sessionId, e);
+    }
+
+    response.put("success", true);
+    response.put("message", "분석이 일시 중지되었습니다.");
+    return response;
+  }
+
+  @PostMapping("/api/session/resume")
+  @ResponseBody
+  public Map<String, Object> resumeSession(@RequestBody Map<String, String> request, Authentication authentication) {
+    Map<String, Object> response = new HashMap<>();
+    String sessionId = request.get("sessionId");
+    if (sessionId == null || sessionId.isEmpty()) {
+      response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
+    }
+    // DB에서도 로드 시도 (서버 재시작 후 세션이 메모리에 없는 경우 포함)
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+    }
+    return resumePendingFilesInThread(session, sessionId);
+  }
+
+  /**
+   * 크레딧소진 컨펌("자체 LLM으로 진행하시겠습니까?")에서 "예" 선택 시 호출. 세션이
+   * AWAITING_FAILOVER_CONFIRM 상태인지 확인한 뒤, claudeService.setModel(...)로 이 세션(소스 경로)의
+   * 이후 LLM 호출을 failover 대상 모델로 전환하고, 기존 /api/session/resume과 동일한 재개 스레드를
+   * 그대로 기동한다(재개 로직 자체는 resumePendingFilesInThread로 공통화). "아니오"(중단 유지)는
+   * 별도 API 없이 이 상태 그대로 두는 것으로 충분하다(설계 문서 §4 — 범위 최소화).
+   */
+  @PostMapping("/api/session/failover/confirm")
+  @ResponseBody
+  public Map<String, Object> confirmFailover(@RequestBody Map<String, String> request, Authentication authentication) {
+    Map<String, Object> response = new HashMap<>();
+    String sessionId = request.get("sessionId");
+    if (sessionId == null || sessionId.isEmpty()) {
+      response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
+    }
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    }
+    if (!isSessionOwnerOrAdmin(session, authentication)) {
+      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+    }
+    if (!SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(session.getCurrentPhase())) {
+      response.put("success", false);
+      response.put("message", "크레딧 소진 컨펌 대기 상태가 아닙니다.");
+      return response;
+    }
+    String failoverModelKey = session.getFailoverModelKey();
+    if (failoverModelKey == null || failoverModelKey.isBlank()) {
+      response.put("success", false);
+      response.put("message", "failover 대상 모델이 지정되어 있지 않습니다.");
+      return response;
+    }
+
+    // resumePendingFilesInThread()에서도 동일한 검사를 하지만, 재개할 파일이 아예 없는 비정상
+    // 상태에서는 모델 전환(claudeService.setModel) 같은 부작용을 남기지 않고 그대로 거부하기 위해
+    // 여기서 먼저 확인한다.
+    if (session.getPendingFilePaths().isEmpty()) {
+      response.put("success", false);
+      response.put("message", "재개할 파일이 없습니다. 처음부터 새로 분석해 주세요.");
+      return response;
+    }
+
+    // (REQ-004) 모델 전환·컨펌 시각 기록 같은 부작용을 남기기 전에 원본 존재를 확인한다.
+    // 판정은 resumePendingFilesInThread()에서도 다시 일어나지만, 파일 상태는 그사이에도 바뀔 수
+    // 있으므로 두 지점에서 각각 보는 것이 맞다(저장된 판정을 재사용하지 않는다 — 게이트1 D2).
+    SessionSourceAvailability.Result confirmAvailability =
+        SessionSourceAvailability.check(session.getPendingFilePaths());
+    if (confirmAvailability.status() == SessionSourceAvailability.Status.MISSING) {
+      log.warn("[failover 컨펌 거부] 원본 소실 — sessionId={}, 대기={}개, 소실={}개",
+          sessionId, confirmAvailability.pendingCount(), confirmAvailability.missingCount());
+      response.put("success", false);
+      response.put("reason", "SOURCE_MISSING");
+      response.put("pendingCount", confirmAvailability.pendingCount());
+      response.put("missingCount", confirmAvailability.missingCount());
+      response.put("message", String.format(
+          "원본 소실 — 재개 불가: 분석 대상 원본 파일 %d개가 서버에 남아 있지 않습니다."
+              + " 이 분석 기록은 삭제되지 않고 그대로 남습니다. 처음부터 새로 분석해 주세요.",
+          confirmAvailability.missingCount()));
+      return response;
+    }
+
+    // setModel()은 sourceFolderPath(세션의 소스 경로)를 키로 세션별 모델 오버라이드를 저장한다
+    // (2026-08-20 setModel 레이스컨디션 핫픽스 이후의 세션 격리 컨벤션) — runAnalysis()가
+    // claudeService.setModel(Path.of(sourcePath).toString(), ...)로 호출하는 것과 동일한 정규화.
+    claudeService.setModel(Path.of(session.getSourcePath()).toString(), failoverModelKey);
+    session.setFailoverConfirmedAt(LocalDateTime.now());
+    log.info("[failover 컨펌] sessionId={}, model={}", sessionId, failoverModelKey);
+
+    Map<String, Object> resumeResponse = resumePendingFilesInThread(session, sessionId);
+    if (Boolean.TRUE.equals(resumeResponse.get("success"))) {
+      resumeResponse.put("message", String.format(
+          "자체 LLM(%s)으로 이어서 분석합니다. (남은 파일: %s개)",
+          failoverModelKey, resumeResponse.get("pendingCount")));
+      resumeResponse.put("failoverModelKey", failoverModelKey);
+    }
+    return resumeResponse;
+  }
+
+  /**
+   * '이어서 분석'(/api/session/resume)과 failover 컨펌 수락(/api/session/failover/confirm) 양쪽에서
+   * 공유하는 재개 공통 로직 — pending 파일을 읽어 재개 스레드를 기동한다(설계 문서 §4 "기존 resume
+   * 로직 재사용/위임" 원칙).
+   */
+  private Map<String, Object> resumePendingFilesInThread(SessionState session, String sessionId) {
+    Map<String, Object> response = new HashMap<>();
+    List<String> pendingPaths = session.getPendingFilePaths();
+    if (pendingPaths.isEmpty()) {
+      response.put("success", false);
+      response.put("message", "재개할 파일이 없습니다. 처음부터 새로 분석해 주세요.");
+      return response;
+    }
+
+    // (REQ-004) 원본이 아직 서버에 남아 있는지 — 세션의 어떤 상태 변경보다 먼저 판정한다.
+    // 종전에는 여기서 .map(Path::of).filter(Files::exists)로 없는 파일을 조용히 버렸다. 그 결과
+    // 업로드 원본이 자동 정리기에 지워진 뒤 재개하면 0개 파일로 "완료" 처리되거나 대기 목록이
+    // 빈 목록으로 덮어써져 분석 기록이 영구 손상됐다. 판정은 SessionSourceAvailability 한 곳에서만
+    // 하고(판정 사본 제거), 그 결과를 그대로 재개 대상으로 쓴다.
+    SessionSourceAvailability.Result availability = SessionSourceAvailability.check(pendingPaths);
+    if (availability.status() == SessionSourceAvailability.Status.MISSING) {
+      log.warn("[재개 거부] 원본 소실 — sessionId={}, 대기={}개, 소실={}개",
+          sessionId, availability.pendingCount(), availability.missingCount());
+      response.put("success", false);
+      response.put("reason", "SOURCE_MISSING");
+      response.put("pendingCount", availability.pendingCount());
+      response.put("missingCount", availability.missingCount());
+      // 이 message는 화면 3곳이 alert('재개 실패: ' + data.message)로 그대로 띄운다 —
+      // 내부 경로·예외 문자열·sessionId를 넣지 않고 개수와 안내만 담는다.
+      response.put("message", String.format(
+          "원본 소실 — 재개 불가: 분석 대상 원본 파일 %d개가 서버에 남아 있지 않습니다."
+              + " 이 분석 기록은 삭제되지 않고 그대로 남습니다. 처음부터 새로 분석해 주세요.",
+          availability.missingCount()));
+      return response;
+    }
+
+    List<Path> pendingFilePaths = availability.existing();
+
+    // (REQ-001 A, 게이트1 D1) 재개를 시작하기 전에 카운터를 다시 센다. 재개 루프는 저장돼 있던
+    // 처리 수에서 이어서 올리는데, 돌아온 대기 파일을 다시 처리하므로 같은 파일이 두 번 세진다.
+    // "끝난 파일 수 = 총계 − 대기 수"가 유일하게 믿을 수 있는 기준이다. MISSING 거부 판정 뒤에
+    // 두는 이유: 거부된 재개는 세션을 1비트도 바꾸지 않아야 한다(RG-9).
+    // 로그는 서버 로그에만 남긴다 — 세션 터미널에 줄을 더하면 기존 테스트의 줄 계수가 흔들린다.
+    SessionState.ResumeRebase rebase = session.rebaseCountersForResume(
+        availability.pendingCount(), availability.missingCount());
+    if (rebase.applied()) {
+      log.info("[재개 카운터 재기준] sessionId={}, 처리 {}→{}, 실패 {}→0, 대기 {}개(소실 {}개)",
+          sessionId, rebase.previousProcessed(), rebase.newProcessed(), rebase.previousFailure(),
+          availability.pendingCount(), availability.missingCount());
+      if (rebase.previousProcessed() > session.getTotalFiles()) {
+        log.warn("[카운터 불변식 위반 감지] sessionId={}, 저장돼 있던 처리 수 {} > 총계 {} — 재기준값 {}로 교체",
+            sessionId, rebase.previousProcessed(), session.getTotalFiles(), rebase.newProcessed());
+      }
+    } else {
+      log.warn("[재개 카운터 재기준 생략] sessionId={}, 총계 {} < 대기 {}개 — 카운터 그대로",
+          sessionId, session.getTotalFiles(), availability.pendingCount());
+    }
+
+    // (REQ-001 A 보완, D1′) 이전 재개에서 원본이 사라져 실패로 확정된 파일은 대기 목록에 남지 않는다
+    // (재개 대상이 "존재하는 파일"뿐이고 종료 시 대기 목록이 그 목록에서 만들어진다). 그래서 바로 위
+    // 재기준이 실패 수를 0으로 되돌린 뒤 이번 대기 목록만 다시 세면 그 파일들의 실패가 사라진다.
+    // 처리 수는 손대지 않는다 — 재기준의 "총계 − 대기 수"에 이미 들어가 있다. 재기준을 생략했으면
+    // 실패 수가 리셋되지 않았으므로 더하면 이중 계산이 된다.
+    if (rebase.applied()) {
+      int carriedMissingCount = 0;
+      for (String failedPath : session.getFailedFilePaths()) {
+        if (!pendingPaths.contains(failedPath)) {
+          session.getStatistics().incrementFailureCount();
+          session.recordFileFailureReason("SOURCE_MISSING", "원본 파일 없음");
+          carriedMissingCount++;
+        }
+      }
+      if (carriedMissingCount > 0) {
+        log.info("[재개 이월 실패] sessionId={}, 이전 재개에서 원본 소실로 확정된 {}개를 실패로 다시 셈",
+            sessionId, carriedMissingCount);
+      }
+    }
+
+    // 일부만 소실(PARTIAL, 게이트1 D1)이면 남은 파일로 이어서 처리하고, 사라진 파일은 "처리 실패"로
+    // 남긴다. 그냥 버리면 재개가 끝났을 때 "완료"로 보이면서 일부 파일이 말없이 빠져, 데이터가
+    // 사라졌다는 사실 자체가 어디에도 기록되지 않는다.
+    // 소실 파일은 처리됨(실패)으로 센다 — 처리 수는 바로 앞 재기준이 소실 수까지 넣어 두었고,
+    // 여기서는 실패 목록·실패 수·사유만 채운다.
+    if (availability.status() == SessionSourceAvailability.Status.PARTIAL) {
+      for (String missingPath : availability.missing()) {
+        session.addFailedFilePath(missingPath);
+        session.getStatistics().incrementFailureCount();
+        // (REQ-002 ④) 소실 파일도 실패 사유로 집계한다 — 남은 파일까지 전부 실패하면
+        // 전량실패 안내에 SOURCE_MISSING이 함께 보인다. 경로는 넣지 않는다(C10).
+        session.recordFileFailureReason("SOURCE_MISSING", "원본 파일 없음");
+      }
+      session.addRecentLog(String.format(
+          "[재개] 원본 소실로 제외: %d개 (남은 %d개로 이어서 분석합니다)",
+          availability.missingCount(), pendingFilePaths.size()));
+    }
+
+    session.setResumedAt(LocalDateTime.now());
+    session.setPausedAt(null);
+    session.setCurrentPhase("ANALYZING");
+    session.setStatus("IN_PROGRESS");
+    session.setPendingFilePaths(new ArrayList<>());  // 재개 시작 시 pending 초기화
+
+    final String sid = sessionId;
+    final List<Path> filesToProcess = pendingFilePaths;
+    new Thread(() -> runAnalysisResume(sid, filesToProcess)).start();
+
+    response.put("success", true);
+    if (availability.missingCount() > 0) {
+      response.put("missingCount", availability.missingCount());
+      response.put("message", String.format(
+          "분석을 재개합니다. (남은 파일: %d개, 원본 소실로 제외: %d개)",
+          pendingFilePaths.size(), availability.missingCount()));
+    } else {
+      response.put("message", String.format("분석을 재개합니다. (남은 파일: %d개)", pendingFilePaths.size()));
+    }
+    response.put("pendingCount", pendingFilePaths.size());
+    response.put("sessionId", sessionId);
+    return response;
+  }
+
+  @PostMapping("/api/session/cancel")
+  @ResponseBody
+  public Map<String, Object> cancelSession(@RequestBody Map<String, String> request, Authentication authentication) {
+    Map<String, Object> response = new HashMap<>();
+    String sessionId = request.get("sessionId");
+    if (sessionId != null && !sessionId.isEmpty()) {
+      SessionState existingSession = sessionManager.getSession(sessionId);
+      if (existingSession != null && !isSessionOwnerOrAdmin(existingSession, authentication)) {
+        response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+      }
+      sessionManager.cancelSession(sessionId);
+      SessionState session = sessionManager.getSession(sessionId);
+      if (session != null) {
+        session.setCurrentPhase("CANCELLED");
+        session.addRecentLog("[취소됨] 분석이 사용자에 의해 취소되었습니다.");
+      }
+
+      // AnalysisHistory("내 분석 이력" 목록에 표시되는 값)도 즉시 갱신한다. CLAUDE.md 생성 같은
+      // 블로킹 API 호출 도중에 취소하면, 그 호출이 끝나고 파일 처리 루프까지 돌아야(때로는 수십 초)
+      // runAnalysis()가 취소를 감지해 history를 저장하므로, 이 즉시 반영이 없으면 그 사이 계속
+      // "IN_PROGRESS"로 잘못 보인다. 최종 카운트가 반영된 저장은 그 처리 루프가 끝난 뒤 다시 일어난다.
+      try {
+        AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
+        if (history != null && !"COMPLETED".equals(history.getStatus())) {
+          history.setStatus("CANCELLED");
+          analysisHistoryRepository.save(history);
+        }
+      } catch (Exception e) {
+        log.warn("[취소 이력 상태 갱신 실패] sessionId={}", sessionId, e);
+      }
+    }
+    response.put("success", true);
+    return response;
+  }
+
+  // ===================================================================
+  // 핵심 분석 로직 (비동기 스레드)
+  // ===================================================================
+
+  /**
+   * (REQ-002 / TASK-002B, work-order 2026-09-remaining-ux-fixes v4 §0.21.4) 처리 루프 <b>종단 정규화</b>.
+   *
+   * <p>불변식: {@code pauseSettled == FALSE}는 "사용자 일시정지 요청이 접수됐고 처리 루프가 아직 종단에 도달하지
+   * 않은 구간"에서만 유효하다. {@code runAnalysis()}/{@code runAnalysisResume()}가 어떤 경로(크레딧 소진·취소·
+   * 전량실패·정상 완료)로 끝나든, 종단에서 세션을 저장하기 직전에 이 메서드를 불러 FALSE가 남지 않게 한다.
+   * ({@code pauseDetected} 블록은 이미 pending 확정 직후 TRUE를 쓰므로 이 메서드를 부르지 않는다.)
+   *
+   * <p><b>조건부 승격만 한다(FALSE일 때만 TRUE)</b>. 무조건 TRUE로 쓰면 사용자 일시정지가 없던 단독 경로(크레딧
+   * 소진·전량실패·정상 완료)의 raw 값이 NULL에서 TRUE로 바뀌어 "NULL = 이 경로는 플래그를 쓰지 않는다"는 기존
+   * 관측(및 그 계약 테스트)이 깨진다. NULL은 그대로 두고 FALSE만 되돌린다.
+   *
+   * <p><b>범위 밖</b>: 확정 전 구간에 서버가 내려가 DB에 false가 잔존하는 경우(§0.21.3 (ii))는 이 보강이
+   * 다루지 않는다 — 기동 시 보정·일괄 UPDATE·마이그레이션은 §A.2 금지행이며, 게이트2에서 PM이 별도로 판단한다.
+   */
+  private void settlePauseAtTerminal(SessionState session) {
+    if (Boolean.FALSE.equals(session.getPauseSettled())) {
+      session.setPauseSettled(Boolean.TRUE);
+    }
+  }
+
+  /**
+   * 크레딧 소진(INSUFFICIENT_CREDITS) 감지 시 공통 처리 — runAnalysis()/runAnalysisResume() 양쪽에서
+   * 재사용한다. 관리자가 failover 대상(활성 LOCAL 모델, {@link LlmModelOptionService#getActiveFailoverTarget()})을
+   * 지정해뒀으면 AWAITING_FAILOVER_CONFIRM 상태로 전이해 사용자의 "자체 LLM으로 진행하시겠습니까?"
+   * 컨펌 응답을 기다리고, 지정돼 있지 않으면 기존과 동일하게 단순 PAUSED(수동 재개만 가능)로
+   * 폴백한다 — 관리자가 아직 failover 대상을 지정하지 않은 배포에서 이 흐름이 깨지지 않게 하기
+   * 위함이다(근거: analyzer-plan
+   * docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §4).
+   *
+   * <p>(REQ-002, 2026-09) 이 경로는 {@code pauseSettled}를 새로 내리지 않는다 — 루프가 끝난 뒤
+   * pendingFilePaths를 기록하며 PAUSED가 되므로 사용자 일시정지가 선행하지 않았다면 처음부터 "확정" 상태이고,
+   * 플래그의 기본값(NULL = 확정)이 그 의미를 그대로 표현한다. 사용자 일시정지(pauseSession)만 false를 거친다.
+   * 단 일시정지 요청이 <b>선행한</b> 뒤 같은 배치에서 크레딧이 소진되면 진입 시점 값이 이미 false이므로,
+   * 저장 전에 {@link #settlePauseAtTerminal(SessionState)}로 되돌린다(TASK-002B, work-order v4 §0.21.4).
+   */
+  private void handleCreditExhaustedPause(SessionState session, AnalysisHistory history,
+      List<String> pendingPaths, int completedCount) {
+    // (TASK-002B) failover 있음/없음 두 하위 분기 모두 이 아래에서 saveSessionState()하므로 여기 한 곳에서 정규화한다.
+    settlePauseAtTerminal(session);
+    session.setPendingFilePaths(pendingPaths);
+    if (history != null) {
+      history.setStatus("PAUSED");
+      history.setTotalFiles(session.getTotalFiles());
+      history.setSuccessCount(session.getStatistics().getSuccessCount());
+      history.setSkipCount(session.getStatistics().getSkipCount());
+      history.setFailureCount(session.getStatistics().getFailureCount());
+      analysisHistoryRepository.save(history);
+    }
+
+    Optional<LlmModelOption> failoverTarget = llmModelOptionService.getActiveFailoverTarget();
+    if (failoverTarget.isPresent()) {
+      String failoverModelKey = failoverTarget.get().getModelKey();
+      session.setFailoverModelKey(failoverModelKey);
+      session.setStatus(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+      sessionManager.saveSessionState(session);
+      session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+      session.addRecentLog(String.format(
+          "💳 [크레딧 소진] %d개 완료, %d개 미처리. 자체 LLM(%s)으로 이어서 진행하시겠습니까?",
+          completedCount, pendingPaths.size(), failoverModelKey));
+    } else {
+      // (REQ-001 ⑤) 종단 분기는 저장 직전에 status를 함께 맞춘다. currentPhase는 메모리 전용(@Transient)이라
+      // DB에 남지 않으므로, status를 쓰지 않으면 이 세션의 DB 행이 IN_PROGRESS로 남아 이력(PAUSED)과
+      // 어긋난다 — 재시작 후 "영원히 진행 중"으로 보이는 원인이다. 게이트1 D7로 이 크레딧 소진
+      // (failover 대상 없음) 분기도 함께 고친다. setCurrentPhase/addRecentLog 위치는 바꾸지 않는다.
+      session.setStatus("PAUSED");
+      sessionManager.saveSessionState(session);
+      session.setCurrentPhase("PAUSED");
+      session.addRecentLog(String.format(
+          "💳 [크레딧 소진 일시정지] %d개 완료, %d개 미처리. 충전 후 '이어서 분석'으로 재개하세요.",
+          completedCount, pendingPaths.size()));
+    }
+  }
+
+  private void runAnalysis(String sessionId, String normalizedSourcePath,
+      String normalizedOutputPath, boolean isForceActive, Long userId, String username,
+      Set<String> selectedRelativePaths, boolean generateReadme) {
+
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) {
+      log.error("[분석 오류] 세션을 찾을 수 없음: {}", sessionId);
+      return;
+    }
+
+    long startTime = System.currentTimeMillis();
+
+    try {
+      // 경로 계산
+      boolean isCopyMode = normalizedOutputPath != null && !normalizedOutputPath.isBlank()
+          && !normalizedSourcePath.equals(normalizedOutputPath.trim());
+
+      // 계정별 분리: {outputPath}/{username}/
+      String safeUsername = (username != null && !username.isBlank())
+          ? username.replaceAll("[^a-zA-Z0-9_\\-]", "_") : "unknown";
+      String finalOutputPath = isCopyMode
+          ? Path.of(normalizedOutputPath.trim()).resolve(safeUsername).toString().replace("\\", "/")
+          : normalizedSourcePath;
+
+      Path sourceRootPath = Path.of(normalizedSourcePath);
+      String sourceFolderName = sourceRootPath.getFileName().toString();
+      Path finalProjectOutputPath = isCopyMode
+          ? Path.of(finalOutputPath).resolve(sourceFolderName)
+          : sourceRootPath;
+
+      // 출력 폴더 생성
+      if (isCopyMode) {
+        File outputFolder = new File(finalOutputPath);
+        if (!outputFolder.exists() && !outputFolder.mkdirs()) {
+          session.setCurrentPhase("FAILED");
+          session.addErrorLog("출력 디렉터리를 생성할 수 없습니다: " + finalOutputPath);
+          sessionManager.failSession(sessionId, "출력 폴더 생성 실패");
+          return;
+        }
+      }
+
+      // [1단계] 파일 복사
+      log.info("[복사 단계 시작] sessionId={}", sessionId);
+      // 업로드 분석은 sourceRootPath 자체가 서버 임시 스테이징 폴더라 outputPath 개념이 없다
+      // (실제 출력 폴더 선택은 브라우저 쪽 write-back 단계에서 처리되며 서버로는 전달되지 않는다).
+      // 이 경고는 "서버 경로 직접 지정" 모드에서 출력 경로를 비워 원본을 직접 수정하는 경우에만 의미가 있다.
+      boolean isUploadSession = sourceRootPath.startsWith(getUploadStorageRoot());
+      if (isCopyMode) {
+        session.setCurrentPhase("COPYING");
+        performCopy(session, sourceRootPath, finalProjectOutputPath);
+      } else {
+        session.setCurrentPhase("ANALYZING");
+        if (!isUploadSession) {
+          session.addRecentLog("[경고/시스템] 출력 경로 미지정으로 원본 직접 수정 모드가 활성화되었습니다.\n");
+        }
+      }
+      log.info("[복사 단계 완료] sessionId={}", sessionId);
+
+      // [2단계] 파일 목록 수집
+      session.setCurrentPhase("ANALYZING");
+      session.addRecentLog("[시스템] ✓ 복사 완료! AI 분석 단계를 시작합니다.");
+      List<Path> fileList;
+      try {
+        Path analysisRootPath = isCopyMode ? finalProjectOutputPath : sourceRootPath;
+        List<Path> collectedFileList = collectFileList(analysisRootPath);
+        // 사용자가 프론트 파일 트리에서 일부만 선택한 경우, 이 지점에서 AI 분석 대상만 좁힌다.
+        // performCopy()는 이미 전체를 그대로 복사했으므로 선택 안 된 파일도 원본 그대로 출력 폴더에 남는다.
+        if (selectedRelativePaths != null && !selectedRelativePaths.isEmpty()) {
+          int beforeCount = collectedFileList.size();
+          collectedFileList = collectedFileList.stream()
+              .filter(p -> selectedRelativePaths.contains(
+                  analysisRootPath.relativize(p).toString().replace("\\", "/")))
+              .toList();
+          session.addRecentLog(String.format("[부분 선택] %d개 중 %d개 파일만 분석합니다.", beforeCount, collectedFileList.size()));
+        }
+        fileList = collectedFileList;
+        log.info("[파일 목록 수집] {}개 파일 발견", fileList.size());
+        sessionManager.initializeFileList(sessionId, fileList.size());
+        session.addRecentLog(String.format("[분석 처리 진행 중] 총 %d개 파일 분석 시작...", fileList.size()));
+
+        // RAG "B안" 코드 내용 색인 — sourceFolderPath는 이후 analyzeFile()이 analyzeCodeWithClaude()에
+        // 넘기는 sourceRootPath.toString()과 항상 동일해야 querySimilar()가 같은 컬렉션을 찾는다.
+        // rag.content.enabled=false거나 인프라가 없으면 내부에서 조용히 no-op(REQ-5).
+        codeContentRagService.indexProject(sourceRootPath.toString(), fileList);
+      } catch (Exception e) {
+        session.setCurrentPhase("FAILED");
+        session.addErrorLog("파일 목록 수집 실패: " + e.getMessage());
+        sessionManager.failSession(sessionId, "파일 목록 수집 실패");
+        return;
+      }
+
+      // 분석 대상 파일이 0개면 아무것도 안 했는데 COMPLETED로 표시되는 게 오해의 소지가 있으므로
+      // FAILED로 명확히 표시한다 (지원 확장자 파일이 없거나 전부 제외 대상 폴더인 경우).
+      if (fileList.isEmpty()) {
+        session.setCurrentPhase("FAILED");
+        session.addErrorLog("분석 대상 파일이 없습니다. 지원되는 확장자의 파일이 없거나 모두 제외 대상(폴더/확장자)입니다.");
+        sessionManager.failSession(sessionId, "분석 대상 파일 없음");
+        return;
+      }
+
+      // AnalysisHistory 기록 생성
+      AnalysisHistory history = null;
+      if (userId != null) {
+        try {
+          history = new AnalysisHistory(userId, sessionId, normalizedSourcePath, finalOutputPath);
+          if (selectedRelativePaths != null && !selectedRelativePaths.isEmpty()) {
+            history.setSelectedRelativePaths(selectedRelativePaths);
+          }
+          analysisHistoryRepository.save(history);
+          // (REQ-002 ③) historyId를 세션 메타데이터에 "분석 시작 시점에" 넣는다. 종전에는
+          // finalizeAnalysis()(정상 완료)에서만 넣었기 때문에, 전량실패로 PAUSED가 되면 폴링 응답에
+          // historyId가 없어 완료 패널의 'PPT 다운로드'가 동작하지 않았다.
+          if (history.getId() != null) {
+            session.updateMetadata("historyId", history.getId().toString());
+          }
+        } catch (Exception e) {
+          log.error("[분석 기록 생성 실패]", e);
+        }
+      }
+
+      // CLAUDE.md 생성: prompt.md 표준 템플릿 + 사용자 추가 요구사항(있는 경우)을 AI로 결합하여
+      // 이번 분석 세션 전용 시스템 프롬프트를 만들고, 파일별 분석에 사용하도록 등록한다.
+      session.addRecentLog("[시스템] 🧭 분석 지침(CLAUDE.md) 생성 중...");
+      String generatedClaudeMd = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList), sourceRootPath.toString());
+      claudeService.setSessionSystemPrompt(sourceRootPath.toString(), generatedClaudeMd);
+      if (history != null) {
+        history.setClaudeMdContent(generatedClaudeMd);
+        try {
+          analysisHistoryRepository.save(history);
+        } catch (Exception e) {
+          log.warn("[CLAUDE.md 저장 실패] {}", e.getMessage());
+        }
+      }
+      session.addRecentLog("[시스템] ✅ 분석 지침(CLAUDE.md) 생성 완료");
+
+      // [3단계] 파일 병렬 분석
+      // 기존에 처리된 파일 목록을 추적 파일에서 로드 (재분석 스킵용)
+      loadTrackerIntoSession(session, finalOutputPath);
+
+      // 이 세션(sourceFolderPath)의 카운터만 초기화한다 — 같은 경로로 처음부터 새 분석을 시작하는
+      // 경우 이전 세션의 잔존값을 이어받지 않기 위함이다. 과거의 무인자 리셋은 동시에 분석 중인
+      // 다른 세션의 누적치까지 지웠다(REQ-001). 키는 누적·조회 쪽과 같은 sourceRootPath.toString()이다.
+      claudeService.resetTokenUsage(sourceRootPath.toString());
+      AtomicInteger successCount = new AtomicInteger(0);
+      AtomicInteger skipCount = new AtomicInteger(0);
+      AtomicInteger alreadyProcessedCount = new AtomicInteger(0);
+      AtomicInteger processedTotal = new AtomicInteger(0);
+
+      // 일시정지 감지 및 완료 파일 추적 (재개 기능용)
+      java.util.concurrent.atomic.AtomicBoolean pauseDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+      // 크레딧 소진 감지 (전체 분석 중단 후 PAUSED 상태로 저장)
+      java.util.concurrent.atomic.AtomicBoolean creditExhausted = new java.util.concurrent.atomic.AtomicBoolean(false);
+      java.util.Set<String> completedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+      int actualThreadPoolSize = threadPoolSize;
+      if (threadPoolSize <= 0) {
+        actualThreadPoolSize = Math.max(8, Runtime.getRuntime().availableProcessors() * 2);
+      }
+      log.info("[병렬 분석 시작] 스레드 풀: {}, 파일 수: {}", actualThreadPoolSize, fileList.size());
+
+      java.util.concurrent.ExecutorService executor =
+          java.util.concurrent.Executors.newFixedThreadPool(actualThreadPoolSize);
+      java.util.concurrent.CountDownLatch latch =
+          new java.util.concurrent.CountDownLatch(fileList.size());
+
+      final String finalOutPath = finalOutputPath;
+      for (int i = 0; i < fileList.size(); i++) {
+        final int fileIndex = i;
+        executor.submit(() -> {
+          try {
+            SessionState currentSession = sessionManager.getSession(sessionId);
+            if (currentSession != null && currentSession.shouldStop()) {
+              if (currentSession != null && !currentSession.isCancelled()) pauseDetected.set(true);
+              return;
+            }
+
+            Path filePath = fileList.get(fileIndex);
+            Path analysisRoot = isCopyMode ? finalProjectOutputPath : sourceRootPath;
+            Path relativeSubPath = analysisRoot.relativize(filePath);
+            Path targetPath = isCopyMode
+                ? finalProjectOutputPath.resolve(relativeSubPath)
+                : filePath;
+
+            FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
+                sourceRootPath, isForceActive, finalOutPath);
+
+            // 카운터 업데이트
+            // completedFilePaths는 "더 이상 재처리할 필요가 없는 파일"을 의미하므로
+            // FAILED는 여기 포함시키지 않는다 (포함시키면 실패한 파일이 재개 대상에서 빠짐).
+            if ("SUCCESS".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
+              // 세션 통계는 증가 전용 메서드로 올린다 — 외부 카운터 값을 대입하면 늦게 도착한
+              // 낮은 값이 큰 값을 덮어쓴다(REQ-003). 외부 AtomicInteger는 루프 종료 후 로그와
+              // 재개 초기값에 쓰이므로 그대로 둔다.
+              successCount.incrementAndGet();
+              session.getStatistics().incrementSuccessCount();
+            } else if ("SKIPPED".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
+              if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
+                alreadyProcessedCount.incrementAndGet();
+                session.getStatistics().incrementSkipCount();
+              } else if ("OVERSIZE".equals(fileState.getErrorType())) {
+                skipCount.incrementAndGet();
+              }
+            } else if ("FAILED".equals(fileState.getStatus())) {
+              // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
+              session.addFailedFilePath(filePath.toString());
+              session.getStatistics().incrementFailureCount();
+              // (REQ-002 ④) 전량실패 안내에 실을 "진짜 원인"을 모은다. 크레딧 소진은 아래에 전용
+              // 안내가 따로 있으므로 사유 요약에 섞지 않는다(기존 크레딧 문구를 오염시키지 않기).
+              if (!"INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
+                session.recordFileFailureReason(fileState.getErrorType(), fileState.getErrorMessage());
+              }
+              // 크레딧 소진 → 남은 파일 전체 중단 후 PAUSED 저장 (재시도 가능하게)
+              // 병렬 처리 중이라 여러 스레드가 동시에 크레딧 소진을 만날 수 있으므로,
+              // 로그/에러기록은 가장 먼저 발견한 스레드 1회만 남긴다.
+              // 2026-08-21(Phase 4, failover 컨펌): 예전엔 여기서 session.cancel()을 호출해
+              // isCancelled를 영구 true로 만들었다 — 이를 되돌리는 코드가 없어 '충전 후 이어서 분석'
+              // 으로 재개해도 매 파일이 shouldStop()에 걸려 즉시 중단되는 기존 버그가 있었다.
+              // creditExhausted 플래그(아래 latch.await() 이후 분기)만으로 이미 "남은 파일 중단 후
+              // PAUSED 저장" 처리가 되므로 cancel() 호출 자체를 제거한다(외과적 수정, 근거: analyzer-plan
+              // docs/chat/etc/2026-08-21-llm-model-db-crud-and-credit-exhaustion-failover-design.md §3).
+              if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
+                boolean firstDetection = creditExhausted.compareAndSet(false, true);
+                if (firstDetection) {
+                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다.");
+                  session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
+                }
+              }
+            }
+
+            int processed = processedTotal.incrementAndGet();
+            session.setProcessedFiles(processed);
+
+            // 로그 기록 (처음 5개 + 이후 일정 간격)
+            int logInterval = Math.max(1, fileList.size() / 50);
+            if (processed <= 5 || processed % logInterval == 0 || processed == fileList.size()) {
+              String statusIcon = "SUCCESS".equals(fileState.getStatus()) ? "✅" : "⏭️";
+              int progressPct = (int) ((processed * 100.0) / fileList.size());
+              session.addRecentLog(String.format("[분석 진행] %s %d/%d (%d%%) - %s",
+                  statusIcon, processed, fileList.size(), progressPct,
+                  relativeSubPath.toString().replace("\\", "/")));
+            }
+
+          } catch (Exception e) {
+            log.error("[파일 분석 중 예외 - #{}]", fileIndex, e);
+            processedTotal.incrementAndGet();
+          } finally {
+            latch.countDown();
+          }
+        });
+      }
+
+      latch.await();
+      executor.shutdown();
+      log.info("[병렬 분석 완료] 성공:{}, 스킵:{}, 이미처리:{}",
+          successCount.get(), skipCount.get(), alreadyProcessedCount.get());
+
+      // 크레딧 소진으로 중단 - failover 대상이 지정돼 있으면 컨펌 대기, 없으면 기존처럼 PAUSED 저장
+      if (creditExhausted.get()) {
+        List<String> pendingPaths = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        handleCreditExhaustedPause(session, history, pendingPaths, completedFilePaths.size());
+        return;
+      }
+
+      // 일시정지로 중단된 경우 - 남은 파일 DB에 저장하고 완료 처리 생략
+      if (pauseDetected.get()) {
+        List<String> pendingPaths = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(pendingPaths);
+        // (REQ-002) pendingFilePaths가 기록된 이 시점이 "일시정지 확정". 저장(saveSessionState) 전에 올려야
+        // 목록 API가 pending과 확정 신호를 같은 행에서 함께 본다.
+        session.setPauseSettled(Boolean.TRUE);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.addRecentLog(String.format(
+            "[일시정지 완료] %d개 처리됨, %d개 대기 중. 분석 이력에서 '이어서 분석' 버튼으로 재개하세요.",
+            completedFilePaths.size(), pendingPaths.size()));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // 사용자가 취소한 경우 - 아래로 흘러가면 finalizeAnalysis()가 COMPLETED로 기록해버리므로
+      // (취소된 파일들은 성공도 실패도 아니라 카운트 자체가 없어 "전부 실패" 분기에도 안 걸림)
+      // 여기서 명시적으로 CANCELLED로 마무리한다.
+      if (session.isCancelled()) {
+        // (TASK-002B) 일시정지 직후 취소된 세션에 false가 고아로 남지 않게 한다(CANCELLED 행은 화면 증상은 없다).
+        settlePauseAtTerminal(session);
+        if (history != null) {
+          history.setStatus("CANCELLED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        // (REQ-001 ⑤) 저장 직전에 status도 CANCELLED로 맞춘다(이력 status와 일치시킨다).
+        session.setStatus("CANCELLED");
+        sessionManager.saveSessionState(session);
+        session.setCurrentPhase("CANCELLED");
+        return;
+      }
+
+      // 전부 실패한 경우 - COMPLETED로 표시하면 정상 완료로 오인할 수 있으므로
+      // 크레딧 소진과 동일하게 PAUSED로 저장해 '이어서 분석'으로 재시도할 수 있게 한다.
+      // (REQ-002) pauseSettled를 여기서 새로 내리지는 않는다 — 사용자 일시정지가 선행하지 않았다면 기본값(NULL = 확정)이
+      // 그대로 맞다. 다만 일시정지 요청이 "남은 미시작 태스크가 없는 시점"에 도착하면 pauseDetected가 서지 않아
+      // 이 분기로 오면서 false가 남으므로(TASK-002B, §0.21.3 (i-b)) 저장 전에 조건부로 되돌린다.
+      if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
+          && session.getStatistics().getFailureCount() > 0) {
+        settlePauseAtTerminal(session);
+        List<String> pendingPaths = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(pendingPaths);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        // (REQ-001 ⑤) 저장 직전에 status도 PAUSED로 맞춘다(이력 status와 일치시킨다).
+        session.setStatus("PAUSED");
+        sessionManager.saveSessionState(session);
+        // (REQ-002 ④) 파일별 실패 사유 요약이 있으면 errorLog 마지막 줄로 1줄 올린다. 파일 실패는
+        // errorLog에 남지 않으므로 종전에는 이 목록이 비어 "알 수 없는 오류"가 그대로 사용자에게
+        // 보였다 — 아래 lastError가 진짜 원인을 쓰게 하려고 계산 직전에 넣는다.
+        String failureSummary = session.summarizeFileFailureReasons();
+        if (failureSummary != null) {
+          session.addErrorLogWithoutTimestamp("전체 실패 원인: " + failureSummary);
+        }
+        List<String> errLog = session.getErrorLog();
+        String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+        session.addRecentLog(String.format(
+            "⚠️ [전체 실패] %d개 파일 모두 분석 실패 (사유: %s). 분석 이력에서 '이어서 분석' 버튼으로 재시도하세요.",
+            session.getStatistics().getFailureCount(), lastError));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // [4단계] 완료 처리
+      // (TASK-002B) 마지막 파일 처리 도중 일시정지가 왔지만 그 파일이 성공해 정상 완료로 흐르는 경우 —
+      // finalizeAnalysis() 안의 completeSession()이 저장하므로 그 전에 false를 되돌린다.
+      settlePauseAtTerminal(session);
+      session.setCurrentPhase("FINALIZING");
+      session.addRecentLog("[시스템] ✓ AI 분석 완료! 최종 보고서를 생성합니다.");
+      String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName, generateReadme,
+          successCount.get(), alreadyProcessedCount.get(), skipCount.get(), startTime, history);
+
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      session.setCurrentPhase("FAILED");
+      session.addErrorLog("분석이 인터럽트되었습니다.");
+      sessionManager.failSession(sessionId, "인터럽트");
+    } catch (Exception e) {
+      log.error("[분석 중 예외]", e);
+      session.setCurrentPhase("FAILED");
+      session.addErrorLog("분석 중 오류: " + e.getMessage());
+      sessionManager.failSession(sessionId, e.getMessage());
+    } finally {
+      // 세션이 종료(완료·실패)되면 등록해둔 세션 전용 CLAUDE.md는 정리한다 (PAUSED는 재개 시 재사용하므로 유지)
+      // (sourceRootPath는 try 블록 지역 변수라 여기서 재접근 불가 — 파라미터로 다시 계산)
+      if ("FAILED".equals(session.getCurrentPhase()) || "COMPLETED".equals(session.getCurrentPhase())) {
+        claudeService.clearSessionSystemPrompt(Path.of(normalizedSourcePath).toString());
+        // RAG "B안" 컬렉션도 같은 세션 종료 시점에 함께 정리한다(PAUSED는 재개 시 재사용하므로 유지).
+        codeContentRagService.cleanup(Path.of(normalizedSourcePath).toString());
+      }
+      // FAILED 상태가 된 경우 알림 발송 (history가 있을 때만)
+      if ("FAILED".equals(session.getCurrentPhase())) {
+        AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
+        if (failedHistory != null && userId != null) {
+          List<String> errLog = session.getErrorLog();
+          String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+          failedHistory.setStatus("FAILED");
+          failedHistory.setCompletedAt(LocalDateTime.now());
+          failedHistory.setNotes(lastError);
+          analysisHistoryRepository.save(failedHistory);
+          notificationService.notifyAnalysisFailure(failedHistory);
+        }
+      }
+    }
+  }
+
+  // ===================================================================
+  // 재개 분석 (PAUSED 세션 재시작)
+  // ===================================================================
+
+  private void runAnalysisResume(String sessionId, List<Path> fileList) {
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session == null) { log.error("[재개 오류] 세션 없음: {}", sessionId); return; }
+
+    // (REQ-004 2차 안전장치) 재개할 파일이 0개면 이력 저장·CLAUDE.md 생성·RAG 색인·카운터 초기화·
+    // 전량실패 분기·완료 처리를 전부 건너뛰고 즉시 되돌린다. 정상 경로에서는 위 1차 가드
+    // (resumePendingFilesInThread의 원본 판정)가 막으므로 여기에 도달하지 않는 심층 방어다.
+    //
+    // 여기서 saveSessionState()를 부르지 않는 것이 핵심이다 — resumePendingFilesInThread()가
+    // 스레드 기동 전에 메모리 세션의 대기 목록을 이미 비웠으므로, 저장하면 DB에 남아 있는 원래
+    // 대기 목록까지 빈 목록으로 덮어써 2차 안전장치가 스스로 기록을 영구 손상시킨다.
+    // 메모리 상태만 PAUSED로 되돌리고 끝낸다(DB 행은 재개 호출 전 그대로 남는다).
+    if (fileList == null || fileList.isEmpty()) {
+      log.error("[재개 중단] 재개할 원본 파일이 0개 — sessionId={}", sessionId);
+      session.setStatus("PAUSED");
+      session.setCurrentPhase("PAUSED");
+      session.addRecentLog("[재개 중단] 재개할 원본 파일이 없어 중단했습니다. 분석 기록은 그대로 보존됩니다.");
+      return;
+    }
+
+    long startTime = System.currentTimeMillis();
+    try {
+      String normalizedSourcePath = session.getSourcePath();
+      String normalizedOutputPath = session.getOutputPath();
+      boolean isForceActive = session.isForceActive();
+      // README 생성 여부는 최초 분석 시작 시 정한 값을 재개 시에도 그대로 유지한다.
+      boolean generateReadme = session.isGenerateReadme();
+
+      // 경로 계산은 쓰기 측 정답(runAnalysis())과 같은 산식을 쓰는 공용 헬퍼에 위임한다.
+      // 예전에는 여기서 직접 계산하면서 세 가지가 어긋나 있었다:
+      //   (1) isCopyMode 판정에 null/blank/trim 가드가 없어 후행 공백·빈 문자열 outputPath를 copy 모드로 오판,
+      //   (2) finalProjectOutputPath에 계정 분리 세그먼트({safeUsername})가 빠져 재개 대상 파일이
+      //       {out}/{src}/../{user}/{src}/... 라는 존재하지 않는 중간 경로로 쓰였고(리눅스에서 전량 실패),
+      //   (3) finalOutPath가 raw outputPath라 추적 파일(.ai-analysis-done.txt)이 최초 분석과 다른
+      //       위치에 기록돼, 재시작 후 이미 처리한 파일을 다시 LLM에 태우는 중복 비용이 발생했다.
+      // outputPath가 null/blank면 헬퍼가 비-copy 모드(원본 직접 수정)로 폴백하므로 runAnalysis()와 동일하게
+      // 동작한다(심층 방어 — DB 복원 경로로 그런 세션이 들어와도 NPE 없이 흘러간다).
+      String resumeUsername = session.getUsername();
+      boolean isCopyMode = isCopyModeOutput(normalizedSourcePath, normalizedOutputPath);
+      Path sourceRootPath = Path.of(normalizedSourcePath);
+      Path finalProjectOutputPath =
+          resolveProjectOutputRoot(normalizedSourcePath, normalizedOutputPath, resumeUsername);
+      String finalOutPath =
+          resolveUserOutputRoot(normalizedSourcePath, normalizedOutputPath, resumeUsername);
+
+      AnalysisHistory history = analysisHistoryRepository.findBySessionId(sessionId);
+      if (history != null) {
+        history.setStatus("IN_PROGRESS");
+        analysisHistoryRepository.save(history);
+        // (REQ-002 ③) 재개 경로에서도 historyId를 채운다 — 서버 재시작 후 DB에서 복원된 세션은
+        // 메타데이터가 비어 있으므로, 여기서 넣지 않으면 재개 후 전량실패에서 PPT 버튼이 또 죽는다.
+        if (history.getId() != null) {
+          session.updateMetadata("historyId", history.getId().toString());
+        }
+      }
+
+      // 최초 실행 시 생성해둔 CLAUDE.md를 재사용 (앱 재시작 등으로 메모리에 없을 수 있으므로 DB에서 복원).
+      // 저장된 내용이 없으면(구버전 세션 등) 새로 생성한다.
+      String claudeMdContent = (history != null) ? history.getClaudeMdContent() : null;
+      if (claudeMdContent == null || claudeMdContent.isBlank()) {
+        claudeMdContent = claudeService.generateSessionClaudeMd(session.getRequirements(), detectExtensions(fileList), sourceRootPath.toString());
+        if (history != null) {
+          history.setClaudeMdContent(claudeMdContent);
+          analysisHistoryRepository.save(history);
+        }
+      }
+      claudeService.setSessionSystemPrompt(sourceRootPath.toString(), claudeMdContent);
+
+      // RAG "B안" 코드 내용 색인 — 정상 재개(같은 JVM, PAUSED 유지)라면 최초 분석 시점에 이미
+      // 색인이 끝나 있어 CodeContentRagService 내부 가드로 재색인이 생략된다. 앱 재시작 등으로
+      // 메모리 상태가 사라진 경우에만 이 재개 파일 목록만큼이라도 다시 색인해 완전한 no-op을 피한다.
+      codeContentRagService.indexProject(sourceRootPath.toString(), fileList);
+
+      session.addRecentLog(String.format("[재개] %d개 파일 이어서 분석합니다...", fileList.size()));
+
+      // 재개 경로에는 resetTokenUsage()를 의도적으로 호출하지 않는다 — 토큰/비용은 "이어서 전체 합계"다.
+      //   ① 일시정지 구간의 토큰은 DB 어디에도 저장되지 않는다(PAUSED/CANCELLED로 끝나는 경로는
+      //      AnalysisHistory에 토큰을 기록하지 않는다). 여기서 리셋하면 일시정지 이전 누적치가
+      //      영구 소실되고, finalizeAnalysis()의 절대값 대입 때문에 비용이 과소 기록된다.
+      //   ② 과거에 재개 시 리셋이 필요해 보였던 이유(다른 세션 토큰의 혼입)는 카운터가
+      //      세션 키(sourceFolderPath)로 격리되면서 이미 해소됐다.
+      // runAnalysis()의 리셋은 그대로 유지된다 — 같은 경로로 처음부터 새로 시작하는 경우다.
+
+      AtomicInteger successCount = new AtomicInteger(session.getStatistics().getSuccessCount());
+      AtomicInteger alreadyProcessedCount = new AtomicInteger(session.getStatistics().getSkipCount());
+      AtomicInteger skipCount = new AtomicInteger(0);
+      AtomicInteger processedTotal = new AtomicInteger(session.getProcessedFiles());
+
+      java.util.concurrent.atomic.AtomicBoolean pauseDetected = new java.util.concurrent.atomic.AtomicBoolean(false);
+      java.util.concurrent.atomic.AtomicBoolean creditExhausted = new java.util.concurrent.atomic.AtomicBoolean(false);
+      java.util.Set<String> completedFilePaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+      int actualThreadPoolSize = threadPoolSize <= 0
+          ? Math.max(8, Runtime.getRuntime().availableProcessors() * 2) : threadPoolSize;
+
+      java.util.concurrent.ExecutorService executor =
+          java.util.concurrent.Executors.newFixedThreadPool(actualThreadPoolSize);
+      java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(fileList.size());
+
+      for (int i = 0; i < fileList.size(); i++) {
+        final int idx = i;
+        executor.submit(() -> {
+          try {
+            SessionState cur = sessionManager.getSession(sessionId);
+            if (cur != null && cur.shouldStop()) {
+              if (!cur.isCancelled()) pauseDetected.set(true);
+              return;
+            }
+            Path filePath = fileList.get(idx);
+            Path analysisRoot = isCopyMode ? finalProjectOutputPath : sourceRootPath;
+            Path relPath = analysisRoot.relativize(filePath);
+            Path targetPath = isCopyMode ? finalProjectOutputPath.resolve(relPath) : filePath;
+
+            FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
+                sourceRootPath, isForceActive, finalOutPath);
+
+            // 재개 시도 결과가 이번에 새로 나왔으므로, 이전 시도(들)의 실패 기록을 먼저 걷어낸다.
+            // FAILED로 다시 끝나면 바로 아래 FAILED 분기가 즉시 재등록한다 — "failedFilePaths = 가장
+            // 최근 시도 결과"라는 불변식이 SUCCESS/SKIPPED(ALREADY_PATCHED/OVERSIZE)/FAILED 네 경우
+            // 모두에서 조건 분기 없이 항상 성립하도록 한다(02-design-v4.md §3.4 근거).
+            session.removeFailedFilePath(filePath.toString());
+
+            if ("SUCCESS".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
+              // runAnalysis()와 같은 이유로 증가 전용 메서드를 쓴다(REQ-003).
+              // 외부 카운터는 1718-1719행에서 세션 통계값으로 초기화되므로 산식은 그대로다.
+              successCount.incrementAndGet();
+              session.getStatistics().incrementSuccessCount();
+            } else if ("SKIPPED".equals(fileState.getStatus())) {
+              completedFilePaths.add(filePath.toString());
+              if ("ALREADY_PATCHED".equals(fileState.getErrorType())) {
+                alreadyProcessedCount.incrementAndGet();
+                session.getStatistics().incrementSkipCount();
+              } else { skipCount.incrementAndGet(); }
+            } else if ("FAILED".equals(fileState.getStatus())) {
+              // 파일별 실패 목록(폴링 DTO의 failedFiles)용 기록. 집계 카운터와는 독립이다.
+              session.addFailedFilePath(filePath.toString());
+              session.getStatistics().incrementFailureCount();
+              // (REQ-002 ④) runAnalysis()의 FAILED 분기와 같은 처리 — 크레딧 소진만 제외한다.
+              if (!"INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
+                session.recordFileFailureReason(fileState.getErrorType(), fileState.getErrorMessage());
+              }
+              // 2026-08-21(Phase 4, failover 컨펌): runAnalysis()와 동일한 이유로 session.cancel()
+              // 호출을 제거한다 — 재개 흐름에서 또다시 isCancelled가 영구화되는 것을 막기 위함.
+              if ("INSUFFICIENT_CREDITS".equals(fileState.getErrorType())) {
+                boolean firstDetection = creditExhausted.compareAndSet(false, true);
+                if (firstDetection) {
+                  session.addRecentLog("💳 [크레딧 소진] Claude API 크레딧이 부족합니다. 분석을 일시정지합니다.");
+                  session.addErrorLog("Claude API 크레딧 소진으로 분석 중단. 충전 후 재개 가능.");
+                }
+              }
+            }
+
+            int processed = processedTotal.incrementAndGet();
+            session.setProcessedFiles(processed);
+
+            int totalFiles = session.getTotalFiles();
+            int logInterval = Math.max(1, fileList.size() / 50);
+            if (processed <= 5 || processed % logInterval == 0) {
+              int pct = totalFiles > 0 ? (int) ((processed * 100.0) / totalFiles) : 0;
+              String icon = "SUCCESS".equals(fileState.getStatus()) ? "✅" : "⏭️";
+              session.addRecentLog(String.format("[재개 진행] %s %d/%d (%d%%) - %s",
+                  icon, processed, totalFiles, pct, relPath.toString().replace("\\", "/")));
+            }
+          } catch (Exception e) {
+            log.error("[재개 파일 분석 예외 - #{}]", idx, e);
+            processedTotal.incrementAndGet();
+          } finally {
+            latch.countDown();
+          }
+        });
+      }
+
+      latch.await();
+      executor.shutdown();
+
+      // 크레딧 소진으로 중단 - failover 대상이 지정돼 있으면 컨펌 대기, 없으면 기존처럼 PAUSED 저장
+      // (누락되어 있던 처리를 보강한 부분은 그대로 유지 — 이 체크가 없으면 아래 취소 체크에 걸려
+      // "재시도 가능한 PAUSED"가 아니라 "CANCELLED"로 잘못 기록된다).
+      if (creditExhausted.get()) {
+        List<String> newPending = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        handleCreditExhaustedPause(session, history, newPending, completedFilePaths.size());
+        return;
+      }
+
+      if (pauseDetected.get()) {
+        List<String> newPending = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(newPending);
+        // (REQ-002) 재개 후 2회차 이후의 일시정지도 같은 규칙 — pending 기록 직후, 저장 전에 확정 신호를 올린다.
+        // (재개 시작 시 setPendingFilePaths(new ArrayList<>())가 "[]"를 미리 써두므로 "json이 null인가"로는
+        // 2회차 확정 여부를 판별할 수 없다 — 그래서 별도 플래그다.)
+        session.setPauseSettled(Boolean.TRUE);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        sessionManager.saveSessionState(session);
+        session.addRecentLog(String.format("[일시정지] %d개 완료, %d개 대기 중.",
+            completedFilePaths.size(), newPending.size()));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // 사용자가 취소한 경우 - 아래로 흘러가면 finalizeAnalysis()가 COMPLETED로 기록해버리므로 여기서 마무리한다.
+      if (session.isCancelled()) {
+        // (TASK-002B) runAnalysis()의 취소 분기와 같은 이유 — 고아 false 방지.
+        settlePauseAtTerminal(session);
+        if (history != null) {
+          history.setStatus("CANCELLED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        // (REQ-001 ⑤) 저장 직전에 status도 CANCELLED로 맞춘다(이력 status와 일치시킨다).
+        session.setStatus("CANCELLED");
+        sessionManager.saveSessionState(session);
+        session.setCurrentPhase("CANCELLED");
+        return;
+      }
+
+      // 재개했는데 이번에도 전부 실패한 경우 - 다시 PAUSED로 저장해 재시도 가능하게 한다.
+      // (REQ-002) pauseSettled를 여기서 새로 내리지는 않는다 — 위 runAnalysis()의 전량실패 분기와 같은 이유로,
+      // 일시정지가 선행해 false인 채 이 분기로 온 경우만 저장 전에 조건부로 되돌린다(TASK-002B).
+      if (successCount.get() == 0 && alreadyProcessedCount.get() == 0
+          && session.getStatistics().getFailureCount() > 0) {
+        settlePauseAtTerminal(session);
+        List<String> newPending = fileList.stream()
+            .map(Path::toString)
+            .filter(p -> !completedFilePaths.contains(p))
+            .collect(Collectors.toList());
+        session.setPendingFilePaths(newPending);
+        if (history != null) {
+          history.setStatus("PAUSED");
+          history.setTotalFiles(session.getTotalFiles());
+          history.setSuccessCount(session.getStatistics().getSuccessCount());
+          history.setSkipCount(session.getStatistics().getSkipCount());
+          history.setFailureCount(session.getStatistics().getFailureCount());
+          analysisHistoryRepository.save(history);
+        }
+        // (REQ-001 ⑤) 저장 직전에 status도 PAUSED로 맞춘다(이력 status와 일치시킨다).
+        session.setStatus("PAUSED");
+        sessionManager.saveSessionState(session);
+        // (REQ-002 ④) runAnalysis()의 전량실패 분기와 같은 처리 — lastError 계산 직전에 1줄 올린다.
+        String failureSummary = session.summarizeFileFailureReasons();
+        if (failureSummary != null) {
+          session.addErrorLogWithoutTimestamp("전체 실패 원인: " + failureSummary);
+        }
+        List<String> errLog = session.getErrorLog();
+        String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+        session.addRecentLog(String.format(
+            "⚠️ [전체 실패] 재시도한 %d개 파일 모두 다시 실패 (사유: %s).", newPending.size(), lastError));
+        session.setCurrentPhase("PAUSED");
+        return;
+      }
+
+      // (TASK-002B) runAnalysis()의 정상 완료 경로와 같은 이유 — completeSession() 저장 전에 false를 되돌린다.
+      settlePauseAtTerminal(session);
+      session.setCurrentPhase("FINALIZING");
+      String readmeFileName = isCopyMode ? "README.md" : "README_AI_SUMMARY.md";
+      finalizeAnalysis(session, sessionId, finalProjectOutputPath, readmeFileName, generateReadme,
+          successCount.get(), alreadyProcessedCount.get(), skipCount.get(), startTime, history);
+
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      session.setCurrentPhase("FAILED");
+      session.addErrorLog("재개 분석이 인터럽트되었습니다.");
+      sessionManager.failSession(sessionId, "인터럽트");
+    } catch (Exception e) {
+      log.error("[재개 분석 중 예외]", e);
+      session.setCurrentPhase("FAILED");
+      session.addErrorLog("재개 분석 오류: " + e.getMessage());
+      sessionManager.failSession(sessionId, e.getMessage());
+    } finally {
+      // 세션이 종료(완료·실패)되면 등록해둔 세션 전용 CLAUDE.md는 정리한다 (PAUSED는 재개 시 재사용하므로 유지)
+      // (sourceRootPath는 try 블록 지역 변수라 여기서 재접근 불가 — session에서 다시 계산)
+      if ("FAILED".equals(session.getCurrentPhase()) || "COMPLETED".equals(session.getCurrentPhase())) {
+        if (session.getSourcePath() != null) {
+          claudeService.clearSessionSystemPrompt(Path.of(session.getSourcePath()).toString());
+          codeContentRagService.cleanup(Path.of(session.getSourcePath()).toString());
+        }
+      }
+      // FAILED 상태가 된 경우 이력에 사유를 남기고 알림 발송 (history가 있을 때만)
+      if ("FAILED".equals(session.getCurrentPhase())) {
+        AnalysisHistory failedHistory = analysisHistoryRepository.findBySessionId(sessionId);
+        if (failedHistory != null && session.getUserId() != null) {
+          List<String> errLog = session.getErrorLog();
+          String lastError = errLog.isEmpty() ? "알 수 없는 오류" : errLog.get(errLog.size() - 1);
+          failedHistory.setStatus("FAILED");
+          failedHistory.setCompletedAt(LocalDateTime.now());
+          failedHistory.setNotes(lastError);
+          analysisHistoryRepository.save(failedHistory);
+          notificationService.notifyAnalysisFailure(failedHistory);
+        }
+      }
+    }
+  }
+
+  // ===================================================================
+  // 내부 헬퍼 메서드 (SseEmitter → SessionState)
+  // ===================================================================
+
+  private void backupExistingOutput(SessionState session, Path finalProjectOutputPath) {
+    if (!Files.exists(finalProjectOutputPath)) return;
+    try {
+      boolean hasFiles;
+      try (Stream<Path> stream = Files.walk(finalProjectOutputPath)) {
+        hasFiles = stream.filter(Files::isRegularFile).findAny().isPresent();
+      }
+      if (!hasFiles) return;
+
+      String timestamp = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+          .format(java.time.LocalDateTime.now());
+      Path parentPath = finalProjectOutputPath.getParent();
+      if (parentPath == null) return;
+
+      String backupFolderName = finalProjectOutputPath.getFileName() + "_backup_" + timestamp;
+      Path backupPath = parentPath.resolve(backupFolderName);
+      Files.move(finalProjectOutputPath, backupPath);
+      session.addRecentLog("[시스템] 기존 분석 결과가 백업되었습니다: " + backupPath.getFileName());
+      log.info("[백업 완료] {}", backupPath);
+    } catch (Exception e) {
+      session.addRecentLog("[경고] 기존 분석 결과 백업 중 오류: " + e.getMessage());
+      log.error("[백업 실패]", e);
+    }
+  }
+
+  private void performCopy(SessionState session, Path sourceRootPath, Path finalProjectOutputPath)
+      throws IOException {
+
+    // 기존 출력 폴더 정리 (.git 제외)
+    if (Files.exists(finalProjectOutputPath)) {
+      try (Stream<Path> stream = Files.walk(finalProjectOutputPath)) {
+        stream.sorted((p1, p2) -> p2.compareTo(p1))
+            .filter(p -> !p.toString().contains("\\.git\\") && !p.toString().contains("/.git/"))
+            .forEach(p -> {
+              try { Files.deleteIfExists(p); } catch (IOException e) { log.warn("삭제 실패: {}", p); }
+            });
+      }
+    }
+    if (!Files.exists(finalProjectOutputPath)) {
+      Files.createDirectories(finalProjectOutputPath);
+    }
+
+    session.addRecentLog("[시스템] 원본 프로젝트 구조 미러링 복사 중... 잠시만 기다려 주십시오.");
+
+    int[] stats = {0, 0};
+    long[] timeRef = {System.currentTimeMillis()};
+
+    try (Stream<Path> copyStream = Files.walk(sourceRootPath)) {
+      List<Path> allPaths = copyStream.collect(java.util.stream.Collectors.toList());
+      stats[1] = allPaths.size();
+      long lastLogTime = System.currentTimeMillis();
+
+      for (Path source : allPaths) {
+        try {
+          String sourceStr = source.toString();
+          if (sourceStr.contains(".git") || sourceStr.contains(".gradle") ||
+              sourceStr.contains(".idea") || sourceStr.contains(".claude") ||
+              sourceStr.contains(".vscode") || sourceStr.contains("target") ||
+              sourceStr.contains("build") || sourceStr.contains("node_modules") ||
+              sourceStr.contains(".next") || sourceStr.contains(".nuxt") || sourceStr.contains("dist") ||
+              sourceStr.contains("coverage") || sourceStr.contains(".turbo") ||
+              sourceStr.contains(".vercel") || sourceStr.contains("storybook-static") ||
+              sourceStr.contains(".venv") || sourceStr.contains("__pycache__") ||
+              sourceStr.contains(".pytest_cache") || sourceStr.contains(".tox") ||
+              sourceStr.contains(".mypy_cache") ||
+              sourceStr.endsWith(".mv.db") || sourceStr.endsWith(".trace.db") ||
+              sourceStr.endsWith(".lock.db") || sourceStr.endsWith(".env") ||
+              sourceStr.endsWith(".log")) {
+            stats[0]++;
+            continue;
+          }
+
+          Path target = finalProjectOutputPath.resolve(sourceRootPath.relativize(source));
+          if (Files.isDirectory(source)) {
+            if (!Files.exists(target)) Files.createDirectories(target);
+          } else {
+            Path targetDir = target.getParent();
+            if (targetDir != null && !Files.exists(targetDir)) Files.createDirectories(targetDir);
+            if (Files.exists(target)) {
+              long sourceTime = Files.getLastModifiedTime(source).toMillis();
+              long targetTime = Files.getLastModifiedTime(target).toMillis();
+              if (targetTime >= sourceTime) { stats[0]++; continue; }
+            }
+            Files.copy(source, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+          }
+          stats[0]++;
+
+          // 2초마다 로그 갱신
+          long now = System.currentTimeMillis();
+          if (now - lastLogTime >= 2000) {
+            int pct = (int) ((stats[0] * 100.0) / stats[1]);
+            session.addRecentLog(String.format("[시스템] 📁 파일 복사 진행 중... %d/%d (%d%%)",
+                stats[0], stats[1], pct));
+            lastLogTime = now;
+          }
+        } catch (IOException e) {
+          log.error("파일 복사 중 오류", e);
+          stats[0]++;
+        }
+      }
+    }
+
+    long duration = System.currentTimeMillis() - timeRef[0];
+    log.info("[파일 복사 완료] {}개 파일 ({}ms)", stats[0], duration);
+    session.addRecentLog(String.format("[시스템] ✓ 파일 복사 완료! %d개 파일 처리 (%.1f초)",
+        stats[0], duration / 1000.0));
+  }
+
+  private void finalizeAnalysis(SessionState session, String sessionId,
+      Path finalProjectOutputPath, String readmeFileName, boolean generateReadme, int successCount,
+      int alreadyProcessedCount, int skipCount, long startTime, AnalysisHistory history) {
+
+    try {
+      double totalTimeSec = (System.currentTimeMillis() - startTime) / 1000.0;
+      double divisor = successCount > 0 ? successCount :
+          (alreadyProcessedCount > 0 ? alreadyProcessedCount : 1.0);
+      double avgTimePerFile = totalTimeSec / divisor;
+
+      // AnalysisHistory 업데이트
+      if (history != null) {
+        int curFailCount = session.getStatistics().getFailureCount();
+        history.setTotalFiles(successCount + alreadyProcessedCount + skipCount + curFailCount);
+        history.setSuccessCount(successCount);
+        history.setSkipCount(alreadyProcessedCount);
+        history.setFailureCount(curFailCount);
+        history.setStatus("COMPLETED");
+        history.setCompletedAt(LocalDateTime.now());
+        history.setProcessingTimeMs((long) (totalTimeSec * 1000));
+        try {
+          // 세션 키는 한 번만 계산해 토큰 조회와 모델 조회가 같은 값을 쓰게 한다 — 같은 식이 두 벌이
+          // 되면 다음 사이클에 한쪽만 낡는다. 이 값은 runAnalysis()가 누적·초기화에 쓰는
+          // sourceRootPath.toString()과 반드시 같은 문자열이어야 한다(양쪽 모두 Path.of(...).toString()).
+          String sessionFolderKey =
+              session.getSourcePath() != null ? Path.of(session.getSourcePath()).toString() : null;
+          TokenUsage tokenUsage = claudeService.getTotalTokenUsage(sessionFolderKey);
+          if (tokenUsage != null) {
+            history.setInputTokens(tokenUsage.getInputTokens());
+            history.setOutputTokens(tokenUsage.getOutputTokens());
+            history.setTotalTokens(tokenUsage.getTotalTokens());
+            // 2026-08-20 긴급수정: 이 세션(session.getSourcePath())에 실제로 설정된 모델을 조회
+            // — sourceFolderPath 없이 조회하면 다른 세션의 오버라이드와 뒤섞일 수 있었던 지점.
+            String sessionModel = claudeService.getCurrentModel(sessionFolderKey);
+            history.setModelName(sessionModel);
+            double cost = calculateEstimatedCost(
+                tokenUsage.getInputTokens(), tokenUsage.getOutputTokens(),
+                sessionModel);
+            history.setEstimatedCost(cost);
+          }
+        } catch (Exception e) {
+          log.warn("[토큰 저장 실패] {}", e.getMessage());
+        }
+
+        // PPT 보고서 구조 스냅샷: 다운로드할 때마다 디스크를 재스캔하지 않도록, 결과물이 아직
+        // 확실히 디스크에 있는 지금 시점(업로드 분석의 스테이징 폴더 정리보다 항상 먼저)에 한 번 계산해 저장한다.
+        try {
+          ProjectStructureSnapshot snapshot = presentationGeneratorService.buildStructureSnapshot(
+              finalProjectOutputPath, history.getSelectedRelativePaths());
+          history.setStructureSnapshot(snapshot);
+        } catch (Exception e) {
+          log.warn("[구조 스냅샷 생성 실패] {}", e.getMessage());
+        }
+
+        analysisHistoryRepository.save(history);
+        notificationService.notifyAnalysisCompletion(history);
+      }
+
+      // historyId 세션 메타데이터에 저장 (PPT 다운로드 버튼에서 사용)
+      if (history != null && history.getId() != null) {
+        session.updateMetadata("historyId", history.getId().toString());
+      }
+
+      // 완료 통계 세션에 저장
+      sessionManager.completeSession(sessionId);
+
+      // README 생성 (부분 선택 분석에서 사용자가 생성을 생략하도록 선택한 경우, LLM 호출까지
+      // 이어지는 이 블록 전체를 건너뛰어 분석 시간을 단축한다 - generateReadme 옵트인 옵션)
+      String readmeFullPath = "";
+      String generatedReadmeContent = "";
+      if (generateReadme) {
+        session.addRecentLog("[시스템] 📄 최종 보고서(README) 생성 중...");
+        try {
+          StringBuilder projectStructureSummary = buildDetailedProjectStructure(session, finalProjectOutputPath);
+          generatedReadmeContent = retryHandler.executeWithRetry(sessionId, readmeFileName,
+              () -> claudeService.analyzeCodeWithClaude(
+                  projectStructureSummary.toString(), readmeFileName,
+                  finalProjectOutputPath.toString()));
+          final String readmeContentFinal = generatedReadmeContent;
+          Path readmePath = finalProjectOutputPath.resolve(readmeFileName);
+          retryHandler.executeWithRetry(sessionId, readmeFileName, () -> {
+            Files.writeString(readmePath, readmeContentFinal, StandardCharsets.UTF_8);
+            return null;
+          });
+          readmeFullPath = readmePath.toAbsolutePath().toString();
+          session.addRecentLog("[시스템] ✅ 최종 보고서(README) 생성 완료: " + readmeFileName);
+        } catch (Exception e) {
+          log.error("[README 생성 오류]", e);
+          session.addRecentLog("[경고] README 생성 중 오류 (분석은 완료됨): " + e.getMessage());
+        }
+      } else {
+        session.addRecentLog("[시스템] ℹ️ README 생성 생략 (사용자 옵션)");
+      }
+
+      // 완료 요약 메시지
+      int failureCount = session.getStatistics().getFailureCount();
+      String finalSummary = String.format(
+          "\n=========================================\n" +
+          "🎉 [프로세스 완료] 이번 턴 작업 결과:\n" +
+          "- 주석 패치 성공: %d개\n" +
+          "- 이미 처리됨 (스킵): %d개\n" +
+          "- 처리 실패: %d개\n" +
+          "- 용량 초과 패스: %d개\n" +
+          "- 총 소요 시간: %.2f초\n" +
+          "=========================================",
+          successCount, alreadyProcessedCount, failureCount, skipCount, totalTimeSec);
+
+      // 세션 메타데이터에 결과 저장 (폴링 엔드포인트가 반환)
+      session.updateMetadata("avgTimePerFile", String.format("%.4f", avgTimePerFile));
+      session.updateMetadata("finalSummary", finalSummary);
+      session.updateMetadata("readmePath", readmeFullPath);
+      session.updateMetadata("readmeContent", generatedReadmeContent);
+
+      // README 경로, 내용, 평균 처리 시간 DB 저장
+      // (CLAUDE.md 내용은 분석 시작 시 이미 history에 저장되어 있으므로 여기서 덮어쓰지 않는다)
+      if (history != null) {
+        if (!readmeFullPath.isBlank()) history.setReadmePath(readmeFullPath);
+        if (!generatedReadmeContent.isBlank()) history.setReadmeContent(generatedReadmeContent);
+        history.setAvgTimePerFile(avgTimePerFile);
+        try {
+          analysisHistoryRepository.save(history);
+        } catch (Exception e) {
+          log.warn("[이력 업데이트 실패] {}", e.getMessage());
+        }
+      }
+
+      session.addRecentLog("✅ [분석 완료] 모든 파일 처리가 완료되었습니다!" + finalSummary);
+      session.setCurrentPhase("COMPLETED");
+      session.setAnalysisCompleted(true);
+
+      log.info("✅ [분석 완료] 총 {}개 파일, 소요시간: {}초", successCount, String.format("%.2f", totalTimeSec));
+
+    } catch (Exception e) {
+      log.error("[완료 처리 중 오류]", e);
+      session.setCurrentPhase("FAILED");
+      session.addErrorLog("완료 처리 중 오류: " + e.getMessage());
+    }
+  }
+
+  // ===================================================================
+  // 파일 분석 관련 내부 메서드 (기존 로직 유지)
+  // ===================================================================
+
+  private boolean isSupportedFile(Path path) {
+    String pathStr = path.toString().replace("\\", "/").toLowerCase();
+    if (pathStr.contains("/.git/") || pathStr.contains("/.settings/") ||
+        pathStr.contains("/.metadata/") || pathStr.contains("/node_modules/") ||
+        pathStr.contains("/.gradle/") || pathStr.contains("/.idea/") ||
+        pathStr.contains("/.claude/") || pathStr.contains("/.vscode/") ||
+        pathStr.contains("/build/") || pathStr.contains("/target/") ||
+        pathStr.contains("/out/") || pathStr.contains("/bin/") ||
+        // 프론트엔드 빌드/테스트 산출물 - 소스가 아니라 생성된 결과물이므로 분석 대상에서 제외
+        pathStr.contains("/.next/") || pathStr.contains("/.nuxt/") ||
+        pathStr.contains("/dist/") || pathStr.contains("/coverage/") ||
+        pathStr.contains("/.turbo/") || pathStr.contains("/.vercel/") ||
+        pathStr.contains("/storybook-static/") ||
+        // Python 가상환경/캐시 산출물
+        pathStr.contains("/.venv/") || pathStr.contains("/venv/") ||
+        pathStr.contains("/__pycache__/") || pathStr.contains("/.pytest_cache/") ||
+        pathStr.contains("/.tox/") || pathStr.contains("/.mypy_cache/")) return false;
+
+    // 분석 완료 추적파일(TRACKER_FILE_NAME)은 파일명이 완전일치할 때만 제외한다 — 확장자 판정보다 앞.
+    // 왜 여기(단일 출처)인가: 이 메서드는 getDashboardStatus()(1단계 스캔), collectFileList()(runAnalysis()의
+    // 분석 대상 목록), appendJavaStructure(), appendFrontendStructure() 네 스캔 지점이 공유한다. 비-copy(원본
+    // 직접 수정) 모드에서는 출력 루트 == 소스 루트라 runAnalysis()가 만든 추적파일이 소스 루트 안에 놓이고,
+    // .txt가 지원 확장자라 스캔 목록에 1건 끼어들어 영구 대기(isCompleted=false)로 남는다. 응답 측에서만
+    // 걸러내면 collectFileList()가 재분석 시 추적파일 자체를 LLM에 실어 보내는 축이 그대로 남으므로,
+    // 스캔 지점 전부가 거치는 이 메서드 한 곳에서만 제외한다.
+    // 제외는 이름 완전일치 한 건뿐이다(추적파일은 항상 getTrackerFilePath()가 TRACKER_FILE_NAME 그대로
+    // 만든다). 일반 .txt는 여전히 분석 대상이고, "ai-analysis-done.txt"·"my.ai-analysis-done.txt"처럼
+    // 이름이 다른 파일은 제외되지 않는다.
+    if (TRACKER_FILE_NAME.equals(path.getFileName().toString())) return false;
+
+    String name = path.getFileName().toString().toLowerCase();
+    if (name.endsWith(".class") || name.endsWith(".jar") || name.endsWith(".war") ||
+        name.endsWith(".exe") || name.endsWith(".dll") || name.endsWith(".so") ||
+        name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".gif") ||
+        name.endsWith(".zip") || name.endsWith(".tar") || name.endsWith(".gz") ||
+        name.endsWith(".pdf") || name.endsWith(".doc") || name.endsWith(".docx")) return false;
+
+    return name.endsWith(".java") || name.endsWith(".vue") ||
+        name.endsWith(".js") || name.endsWith(".jsx") ||
+        name.endsWith(".ts") || name.endsWith(".tsx") ||
+        name.endsWith(".xfdl") || name.endsWith(".py") ||
+        name.endsWith(".html") || name.endsWith(".css") ||
+        name.endsWith(".xml") || name.endsWith(".json") ||
+        name.endsWith(".properties") || name.endsWith(".yml") || name.endsWith(".yaml") ||
+        name.endsWith(".gradle") || name.endsWith(".maven") ||
+        name.endsWith(".txt") ||
+        name.endsWith(".sql") || name.endsWith(".sh") || name.endsWith(".bat") ||
+        name.equals("dockerfile") || name.equals("dockerfile.prod") ||
+        name.endsWith(".dockerfile");
+  }
+
+  private List<Path> collectFileList(Path sourceRootPath) throws Exception {
+    try (Stream<Path> stream = Files.walk(sourceRootPath)) {
+      return stream.filter(Files::isRegularFile).filter(this::isSupportedFile).toList();
+    }
+  }
+
+  /**
+   * 이번 세션에서 실제로 분석할 파일들의 확장자 집합을 추출한다(소문자, "." 포함, 예: ".java").
+   * generateSessionClaudeMd에 넘겨 base+role 병합 시 실제 스캔된 확장자에 매칭되는 role만 붙이도록
+   * 하기 위한 용도 — 이미 갖고 있는 fileList에서 추출하므로 디스크 재스캔이 없다(2026-07-29 설계안
+   * 4.2절). appendGeneralStructure의 확장자 통계 로직은 디스크 재스캔 기반 UI 리포트 텍스트 생성용이라
+   * 용도가 달라 재사용하지 않는다.
+   */
+  private Set<String> detectExtensions(List<Path> fileList) {
+    if (fileList == null || fileList.isEmpty()) return Set.of();
+    Set<String> extensions = new LinkedHashSet<>();
+    for (Path path : fileList) {
+      String name = path.getFileName().toString();
+      int dotIdx = name.lastIndexOf('.');
+      if (dotIdx > 0) {
+        extensions.add(name.substring(dotIdx).toLowerCase());
+      }
+    }
+    return extensions;
+  }
+
+  // 추적 파일 경로 (출력 루트에 위치)
+  private static final String TRACKER_FILE_NAME = ".ai-analysis-done.txt";
+
+  private Path getTrackerFilePath(String outputRoot) {
+    return Path.of(outputRoot).resolve(TRACKER_FILE_NAME);
+  }
+
+  // 세션 시작 시 추적 파일을 읽어 patchedFilePaths Set에 로드
+  private void loadTrackerIntoSession(SessionState session, String outputRoot) {
+    try {
+      Path tracker = getTrackerFilePath(outputRoot);
+      if (!Files.exists(tracker)) return;
+      Files.readAllLines(tracker, java.nio.charset.StandardCharsets.UTF_8).stream()
+          .map(String::trim)
+          .filter(l -> !l.isEmpty())
+          .forEach(session.getPatchedFilePaths()::add);
+      log.info("[추적 파일 로드] {}개 파일 로드됨", session.getPatchedFilePaths().size());
+    } catch (Exception e) {
+      log.warn("[추적 파일 로드 실패] {}", e.getMessage());
+    }
+  }
+
+  // 처리 완료 파일을 Set과 추적 파일에 동시 기록
+  private synchronized void markFileAsPatched(Path targetPath, SessionState session, String outputRoot) {
+    String absPath = targetPath.toAbsolutePath().normalize().toString();
+    session.getPatchedFilePaths().add(absPath);
+    try {
+      Path tracker = getTrackerFilePath(outputRoot);
+      Files.writeString(tracker, absPath + "\n", java.nio.charset.StandardCharsets.UTF_8,
+          java.nio.file.StandardOpenOption.CREATE,
+          java.nio.file.StandardOpenOption.APPEND);
+    } catch (Exception e) {
+      log.warn("[추적 파일 기록 실패] {}", e.getMessage());
+    }
+  }
+
+  // 분석 실패 시 tracker에서 해당 파일 경로를 제거 (이전 성공 기록 무효화)
+  private synchronized void removeFileFromTracker(Path targetPath, String sessionId, String outputRoot) {
+    String absPath = targetPath.toAbsolutePath().normalize().toString();
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session != null) {
+      session.getPatchedFilePaths().remove(absPath);
+    }
+    try {
+      Path tracker = getTrackerFilePath(outputRoot);
+      if (!Files.exists(tracker)) return;
+      List<String> lines = Files.readAllLines(tracker, StandardCharsets.UTF_8);
+      long before = lines.stream().filter(l -> l.trim().equals(absPath)).count();
+      if (before == 0) return;
+      List<String> updated = lines.stream()
+          .map(String::trim)
+          .filter(l -> !l.isEmpty() && !l.equals(absPath))
+          .collect(java.util.stream.Collectors.toList());
+      Files.write(tracker, updated, StandardCharsets.UTF_8);
+      log.debug("[추적 파일 제거] 실패 파일 미처리로 복귀: {}", absPath);
+    } catch (Exception e) {
+      log.warn("[추적 파일 제거 실패] {}", e.getMessage());
+    }
+  }
+
+  private boolean isAlreadyPatched(Path targetPath, boolean forceActive, String sessionId) {
+    if (forceActive) return false;
+    if (!Files.exists(targetPath)) return false;
+    // 세션의 메모리 Set 확인 (빠른 경로)
+    SessionState session = sessionManager.getSession(sessionId);
+    if (session != null) {
+      String absPath = targetPath.toAbsolutePath().normalize().toString();
+      if (session.getPatchedFilePaths().contains(absPath)) return true;
+    }
+    // 하위 호환: 이전 버전에서 생성된 마커 문자열도 인식
+    try {
+      String content = readFileStrictSafely(targetPath);
+      return content.contains("[AI 한글 주석 보완 완료]") ||
+             content.contains("[AI 한글 주석 가상 시뮬레이션 완료]");
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  private String analyzeFileInChunks(String originalCode, String fileName,
+      String sourceRootPath, String fullFilePath) throws Exception {
+    String[] lines = originalCode.split("\n", -1);
+    StringBuilder finalResult = new StringBuilder();
+
+    for (int chunkIndex = 0; chunkIndex < lines.length; chunkIndex += chunkSizeLines) {
+      int chunkEnd = Math.min(chunkIndex + chunkSizeLines, lines.length);
+      int contextStart = Math.max(0, chunkIndex - chunkOverlapLines);
+
+      StringBuilder chunkContent = new StringBuilder();
+      if (contextStart < chunkIndex) {
+        chunkContent.append("// ========== 이전 코드 맥락 (주석 처리 불필요) ==========\n");
+        for (int i = contextStart; i < chunkIndex; i++) chunkContent.append(lines[i]).append("\n");
+        chunkContent.append("// ================================================================\n");
+      }
+      for (int i = chunkIndex; i < chunkEnd; i++) chunkContent.append(lines[i]).append("\n");
+
+      String chunkDesc = String.format("%s (청크 %d/%d)", fileName,
+          (chunkIndex / chunkSizeLines) + 1, (lines.length + chunkSizeLines - 1) / chunkSizeLines);
+      // 2026-08-25 버그수정: RAG "B안" 자기제외가 실제로 동작하려면 색인 시 저장한 것과 동일한
+      // 형식(전체 경로)을 넘겨야 한다 — chunkDesc(파일명+청크 표기)는 프롬프트 표시용일 뿐,
+      // 자기제외 식별자로는 fullFilePath(원본 파일 전체 경로)를 그대로 넘긴다.
+      String analyzedChunk = claudeService.analyzeCodeWithClaude(
+          chunkContent.toString(), chunkDesc, sourceRootPath, fullFilePath);
+
+      String[] analyzedLines = analyzedChunk.split("\n", -1);
+      int skipLines = contextStart < chunkIndex ? (chunkIndex - contextStart + 2) : 0;
+      for (int i = skipLines; i < analyzedLines.length; i++) {
+        if (i < analyzedLines.length - 1 || !analyzedLines[i].isEmpty()) {
+          finalResult.append(analyzedLines[i]);
+          if (i < analyzedLines.length - 1) finalResult.append("\n");
+        }
+      }
+      log.info("[청크 분석 진행] {} - 줄 {}-{} 완료", fileName, chunkIndex + 1, chunkEnd);
+    }
+    return finalResult.toString();
+  }
+
+  private FileAnalysisState analyzeFile(String sessionId, Path filePath,
+      Path targetPath, Path sourceRootPath, boolean forceActive, String finalOutputPath) {
+
+    FileAnalysisState fileState = new FileAnalysisState(filePath.toString());
+    long startTimeMs = System.currentTimeMillis();
+
+    try {
+      SessionState session = sessionManager.getSession(sessionId);
+      if (session != null && session.shouldStop()) {
+        fileState.setStatus("SKIPPED");
+        fileState.setErrorType("CANCELLED");
+        return fileState;
+      }
+
+      String fileName = filePath.getFileName().toString();
+      long fileSize = Files.size(filePath);
+
+      if (isAlreadyPatched(targetPath, forceActive, sessionId)) {
+        fileState.setStatus("SKIPPED");
+        fileState.setErrorType("ALREADY_PATCHED");
+        fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
+        return fileState;
+      }
+
+      String originalCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
+          () -> readFileStrictSafely(filePath));
+
+      String commentedCode;
+      if (fileSize > chunkingThresholdBytes) {
+        commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
+            () -> analyzeFileInChunks(originalCode, fileName, sourceRootPath.toString(), filePath.toString()));
+        log.info("[자동 청크 분할] {} ({}bytes)", filePath.getFileName(), fileSize);
+      } else {
+        // 2026-08-25 버그수정: filePath.toString()(전체 경로)를 RAG "B안" 자기제외 식별자로
+        // 함께 넘긴다 — indexProject()가 이 fileList의 동일 Path 객체 기준으로 청크 메타데이터
+        // filePath를 저장하므로(file.toString()), 여기서도 같은 filePath.toString()을 넘겨야
+        // 형식이 정확히 일치해 자기제외가 실제로 동작한다(analyzer-plan
+        // docs/chat/qa/2026-08-25-rag-content-chunking-real-container-verification.md 참고).
+        commentedCode = retryHandler.executeWithRetry(sessionId, filePath.toString(),
+            () -> claudeService.analyzeCodeWithClaude(originalCode, fileName, sourceRootPath.toString(), filePath.toString()));
+      }
+
+      retryHandler.executeWithRetry(sessionId, filePath.toString(), () -> {
+        Files.writeString(targetPath, commentedCode, StandardCharsets.UTF_8);
+        return null;
+      });
+
+      // 처리 완료 파일을 추적 파일에 기록 (마커 주석 대체)
+      SessionState curSession = sessionManager.getSession(sessionId);
+      if (curSession != null) {
+        markFileAsPatched(targetPath, curSession, finalOutputPath);
+        // 완료 파일 미리보기/Diff 기능(1단계, 세션 한정)용 캐시 적재 — patchedFilePaths와 동일한
+        // 절대경로 식별자로 원본/결과 전체 텍스트를 세션 메모리에 보관한다.
+        String previewKey = targetPath.toAbsolutePath().normalize().toString();
+        curSession.putPreviewEntry(previewKey, originalCode, commentedCode);
+      }
+
+      fileState.setStatus("SUCCESS");
+      fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
+
+    } catch (AnalysisException e) {
+      fileState.setStatus("FAILED");
+      fileState.setErrorType(e.getErrorType().name());
+      fileState.setErrorMessage(e.getMessage());
+      fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
+      log.error("[파일 분석 실패] {} - {}", filePath, e.getMessage());
+      // 이전 run에서 성공했던 기록이 있으면 tracker에서 제거 (미처리로 재표시)
+      removeFileFromTracker(targetPath, sessionId, finalOutputPath);
+    } catch (Exception e) {
+      fileState.setStatus("FAILED");
+      fileState.setErrorType("UNKNOWN_ERROR");
+      fileState.setErrorMessage(e.getMessage());
+      fileState.setProcessingTimeMs(System.currentTimeMillis() - startTimeMs);
+      log.error("[파일 분석 실패] {} - {}", filePath, e.getMessage(), e);
+      removeFileFromTracker(targetPath, sessionId, finalOutputPath);
+    }
+
+    return fileState;
+  }
+
+  private String readFileStrictSafely(Path filePath) {
+    try {
+      return Files.readString(filePath, StandardCharsets.UTF_8);
+    } catch (Exception e) {
+      try {
+        return Files.readString(filePath, Charset.forName("MS949"));
+      } catch (Exception ex) {
+        try {
+          byte[] bytes = Files.readAllBytes(filePath);
+          return new String(bytes, Charset.forName("MS949"));
+        } catch (Exception finalEx) {
+          return "// [시스템 알림] 파일 인코딩 예외 우회 처리됨 : " + filePath.getFileName();
+        }
+      }
+    }
+  }
+
+  /**
+   * 출력 폴더를 직접 스캔하여 프로젝트 구조 정보를 생성한다.
+   * (processedFilesList는 @Transient라 재시작 후 소멸하므로 파일 시스템 기반으로 처리)
+   */
+  private StringBuilder buildDetailedProjectStructure(SessionState session, Path outputPath) {
+    StringBuilder sb = new StringBuilder();
+
+    if (outputPath == null || !Files.exists(outputPath)) {
+      return sb.append("출력 경로를 찾을 수 없습니다: ").append(outputPath);
+    }
+
+    // 빌드 도구 감지
+    String buildInfo = detectBuildTool(outputPath);
+    if (!buildInfo.isEmpty()) {
+      sb.append("### 빌드 도구\n\n").append(buildInfo).append("\n\n");
+    }
+
+    // 주요 설정 정보
+    String configInfo = extractConfigInfo(outputPath);
+    if (!configInfo.isEmpty()) {
+      sb.append("### 주요 설정 정보\n\n").append(configInfo).append("\n");
+    }
+
+    String projectType = projectTypeDetector.detectProjectType(outputPath);
+    switch (projectType) {
+      case "java" -> appendJavaStructure(sb, outputPath, session);
+      case "react", "nextjs", "vue" -> appendFrontendStructure(sb, outputPath, projectType, session);
+      case "python" -> appendPythonStructure(sb, outputPath, session);
+      default -> appendGeneralStructure(sb, outputPath, session);
+    }
+
+    return sb;
+  }
+
+  /** Java(Spring) 프로젝트: 계층별 클래스 통계 + 패키지 구조 (기존 로직 그대로 유지) */
+  private void appendJavaStructure(StringBuilder sb, Path outputPath, SessionState session) {
+    // 출력 폴더를 직접 스캔하여 파일 분류
+    Map<String, List<String>> layerFiles = new java.util.LinkedHashMap<>();
+    layerFiles.put("Controller", new ArrayList<>());
+    layerFiles.put("Service", new ArrayList<>());
+    layerFiles.put("Repository", new ArrayList<>());
+    layerFiles.put("Entity", new ArrayList<>());
+    layerFiles.put("DTO", new ArrayList<>());
+    layerFiles.put("Config", new ArrayList<>());
+    layerFiles.put("기타", new ArrayList<>());
+
+    Map<String, List<String>> packageGroups = new TreeMap<>();
+    List<Path> webFiles = new ArrayList<>();
+    List<Path> configFiles = new ArrayList<>();
+    int[] javaCount = {0};
+
+    try (Stream<Path> stream = Files.walk(outputPath)) {
+      stream.filter(Files::isRegularFile)
+            .filter(this::isSupportedFile)
+            .forEach(path -> {
+              String name = path.getFileName().toString();
+              String lw = name.toLowerCase();
+
+              if (lw.endsWith(".java")) {
+                javaCount[0]++;
+                String simple = name.replace(".java", "");
+                if (lw.endsWith("controller.java"))                                           layerFiles.get("Controller").add(simple);
+                else if (lw.endsWith("service.java") || lw.endsWith("serviceimpl.java"))     layerFiles.get("Service").add(simple);
+                else if (lw.endsWith("repository.java"))                                      layerFiles.get("Repository").add(simple);
+                else if (lw.endsWith("entity.java"))                                          layerFiles.get("Entity").add(simple);
+                else if (lw.endsWith("dto.java") || lw.endsWith("requestdto.java") || lw.endsWith("responsedto.java")) layerFiles.get("DTO").add(simple);
+                else if (lw.endsWith("config.java") || lw.endsWith("configuration.java"))    layerFiles.get("Config").add(simple);
+                else                                                                           layerFiles.get("기타").add(simple);
+
+                String pathStr = path.toString().replace("\\", "/");
+                String pkg = extractPackagePath(pathStr);
+                if (pkg != null && !pkg.isEmpty()) {
+                  packageGroups.computeIfAbsent(pkg, k -> new ArrayList<>()).add(name);
+                }
+              } else if (lw.endsWith(".html") || lw.endsWith(".js") || lw.endsWith(".jsx") ||
+                         lw.endsWith(".ts") || lw.endsWith(".tsx") || lw.endsWith(".vue") || lw.endsWith(".css")) {
+                webFiles.add(path);
+              } else if (lw.endsWith(".properties") || lw.endsWith(".yml") || lw.endsWith(".yaml") || lw.endsWith(".xml")) {
+                configFiles.add(path);
+              }
+            });
+    } catch (Exception e) {
+      log.warn("[구조 스캔 실패] {}", e.getMessage());
+    }
+
+    // 계층별 통계 출력
+    sb.append("### 계층별 클래스 통계\n\n");
+    layerFiles.forEach((layer, files) -> {
+      if (!files.isEmpty()) {
+        sb.append("- **").append(layer).append("** (").append(files.size()).append("개): ");
+        List<String> preview = files.subList(0, Math.min(files.size(), 8));
+        sb.append(String.join(", ", preview));
+        if (files.size() > 8) sb.append(" 외 ").append(files.size() - 8).append("개");
+        sb.append("\n");
+      }
+    });
+    sb.append("\n");
+
+    // 패키지 구조 출력 — 이 섹션이 프로젝트 크기에 비례해 무한정 커지는 유일한 부분이라
+    // (계층별 통계는 이미 레이어당 8개로 미리보기 제한됨) RAG 압축 대상이다(plan.md "RAG(Chroma)"
+    // 절, scenario_1.md 채택 확정 2026-07-23). rag.enabled=false(기본값)면 이 빈 자체가
+    // 없으므로 getIfAvailable()이 null을 반환하고, 아래는 원본 packageGroups를 그대로 써서
+    // 기존 동작과 100% 동일하게 유지된다.
+    Map<String, List<String>> renderedPackageGroups = packageGroups;
+    com.legacy.rag.ProjectStructureRagService ragService = ragServiceProvider.getIfAvailable();
+    if (ragService != null && session != null) {
+      renderedPackageGroups = ragService.compactPackageGroups(session.getSessionId(), packageGroups);
+    }
+
+    if (!renderedPackageGroups.isEmpty()) {
+      sb.append("### 프로젝트 패키지 구조\n\n");
+      for (Map.Entry<String, List<String>> entry : renderedPackageGroups.entrySet()) {
+        List<String> originalFiles = packageGroups.getOrDefault(entry.getKey(), entry.getValue());
+        int originalCount = originalFiles.size();
+        int shownCount = entry.getValue().size();
+        sb.append("#### ").append(entry.getKey()).append(" (").append(originalCount).append("개");
+        if (shownCount < originalCount) {
+          sb.append(", RAG로 대표 ").append(shownCount).append("개만 표시");
+        }
+        sb.append(")\n");
+        for (String fileName : entry.getValue()) {
+          String role = inferFileRole(fileName);
+          sb.append("- ").append(fileName);
+          if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+          sb.append("\n");
+        }
+        sb.append("\n");
+      }
+    }
+
+    // 분석 통계
+    sb.append("### 분석 통계\n\n");
+    sb.append("- Java 파일: ").append(javaCount[0]).append("개\n");
+    sb.append("- 웹 파일: ").append(webFiles.size()).append("개\n");
+    sb.append("- 설정 파일: ").append(configFiles.size()).append("개\n");
+    sb.append("- 패키지 수: ").append(packageGroups.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
+
+  /** React/Next.js/Vue 프로젝트: 디렉토리별 실제 파일명 나열 + 프론트엔드 통계 */
+  private void appendFrontendStructure(StringBuilder sb, Path root, String projectType, SessionState session) {
+    Set<String> skipDirs = Set.of("node_modules", "dist", ".next", ".nuxt", "build", "out",
+        ".git", ".idea", "coverage", ".turbo", ".vercel", "storybook-static");
+
+    List<Path> scanRoots = new ArrayList<>();
+    Path srcDir = root.resolve("src");
+    if (Files.exists(srcDir)) scanRoots.add(srcDir);
+    if ("nextjs".equals(projectType)) {
+      Path appDir = root.resolve("app"), pagesDir = root.resolve("pages");
+      if (Files.exists(appDir)) scanRoots.add(0, appDir);
+      if (Files.exists(pagesDir)) scanRoots.add(0, pagesDir);
+    }
+    if (scanRoots.isEmpty()) scanRoots.add(root);
+
+    Map<String, List<String>> dirFiles = new TreeMap<>();
+    int[] componentCount = {0};
+
+    for (Path scanRoot : scanRoots) {
+      try (Stream<Path> children = Files.list(scanRoot)) {
+        children.filter(Files::isDirectory)
+            .filter(p -> !skipDirs.contains(p.getFileName().toString()))
+            .filter(p -> !p.getFileName().toString().startsWith("."))
+            .forEach(dir -> {
+              String dirName = dir.getFileName().toString();
+              try (Stream<Path> files = Files.walk(dir, 4)) {
+                List<String> names = files.filter(Files::isRegularFile)
+                    .filter(this::isSupportedFile)
+                    .map(p -> p.getFileName().toString())
+                    .collect(Collectors.toList());
+                // 서로 다른 scanRoot(예: pages/api, src/api)에 같은 이름의 디렉토리가 있으면 병합한다.
+                if (!names.isEmpty()) {
+                  dirFiles.merge(dirName, names, (existing, added) -> {
+                    existing.addAll(added);
+                    return existing;
+                  });
+                }
+                componentCount[0] += (int) names.stream()
+                    .filter(n -> n.endsWith(".tsx") || n.endsWith(".jsx") || n.endsWith(".vue")).count();
+              } catch (IOException ignored) {}
+            });
+      } catch (IOException e) {
+        log.warn("[프론트엔드 구조 스캔 실패] {}", scanRoot, e);
+      }
+    }
+
+    if (!dirFiles.isEmpty()) {
+      sb.append("### 디렉토리별 파일 구조\n\n");
+      for (Map.Entry<String, List<String>> entry : dirFiles.entrySet()) {
+        List<String> files = entry.getValue();
+        sb.append("#### ").append(entry.getKey()).append(" (").append(files.size()).append("개)\n");
+        List<String> preview = files.subList(0, Math.min(files.size(), 20));
+        for (String fileName : preview) {
+          String role = inferFileRole(fileName);
+          sb.append("- ").append(fileName);
+          if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+          sb.append("\n");
+        }
+        if (files.size() > 20) sb.append("- 외 ").append(files.size() - 20).append("개\n");
+        sb.append("\n");
+      }
+    }
+
+    sb.append("### 분석 통계\n\n");
+    sb.append("- 프레임워크: ").append(switch (projectType) {
+      case "nextjs" -> "Next.js";
+      case "vue" -> "Vue 3";
+      default -> "React";
+    }).append("\n");
+    sb.append("- 컴포넌트 파일(.tsx/.jsx/.vue): ").append(componentCount[0]).append("개\n");
+    sb.append("- 디렉토리 수: ").append(dirFiles.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
+
+  /** Python 프로젝트: 디렉토리별 .py 파일 나열 + 프레임워크 감지 */
+  private void appendPythonStructure(StringBuilder sb, Path root, SessionState session) {
+    Set<String> skipDirs = Set.of(".git", ".venv", "venv", "__pycache__", ".pytest_cache",
+        "dist", "build", ".tox", "node_modules", ".idea", ".mypy_cache");
+
+    String framework = "Python";
+    try {
+      Path reqFile = root.resolve("requirements.txt");
+      if (Files.exists(reqFile)) {
+        String content = Files.readString(reqFile, StandardCharsets.UTF_8).toLowerCase();
+        if (content.contains("django")) framework = "Python / Django";
+        else if (content.contains("fastapi")) framework = "Python / FastAPI";
+        else if (content.contains("flask")) framework = "Python / Flask";
+      }
+    } catch (IOException ignored) {}
+
+    Map<String, List<String>> dirFiles = new TreeMap<>();
+    int[] pyCount = {0};
+    try (Stream<Path> children = Files.list(root)) {
+      children.filter(Files::isDirectory)
+          .filter(p -> !skipDirs.contains(p.getFileName().toString()))
+          .filter(p -> !p.getFileName().toString().startsWith("."))
+          .forEach(dir -> {
+            try (Stream<Path> files = Files.walk(dir, 5)) {
+              List<String> names = files.filter(Files::isRegularFile)
+                  .map(p -> p.getFileName().toString())
+                  .filter(n -> n.endsWith(".py"))
+                  .collect(Collectors.toList());
+              if (!names.isEmpty()) {
+                dirFiles.put(dir.getFileName().toString(), names);
+                pyCount[0] += names.size();
+              }
+            } catch (IOException ignored) {}
+          });
+    } catch (IOException e) {
+      log.warn("[Python 구조 스캔 실패] {}", root, e);
+    }
+
+    if (!dirFiles.isEmpty()) {
+      sb.append("### 디렉토리별 파일 구조\n\n");
+      for (Map.Entry<String, List<String>> entry : dirFiles.entrySet()) {
+        List<String> files = entry.getValue();
+        sb.append("#### ").append(entry.getKey()).append(" (").append(files.size()).append("개)\n");
+        List<String> preview = files.subList(0, Math.min(files.size(), 20));
+        for (String fileName : preview) {
+          String role = inferFileRole(fileName);
+          sb.append("- ").append(fileName);
+          if (role != null && !role.isEmpty()) sb.append(" [").append(role).append("]");
+          sb.append("\n");
+        }
+        if (files.size() > 20) sb.append("- 외 ").append(files.size() - 20).append("개\n");
+        sb.append("\n");
+      }
+    }
+
+    sb.append("### 분석 통계\n\n");
+    sb.append("- 프레임워크: ").append(framework).append("\n");
+    sb.append("- Python 파일: ").append(pyCount[0]).append("개\n");
+    sb.append("- 디렉토리 수: ").append(dirFiles.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
+
+  /** 지원 프레임워크로 감지되지 않은 프로젝트: 확장자/최상위 폴더 기준 범용 분류 */
+  private void appendGeneralStructure(StringBuilder sb, Path root, SessionState session) {
+    Set<String> skipDirs = Set.of("node_modules", ".git", "build", "target", "out", "bin",
+        "__pycache__", ".venv", "venv", "dist", ".next", ".idea", ".gradle");
+
+    Map<String, List<String>> byExt = new java.util.HashMap<>();
+    Map<String, Integer> byTopDir = new TreeMap<>();
+
+    try (Stream<Path> stream = Files.walk(root, 8)) {
+      stream.filter(Files::isRegularFile)
+          .filter(p -> {
+            Path rel = root.relativize(p);
+            for (int i = 0; i < rel.getNameCount() - 1; i++) {
+              String seg = rel.getName(i).toString();
+              if (seg.startsWith(".") || skipDirs.contains(seg)) return false;
+            }
+            return true;
+          })
+          .forEach(p -> {
+            String name = p.getFileName().toString();
+            int i = name.lastIndexOf('.');
+            String ext = (i > 0) ? name.substring(i).toLowerCase() : "(확장자 없음)";
+            byExt.computeIfAbsent(ext, k -> new ArrayList<>()).add(name);
+
+            Path rel = root.relativize(p);
+            String topDir = rel.getNameCount() > 1 ? rel.getName(0).toString() : "(루트)";
+            byTopDir.merge(topDir, 1, Integer::sum);
+          });
+    } catch (IOException e) {
+      log.warn("[일반 프로젝트 구조 스캔 실패] {}", root, e);
+    }
+
+    // 개수가 같을 때 HashMap 순회 순서에 의존하지 않도록 확장자명 사전순으로 동률을 정리한다.
+    List<Map.Entry<String, List<String>>> topExts = byExt.entrySet().stream()
+        .sorted((a, b) -> {
+          int c = Integer.compare(b.getValue().size(), a.getValue().size());
+          return c != 0 ? c : a.getKey().compareTo(b.getKey());
+        })
+        .limit(8)
+        .collect(Collectors.toList());
+
+    sb.append("### 확장자별 파일 통계\n\n");
+    for (Map.Entry<String, List<String>> entry : topExts) {
+      sb.append("- ").append(entry.getKey()).append(": ").append(entry.getValue().size()).append("개\n");
+    }
+    sb.append("\n");
+
+    sb.append("### 최상위 폴더별 파일 개수\n\n");
+    byTopDir.forEach((dir, count) -> sb.append("- ").append(dir).append(": ").append(count).append("개\n"));
+    sb.append("\n");
+
+    sb.append("### 주요 파일 샘플\n\n");
+    for (Map.Entry<String, List<String>> entry : topExts) {
+      List<String> preview = entry.getValue().subList(0, Math.min(entry.getValue().size(), 10));
+      sb.append("- ").append(entry.getKey()).append(": ").append(String.join(", ", preview)).append("\n");
+    }
+    sb.append("\n");
+
+    sb.append("### 분석 통계\n\n");
+    sb.append("- 전체 파일: ").append(byExt.values().stream().mapToInt(List::size).sum()).append("개\n");
+    sb.append("- 확장자 종류: ").append(byExt.size()).append("개\n");
+    sb.append("- 최상위 폴더 수: ").append(byTopDir.size()).append("개\n");
+    if (session != null && session.getProcessedFiles() > 0) {
+      sb.append("- 분석 처리 파일: ").append(session.getProcessedFiles()).append("개\n");
+    }
+    sb.append("- 분석 완료 시간: ").append(LocalDateTime.now()).append("\n");
+  }
+
+  private String detectBuildTool(Path outputPath) {
+    if (outputPath == null) return "";
+    try {
+      Path pom = outputPath.resolve("pom.xml");
+      if (Files.exists(pom)) {
+        String content = Files.readString(pom, StandardCharsets.UTF_8);
+        StringBuilder info = new StringBuilder("Maven (pom.xml)");
+        info.append("\n- groupId: ").append(extractXmlTag(content, "groupId"));
+        info.append("\n- artifactId: ").append(extractXmlTag(content, "artifactId"));
+        info.append("\n- version: ").append(extractXmlTag(content, "version"));
+
+        // <parent> 블록에서 Spring Boot / Spring Framework 버전 추출
+        String parentBlock = extractXmlBlock(content, "parent");
+        if (!parentBlock.isEmpty()) {
+          String parentArtifactId = extractXmlTag(parentBlock, "artifactId");
+          String parentVersion    = extractXmlTag(parentBlock, "version");
+          String parentGroupId    = extractXmlTag(parentBlock, "groupId");
+          if (!"-".equals(parentVersion)) {
+            String label = parentArtifactId.toLowerCase().contains("spring-boot")
+                ? "Spring Boot 버전"
+                : parentGroupId + ":" + parentArtifactId;
+            info.append("\n- ").append(label).append(": ").append(parentVersion);
+          }
+        }
+
+        // Java 버전 추출 (<java.version> 또는 <maven.compiler.source>)
+        String javaVersion = extractXmlTag(content, "java.version");
+        if ("-".equals(javaVersion)) javaVersion = extractXmlTag(content, "maven.compiler.source");
+        if (!"-".equals(javaVersion)) info.append("\n- Java 버전: ").append(javaVersion);
+
+        return info.toString();
+      }
+      if (Files.exists(outputPath.resolve("build.gradle.kts"))) {
+        String content = Files.readString(outputPath.resolve("build.gradle.kts"), StandardCharsets.UTF_8);
+        return extractGradleInfo(content, "build.gradle.kts (Kotlin DSL)");
+      }
+      if (Files.exists(outputPath.resolve("build.gradle"))) {
+        String content = Files.readString(outputPath.resolve("build.gradle"), StandardCharsets.UTF_8);
+        return extractGradleInfo(content, "build.gradle (Groovy DSL)");
+      }
+      if (Files.exists(outputPath.resolve("package.json"))) {
+        String content = Files.readString(outputPath.resolve("package.json"), StandardCharsets.UTF_8);
+        return extractPackageJsonInfo(content);
+      }
+    } catch (Exception e) {
+      log.warn("[빌드 도구 감지 실패] {}", e.getMessage());
+    }
+    return "";
+  }
+
+  // XML 블록 전체 추출: <tagName>...</tagName>
+  private String extractXmlBlock(String xml, String tagName) {
+    String open  = "<" + tagName + ">";
+    String close = "</" + tagName + ">";
+    int start = xml.indexOf(open);
+    if (start < 0) return "";
+    int end = xml.indexOf(close, start);
+    return end > start ? xml.substring(start + open.length(), end).trim() : "";
+  }
+
+  // Gradle 파일에서 Spring Boot 버전과 Java 버전 추출
+  private String extractGradleInfo(String content, String label) {
+    StringBuilder info = new StringBuilder("Gradle (").append(label).append(")");
+    java.util.regex.Matcher bootMatcher = java.util.regex.Pattern
+        .compile("id[\\s(\"']+org\\.springframework\\.boot[\"'\\s)]+version[\\s\"']+([\\d.]+)")
+        .matcher(content);
+    if (bootMatcher.find()) info.append("\n- Spring Boot 버전: ").append(bootMatcher.group(1));
+
+    java.util.regex.Matcher javaMatcher = java.util.regex.Pattern
+        .compile("sourceCompatibility\\s*=\\s*[\"']?([\\d.]+)[\"']?")
+        .matcher(content);
+    if (javaMatcher.find()) info.append("\n- Java 버전: ").append(javaMatcher.group(1));
+
+    return info.toString();
+  }
+
+  // package.json에서 프로젝트명과 주요 프레임워크 버전 추출
+  private String extractPackageJsonInfo(String content) {
+    StringBuilder info = new StringBuilder("npm / Node.js (package.json)");
+    try {
+      com.fasterxml.jackson.databind.JsonNode json =
+          new com.fasterxml.jackson.databind.ObjectMapper().readTree(content);
+      if (json.has("name"))    info.append("\n- name: ").append(json.get("name").asText());
+      if (json.has("version")) info.append("\n- version: ").append(json.get("version").asText());
+      com.fasterxml.jackson.databind.JsonNode deps = json.has("dependencies") ? json.get("dependencies") : null;
+      if (deps != null) {
+        for (String fw : new String[]{"react", "next", "vue", "angular", "express"}) {
+          if (deps.has(fw)) info.append("\n- ").append(fw).append(": ").append(deps.get(fw).asText());
+        }
+      }
+    } catch (Exception ignored) {}
+    return info.toString();
+  }
+
+  private String extractXmlTag(String xml, String tag) {
+    String open = "<" + tag + ">";
+    int start = xml.indexOf(open);
+    if (start < 0) return "-";
+    start += open.length();
+    int end = xml.indexOf("</" + tag + ">", start);
+    return end > start ? xml.substring(start, end).trim() : "-";
+  }
+
+  private String extractConfigInfo(Path outputPath) {
+    if (outputPath == null) return "";
+    StringBuilder info = new StringBuilder();
+    Path[] candidates = {
+        outputPath.resolve("src/main/resources/application.properties"),
+        outputPath.resolve("src/main/resources/application.yml"),
+        outputPath.resolve("src/main/resources/application.yaml"),
+    };
+    for (Path configPath : candidates) {
+      if (!Files.exists(configPath)) continue;
+      try {
+        List<String> keyLines = Files.readAllLines(configPath, StandardCharsets.UTF_8).stream()
+            .filter(l -> !l.isBlank() && !l.trim().startsWith("#"))
+            .filter(l -> l.contains("server.port") || l.contains("spring.datasource") ||
+                         l.contains("spring.jpa") || l.contains("spring.profiles") ||
+                         l.contains("anthropic") || l.contains("jwt") ||
+                         l.contains("spring.application.name"))
+            .limit(10)
+            .map(l -> "  " + l.trim())
+            .collect(Collectors.toList());
+        if (!keyLines.isEmpty()) {
+          info.append(configPath.getFileName()).append(":\n");
+          keyLines.forEach(l -> info.append(l).append("\n"));
+          info.append("\n");
+        }
+      } catch (Exception e) {
+        log.warn("[설정 파일 읽기 실패] {}: {}", configPath, e.getMessage());
+      }
+      break;
+    }
+    return info.toString();
+  }
+
+  private String extractPackagePath(String filePath) {
+    if (filePath == null) return null;
+    if (filePath.contains("src/main/java") || filePath.contains("src\\main\\java")) {
+      String[] parts = filePath.split("[/\\\\]");
+      StringBuilder pkg = new StringBuilder();
+      boolean inPkg = false;
+      for (String part : parts) {
+        if (part.equals("java")) { inPkg = true; continue; }
+        if (inPkg && !part.isEmpty() && !part.endsWith(".java")) {
+          if (pkg.length() > 0) pkg.append(".");
+          pkg.append(part);
+        }
+      }
+      return pkg.length() > 0 ? pkg.toString() : "src/main/java";
+    }
+    File file = new File(filePath);
+    String parentName = file.getParentFile() != null ? file.getParentFile().getName() : "";
+    return parentName.isEmpty() ? "root" : parentName;
+  }
+
+  private String inferFileRole(String fileName) {
+    if (fileName.endsWith("Controller.java")) return "REST API 엔드포인트";
+    if (fileName.endsWith("Service.java")) return "비즈니스 로직";
+    if (fileName.endsWith("Repository.java")) return "데이터 접근";
+    if (fileName.endsWith("Entity.java")) return "데이터 모델";
+    if (fileName.endsWith("DTO.java")) return "데이터 전송 객체";
+    if (fileName.endsWith("Config.java")) return "설정 클래스";
+    if (fileName.endsWith("Exception.java")) return "예외 처리";
+    if (fileName.endsWith(".properties")) return "설정 파일";
+    if (fileName.endsWith(".xml")) return "XML 설정/구조";
+    if (fileName.endsWith(".tsx")) return "React 컴포넌트 (TypeScript)";
+    if (fileName.endsWith(".jsx")) return "React 컴포넌트";
+    if (fileName.endsWith(".vue")) return "Vue 컴포넌트";
+    if (fileName.endsWith(".ts")) return "TypeScript 모듈";
+    if (fileName.endsWith(".js")) return "JavaScript 모듈";
+    if (fileName.endsWith(".py")) return "Python 모듈";
+    if (fileName.endsWith(".css") || fileName.endsWith(".scss")) return "스타일시트";
+    if (fileName.endsWith("README.md")) return "프로젝트 설명서";
+    return "";
+  }
+
+  /** ClaudeServiceImpl.isAnthropicMode()와 동일한 판정 기준 — llm.provider 미설정 시 기본값 anthropic */
+  private boolean isAnthropicMode() {
+    return llmProvider == null || "anthropic".equalsIgnoreCase(llmProvider.trim());
+  }
+
+  private double calculateEstimatedCost(long inputTokens, long outputTokens, String modelName) {
+    // 과금 여부는 전역 llm.provider 설정이 아니라 이 세션이 실제로 라우팅되는 provider로 판정한다
+    // (REQ-002, 2026-09). 종전에는 !isAnthropicMode()면 무조건 0을 반환했기 때문에, 로컬 서버
+    // 배포에서 세션이 DB상 ANTHROPIC 모델을 선택해 실제로 과금이 발생해도 estimated_cost가 0원으로
+    // 기록됐다. 자체 호스팅 LLM(LOCAL)만 토큰당 과금이 없다 — scenario_0.md.
+    // 판정은 resolveEffectiveProvider()에 위임해 이 메서드 안에서 같은 판정이 두 번 일어나지 않게 한다.
+    if (resolveEffectiveProvider(modelName) == LlmProvider.LOCAL) {
+      return 0.0;
+    }
+
+    // 단가 결정은 AnthropicModelPricing에 위임한다(REQ-003, 2026-09). 종전 contains("opus")/
+    // contains("sonnet") 3분기는 단가를 모르는 모델을 조용히 최저 단가(haiku)로 떨어뜨려 과금을
+    // 과소 추정했고, 매칭이 넓어 로컬 모델명까지 걸렸다 — 두 문제 모두 그 클래스에서 다룬다.
+    // 최종 계산식은 그대로 유지한다.
+    AnthropicModelPricing.Pricing pricing = AnthropicModelPricing.of(modelName);
+    return (inputTokens / 1_000_000.0) * pricing.inputPerMillionTokens()
+        + (outputTokens / 1_000_000.0) * pricing.outputPerMillionTokens();
+  }
+}

@@ -112,8 +112,10 @@ class CounterIntegrityUnchangedMethodsGuardTest {
         "7dd42286dd903e81fbefb4e559c8f52c6d73748b");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/UserActivityController.java",
         "98a227dd41acd58d63c11e15ce930863fd6ad05c");
+    // 2026-10 TASK-006(β-화면)에서 의도적으로 바꾼 파일이라 기대값을 갱신했다. 출처:
+    // git hash-object src/main/resources/static/js/dashboard.js
     FILE_TARGETS.put("src/main/resources/static/js/dashboard.js",
-        "f54e0f1e8b3739b5cfcf5622800de3deb4286b41");
+        "f9c0a7e9f1b578d130d0e198a57516e1ba955d7b");
     FILE_TARGETS.put("src/main/resources/templates/my-activity.html",
         "6d9f956224203de3c175e60f4e0fe52cf65896d7");
     FILE_TARGETS.put("src/main/resources/templates/admin/dashboard.html",
