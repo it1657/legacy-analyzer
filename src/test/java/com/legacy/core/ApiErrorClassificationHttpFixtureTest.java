@@ -150,25 +150,29 @@ class ApiErrorClassificationHttpFixtureTest {
   }
 
   /**
-   * 상태 코드 표({@code classifyErrorByStatus})는 이번에 0행이다 — 표에 없는 408·529는 종전처럼
-   * {@code UNKNOWN_ERROR}로 떨어진다. (주의: 408·529 <b>응답</b>의 최종 분류는 403과 같은 이유로
-   * 달라질 수 있다 — 본문에 {@code io}가 들어 있던 경우 종전 {@code CONNECT_FAILURE}였다.
-   * 자세한 내용은 {@code 05-dev-progress.md}의 의도된 동작 변화 표.)
+   * 상태 코드 표({@code classifyErrorByStatus})에 408·529가 들어갔다(2026-10-retry-and-classification
+   * TASK-005, 의도된 동작 변화 ②) — 408은 {@code NETWORK_TIMEOUT}, 529는 {@code SERVER_ERROR}이고
+   * 둘 다 재시도 대상이다. 표에 없는 코드(409)는 종전처럼 {@code UNKNOWN_ERROR}로 떨어진다.
    */
   @Test
-  void 상태코드_표에_없는_408과_529는_UNKNOWN_ERROR로_떨어진다() {
-    assertEquals(ApiErrorHandler.ErrorType.UNKNOWN_ERROR, apiErrorHandler.classifyError(null, 408));
-    assertEquals(ApiErrorHandler.ErrorType.UNKNOWN_ERROR, apiErrorHandler.classifyError(null, 529));
+  void 상태코드_408은_NETWORK_TIMEOUT_529는_SERVER_ERROR로_분류된다() {
+    assertEquals(ApiErrorHandler.ErrorType.NETWORK_TIMEOUT, apiErrorHandler.classifyError(null, 408));
+    assertEquals(ApiErrorHandler.ErrorType.SERVER_ERROR, apiErrorHandler.classifyError(null, 529));
 
-    // 같은 표의 기존 항목은 그대로다(표가 통째로 UNKNOWN을 내는 것이 아님을 보이는 대조).
+    // 표에 없는 코드는 그대로 UNKNOWN_ERROR다(표가 통째로 바뀐 것이 아님을 보이는 대조).
+    assertEquals(ApiErrorHandler.ErrorType.UNKNOWN_ERROR, apiErrorHandler.classifyError(null, 409));
+
+    // 같은 표의 기존 항목은 그대로다.
     assertEquals(ApiErrorHandler.ErrorType.SERVER_ERROR, apiErrorHandler.classifyError(null, 503));
     assertEquals(ApiErrorHandler.ErrorType.INVALID_REQUEST, apiErrorHandler.classifyError(null, 400));
 
     System.out.println("[005 상태코드 표] 408=" + apiErrorHandler.classifyError(null, 408)
         + ", 529=" + apiErrorHandler.classifyError(null, 529)
+        + ", 409=" + apiErrorHandler.classifyError(null, 409)
         + ", 503=" + apiErrorHandler.classifyError(null, 503)
         + ", 400=" + apiErrorHandler.classifyError(null, 400)
-        + " | isRetryable(UNKNOWN_ERROR)=" + apiErrorHandler.isRetryable(ApiErrorHandler.ErrorType.UNKNOWN_ERROR)
+        + " | isRetryable(NETWORK_TIMEOUT)=" + apiErrorHandler.isRetryable(ApiErrorHandler.ErrorType.NETWORK_TIMEOUT)
+        + ", isRetryable(UNKNOWN_ERROR)=" + apiErrorHandler.isRetryable(ApiErrorHandler.ErrorType.UNKNOWN_ERROR)
         + ", isRetryable(CONNECT_FAILURE)=" + apiErrorHandler.isRetryable(ApiErrorHandler.ErrorType.CONNECT_FAILURE));
   }
 

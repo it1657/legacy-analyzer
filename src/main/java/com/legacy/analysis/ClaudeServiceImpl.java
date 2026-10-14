@@ -757,7 +757,8 @@ public class ClaudeServiceImpl implements ClaudeService {
         long initialRetryDelay = sessionConfig.getInitialRetryDelayMs();
         long maxRetryDelay = sessionConfig.getMaxRetryDelayMs();
 
-        for (int retry = 0; retry < maxRetries; retry++) {
+        // 첫 시도 + 재시도 maxRetries번 (바깥 RetryHandler는 AnalysisException을 다시 돌리지 않는다)
+        for (int retry = 0; retry <= maxRetries; retry++) {
             try {
                 String modelToUse = getCurrentModel(sourceFolderPath);
                 LlmResult result = resolveLlmClient(modelToUse)
@@ -798,17 +799,23 @@ public class ClaudeServiceImpl implements ClaudeService {
                 }
 
                 // 재시도 대기 시간 계산
-                boolean isLastAttempt = (retry == maxRetries - 1);
+                boolean isLastAttempt = (retry == maxRetries);
                 if (!isLastAttempt) {
-                    long retryDelay = apiErrorHandler.calculateRetryDelay(errorType, retry,
-                        initialRetryDelay, maxRetryDelay);
+                    // 429·529만 "지금 바쁘다" 신호라 대기를 길게 늘린다
+                    long retryDelay = apiErrorHandler.isOverloadStatus(httpStatus)
+                        ? apiErrorHandler.calculateOverloadRetryDelay(retry, initialRetryDelay, maxRetryDelay)
+                        : apiErrorHandler.calculateRetryDelay(errorType, retry, initialRetryDelay, maxRetryDelay);
 
                     String userMsg = apiErrorHandler.getUserFriendlyMessage(errorType, fileName);
                     apiErrorHandler.logError(errorType, fileName, e, retry + 1, true);
                     log.info("[자동 재시도] {} | {}ms 대기 후 {}회차 시도", userMsg, retryDelay, retry + 2);
 
                     try {
-                        Thread.sleep(retryDelay);
+                        // 일시정지·취소는 깃발이라 인터럽트가 오지 않는다 — 대기를 조각내 직접 확인한다
+                        if (RetryStopSignal.sleepOrStop(retryDelay)) {
+                            log.warn("[재시도 중단] 대기 중 중단 확인 — 다음 요청을 보내지 않는다. 파일: {}", fileName);
+                            throw new AnalysisException(errorType, e);
+                        }
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         throw new AnalysisException(ApiErrorHandler.ErrorType.UNKNOWN_ERROR, ie);

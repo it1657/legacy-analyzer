@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>두 종류를 본다.
  * <ul>
- *   <li><b>ⓐ 메서드 본문</b> — 화이트리스트 5파일 중 "0행"으로 지정된 메서드 35개. 같은 파일 안에서
+ *   <li><b>ⓐ 메서드 본문</b> — 화이트리스트 5파일 중 "0행"으로 지정된 메서드 33개. 같은 파일 안에서
  *       허용된 편집(재기준 호출·이력 4줄·안내 1줄 등)과 구분하려면 보호 단위가 파일이 아니라
  *       메서드 본문이어야 한다.</li>
  *   <li><b>ⓑ 파일 전체</b> — 아예 손대지 않는 13파일(범위 밖 프로덕션·프런트·설정 + known-flaky
@@ -84,16 +84,11 @@ class CounterIntegrityUnchangedMethodsGuardTest {
           "src/main/java/com/legacy/core/ApiErrorHandler.java",
           "/counterintegrity/ApiErrorHandler.java.before-9b5906b.txt",
           "2c72515e2fa982afc6bc42ae815198e99c90fff7",
-          List.of("classifyErrorByStatus", "isRetryable", "calculateRetryDelay",
-              "getUserFriendlyMessage", "getDetailedErrorLog", "logError")),
-      new BodyTarget("RetryHandler",
-          "src/main/java/com/legacy/analysis/RetryHandler.java",
-          "/counterintegrity/RetryHandler.java.before-9b5906b.txt",
-          "3070d3e84e0d7cab39e7232d6c8b5d1bcad27516",
-          List.of("executeWithRetry")));
+          List.of("isRetryable", "calculateRetryDelay",
+              "getUserFriendlyMessage", "getDetailedErrorLog", "logError")));
 
-  /** 지정된 0행 메서드 수(9 + 10 + 9 + 6 + 1). 목록이 조용히 줄어드는 것을 막는다. */
-  private static final int EXPECTED_METHOD_COUNT = 35;
+  /** 지정된 0행 메서드 수(9 + 10 + 9 + 5). 목록이 조용히 줄어드는 것을 막는다. */
+  private static final int EXPECTED_METHOD_COUNT = 33;
 
   // ===================================================================
   // ⓑ 파일 무변경 대상 — 기대값은 LF 정규화 후 git blob SHA-1
@@ -102,8 +97,10 @@ class CounterIntegrityUnchangedMethodsGuardTest {
   private static final Map<String, String> FILE_TARGETS = new LinkedHashMap<>();
 
   static {
+    // 2026-10-retry-and-classification TASK-005에서 의도적으로 바꾼 파일이라 기대값을 갱신했다. 출처:
+    // python으로 CRLF를 LF로 바꾼 사본을 만들고 git hash-object src/main/java/com/legacy/analysis/ClaudeServiceImpl.java
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/ClaudeServiceImpl.java",
-        "aa555b293e509e715a472967e7fc5491452d619a");
+        "1a797cc11700882b60a33ce59ff000e9403d363d");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/llm/AnthropicLlmClient.java",
         "0488d8ff9f253352e0b59852641647fc6b5bf954");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/SessionSourceAvailability.java",

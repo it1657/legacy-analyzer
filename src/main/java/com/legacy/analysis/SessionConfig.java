@@ -11,9 +11,10 @@ import org.springframework.stereotype.Component;
 public class SessionConfig {
 
   // 에러 핸들링 설정
-  private int maxRetries = 5;
-  private long initialRetryDelayMs = 1000;
-  private long maxRetryDelayMs = 30000;
+  // application.properties와 같은 값
+  private int maxRetries = 3;
+  private long initialRetryDelayMs = 100;
+  private long maxRetryDelayMs = 2000;
   private int connectTimeoutSec = 10;
   private int readTimeoutSec = 30;
 

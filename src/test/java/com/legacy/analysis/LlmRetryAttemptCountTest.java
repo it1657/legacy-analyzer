@@ -25,12 +25,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>구성은 운영과 같게 둔다: 실제 {@link ClaudeServiceImpl}(안쪽 재시도 루프) + 실제
  * {@link AnthropicLlmClient}({@link MockWebServer} 대상) + 실제 {@link RetryHandler}(바깥 재시도),
- * 그리고 <b>안쪽과 바깥에 같은 {@link SessionConfig} 인스턴스</b>를 넣는다. 재시도가 두 겹이라
- * 시도 수는 곱이 된다 — {@code maxRetries=3}이면 안쪽 3회 × 바깥 4회 = <b>12회</b>.
+ * 그리고 <b>안쪽과 바깥에 같은 {@link SessionConfig} 인스턴스</b>를 넣는다. 재시도는 안쪽 한 겹이라
+ * 시도 수는 첫 시도 + 재시도 {@code maxRetries}번 = <b>4회</b>다.
  *
- * <p>왜 {@code maxRetries}를 명시하는가(C2): {@code SessionConfig}의 필드 초기값은 <b>5</b>이고
- * 운영의 3은 {@code application.properties}가 덮어쓴 값이다. {@code new SessionConfig()}를 그대로 쓰면
- * 12가 아니라 5×6=30이 되므로 테스트가 운영과 다른 수를 재게 된다.
+ * <p>왜 {@code maxRetries}를 명시하는가(C2): 운영 속성과 같은 값을 이 테스트가 직접 못박아,
+ * {@code SessionConfig}의 필드 초기값이 나중에 달라져도 재는 수가 흔들리지 않게 한다
+ * ({@code new SessionConfig()}를 그대로 쓰면 그 초기값을 재게 된다).
  *
  * <p>시도 수를 무엇으로 세는가(C3): <b>{@link AnthropicLlmClient}를 감싼 위임 카운터</b>의
  * {@code call(...)} 횟수다. {@code MockWebServer.getRequestCount()}로는 <b>연결 거부를 셀 수 없다</b> —
@@ -40,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * ({@code ClaudeServiceImplApiKeyGuardRoutingTest} 선례)에 막혀 LLM이 아예 불리지 않으면
  * "1회"가 우연히 맞을 수 있기 때문이다. 키는 가드를 통과하는 무효 문자열을 쓴다.
  *
- * <p>같은 테스트 안에 <b>재시도가 살아 있어야 하는 경로</b>(429·500·연결 거부 = 12회)를 함께 둬서
+ * <p>같은 테스트 안에 <b>재시도가 살아 있어야 하는 경로</b>(429·500·연결 거부 = 4회)를 함께 둬서
  * 단언이 "항상 1"이 아님을 보인다(G-04 ②, RG-12).
  */
 class LlmRetryAttemptCountTest {
@@ -48,8 +48,8 @@ class LlmRetryAttemptCountTest {
   /** 운영과 같은 재시도 정책. 대기 시간만 짧게 둔다(C2). */
   private static final int MAX_RETRIES = 3;
 
-  /** 안쪽 3회 × 바깥 4회. */
-  private static final int RETRYABLE_ATTEMPTS = 12;
+  /** 첫 시도 + 재시도 3회. 바깥은 {@code AnalysisException}을 다시 재시도하지 않는다. */
+  private static final int RETRYABLE_ATTEMPTS = 4;
 
   private static final String MODEL = "claude-sonnet-5";
   private static final String SESSION_ROOT = "/source/retry-attempt-count-session";
@@ -101,14 +101,14 @@ class LlmRetryAttemptCountTest {
 
   /** 양성 대조군 — 일시 오류의 재시도는 그대로 살아 있어야 한다(RG-12). */
   @Test
-  void 요청한도초과_429는_12회_시도한다() throws Exception {
+  void 요청한도초과_429는_4회_시도한다() throws Exception {
     assertAttempts(AnthropicErrorFixtures.Case.RATE_LIMIT_429, RETRYABLE_ATTEMPTS,
         ApiErrorHandler.ErrorType.API_RATE_LIMIT);
   }
 
   /** 양성 대조군 — 5xx 재시도 유지(RG-12). */
   @Test
-  void 서버오류_500은_12회_시도한다() throws Exception {
+  void 서버오류_500은_4회_시도한다() throws Exception {
     assertAttempts(AnthropicErrorFixtures.Case.SERVER_500, RETRYABLE_ATTEMPTS,
         ApiErrorHandler.ErrorType.SERVER_ERROR);
   }
@@ -119,7 +119,7 @@ class LlmRetryAttemptCountTest {
 
   /** 양성 대조군 — 연결 실패 재시도 유지(RG-12). {@code getRequestCount()}로는 셀 수 없다. */
   @Test
-  void 연결거부는_12회_시도한다() throws Exception {
+  void 연결거부는_4회_시도한다() throws Exception {
     int deadPort;
     MockWebServer server = new MockWebServer();
     server.start();
@@ -136,7 +136,7 @@ class LlmRetryAttemptCountTest {
     assertTrue(harness.counter.callCount >= 1,
         "LLM이 한 번도 불리지 않았다 — 키 가드 등에 막힌 것이므로 시도 수 단언이 무의미하다");
     assertEquals(RETRYABLE_ATTEMPTS, harness.counter.callCount,
-        "연결 거부는 두 겹 재시도가 살아 있어야 한다(안쪽 3 × 바깥 4)");
+        "연결 거부는 안쪽 재시도가 살아 있어야 한다(첫 시도 + 재시도 3)");
     assertEquals(ApiErrorHandler.ErrorType.CONNECT_FAILURE, thrown.getErrorType());
   }
 

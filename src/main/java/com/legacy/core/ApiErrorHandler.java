@@ -53,13 +53,15 @@ public class ApiErrorHandler {
    *
    * 분류 순서가 곧 규칙이다. 응답을 받은 오류(httpStatus > 0)는 상태 코드가 분류를 결정한다 —
    * 예외 메시지에는 응답 본문이 섞여 들어오기 때문에 본문 글자로 먼저 판단하면 오분류가 난다
-   * (실측: 401 본문의 "authentication_error" 안에 "io"가 있어 아래 "io" 규칙에 걸려
+   * (실측: 401 본문의 "authentication_error" 안에 "io"가 있어 종전 "io" 규칙에 걸려
    * CONNECT_FAILURE로 분류됐고, 재시도 불가인 인증 실패가 재시도 가능으로 뒤집혔다).
    *
    * 크레딧 소진만 상태 코드보다 앞에서 본다. 크레딧 소진도 400으로 오는데 상태 코드만으로는
    * 일반 INVALID_REQUEST와 구별할 수 없고, 구별해야 failover 안내로 갈 수 있다.
    *
-   * 응답을 받지 못한 오류(httpStatus == 0)는 상태 코드가 없으니 종전처럼 메시지 규칙을 쓴다.
+   * 응답을 받지 못한 오류(httpStatus == 0)는 상태 코드가 없으니 메시지 규칙을 쓴다. 다만 "io"
+   * 두 글자만 보고 연결 실패로 단정하던 규칙은 없앴다 — permission·option·exception 같은 낱말에
+   * 들어 있어 연결과 무관한 오류를 재시도하게 했고, 뒤에 있는 파일 규칙도 가렸다.
    */
   public ErrorType classifyError(Exception exception, int httpStatus) {
     if (exception == null) {
@@ -85,9 +87,6 @@ public class ApiErrorHandler {
       return ErrorType.NETWORK_TIMEOUT;
     }
     if (exceptionMessage.contains("connection") || exceptionMessage.contains("refused")) {
-      return ErrorType.CONNECT_FAILURE;
-    }
-    if (exceptionMessage.contains("io")) {
       return ErrorType.CONNECT_FAILURE;
     }
 
@@ -143,8 +142,10 @@ public class ApiErrorHandler {
       case 400 -> ErrorType.INVALID_REQUEST;
       case 401 -> ErrorType.API_AUTHENTICATION;
       case 403 -> ErrorType.API_FORBIDDEN;
+      // 408 응답 시간 초과·529 서버 과부하는 재시도 대상이다 (종전에는 표에 없어 UNKNOWN_ERROR였다)
+      case 408 -> ErrorType.NETWORK_TIMEOUT;
       case 429 -> ErrorType.API_RATE_LIMIT;
-      case 500, 502, 503, 504 -> ErrorType.SERVER_ERROR;
+      case 500, 502, 503, 504, 529 -> ErrorType.SERVER_ERROR;
       default -> ErrorType.UNKNOWN_ERROR;
     };
   }
@@ -191,6 +192,33 @@ public class ApiErrorHandler {
     }
 
     return Math.min(delayMs, maxDelayMs);
+  }
+
+  /** 연장 대기의 첫 대기 배수 (D1). */
+  private static final long OVERLOAD_INITIAL_DELAY_MULTIPLIER = 20;
+
+  /** 연장 대기 한 번의 상한 배수 (D1). */
+  private static final long OVERLOAD_MAX_DELAY_MULTIPLIER = 5;
+
+  /**
+   * 429·529만 "지금 바쁘다"는 신호로 본다 — 이 두 상태만 대기를 길게 늘린다.
+   */
+  public boolean isOverloadStatus(int httpStatus) {
+    return httpStatus == 429 || httpStatus == 529;
+  }
+
+  /**
+   * 429·529용 연장 대기 (D1) — 첫 대기의 20배에서 시작해 재시도마다 2배, 흔들기는 그 값의 1/4
+   * 미만, 한 번 대기는 최대 대기의 5배를 넘지 않는다.
+   */
+  public long calculateOverloadRetryDelay(int retryCount,
+    long initialDelayMs, long maxDelayMs) {
+
+    long baseMs = initialDelayMs * OVERLOAD_INITIAL_DELAY_MULTIPLIER
+      * (long) Math.pow(2, Math.min(retryCount, 5));
+    long jitterMs = new Random().nextLong(Math.max(1, baseMs / 4));
+
+    return Math.min(baseMs + jitterMs, maxDelayMs * OVERLOAD_MAX_DELAY_MULTIPLIER);
   }
 
   /**

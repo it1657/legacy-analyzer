@@ -18,10 +18,39 @@ public class RetryHandler {
   private final ApiErrorHandler apiErrorHandler;
   private final SessionConfig sessionConfig;
 
+  /** 세션 조회 경로 — 선택 주입이라 없을 수 있고, 없으면 항상 "중단 아님"이다. */
+  private AnalysisSessionManager sessionManager;
+
+  /** 기본 판정 팩토리 — 처음 판정할 때 1번만 세션을 조회하고, 이후 그 세션의 shouldStop만 본다. */
+  private java.util.function.Function<String, java.util.function.BooleanSupplier> stopCheckFactory =
+      sessionId -> {
+        SessionState[] resolved = new SessionState[1];
+        boolean[] looked = new boolean[1];
+        return () -> {
+          if (!looked[0]) {
+            looked[0] = true;
+            resolved[0] = sessionManager == null ? null : sessionManager.getSession(sessionId);
+          }
+          return resolved[0] != null && resolved[0].shouldStop();
+        };
+      };
+
   @Autowired
   public RetryHandler(ApiErrorHandler apiErrorHandler, SessionConfig sessionConfig) {
     this.apiErrorHandler = apiErrorHandler;
     this.sessionConfig = sessionConfig;
+  }
+
+  /** 기존 2인자 생성자를 쓰는 배선을 그대로 두기 위해 세션 관리자는 선택 주입으로 받는다. */
+  @Autowired(required = false)
+  public void setSessionManager(AnalysisSessionManager sessionManager) {
+    this.sessionManager = sessionManager;
+  }
+
+  /** 테스트용 판정 함수 주입. */
+  void setStopCheckFactory(
+      java.util.function.Function<String, java.util.function.BooleanSupplier> factory) {
+    this.stopCheckFactory = factory;
   }
 
   /**
@@ -33,7 +62,7 @@ public class RetryHandler {
 
     while (retryCount <= sessionConfig.getMaxRetries()) {
       try {
-        return task.execute();
+        return RetryStopSignal.runWithStopCheck(stopCheckFactory.apply(sessionId), task);
       } catch (Exception e) {
         // 이미 정확히 분류된 예외(예: ClaudeServiceImpl에서 credit balance 등을 보고 분류한 결과)는
         // 그 분류를 그대로 신뢰한다. 여기서 메시지 문자열만으로 다시 분류하면 원래 정확했던
@@ -42,7 +71,10 @@ public class RetryHandler {
             ? ae.getErrorType() : classifyError(e);
 
         // 재시도 불가능하거나 최대 재시도 초과
-        if (!apiErrorHandler.isRetryable(errorType) ||
+        // 안쪽(ClaudeServiceImpl)이 이미 재시도까지 판정한 AnalysisException을 여기서 다시 돌리면
+        // 안쪽 횟수와 곱이 된다 — 그 분류를 그대로 최종 실패로 쓴다.
+        if (e instanceof AnalysisException ||
+            !apiErrorHandler.isRetryable(errorType) ||
             retryCount >= sessionConfig.getMaxRetries()) {
           log.error("[작업 최종 실패] {} - 재시도 횟수: {}, 에러: {}",
               filePath, retryCount, errorType);
