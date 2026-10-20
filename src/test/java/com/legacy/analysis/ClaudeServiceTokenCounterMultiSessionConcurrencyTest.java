@@ -13,8 +13,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -39,21 +41,45 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>두 번째 케이스는 <b>GREEN만으로는 아무것도 증명하지 못한다.</b> 리셋 스레드가 A의 누적이 전부
  * 끝난 뒤에 돌았다면 그건 하네스 (i)과 똑같은 순차 교차이고, 그래도 테스트는 통과한다. 그래서
- * "A의 합계가 정확하다"는 단언과 <b>별도로</b> 아래를 계측해 단언한다.
+ * "A의 합계가 정확하다"는 단언과 <b>별도로</b> 교차가 실제로 일어났음을 계측해 단언한다.
+ *
+ * <p>처음에는 그 겹침을 스케줄링 운에 맡기고 계측 단언으로 걸러 내기만 했다. 그러면 겹침이 생기지
+ * 않은 실행은 정확성이 맞았는데도 경로 증거 단언에서 빨개진다. 그래서 <b>겹침 1회는 테스트가 직접
+ * 만들고, 나머지는 그대로 자연 경합에 둔다.</b>
  *
  * <ul>
- *   <li>{@code activeAccumulators} — A의 누적 호출에 들어가 있는 스레드 수. 리셋 스레드는 매 리셋
- *       시점에 이 값을 읽는다.</li>
- *   <li>{@code resetsDuringAccumulation} — 그 값이 {@code > 0}인 상태에서 실행된 리셋 횟수.
- *       <b>이 값이 0이면 교차가 일어나지 않았다는 뜻이므로 테스트를 실패시킨다.</b></li>
- *   <li>{@code resetsThatActuallyCleared} — 리셋 직전 B의 누적치가 {@code > 0}이었던 횟수.
- *       리셋이 "빈 카운터를 지우는 무의미한 호출"만 반복한 게 아님을 보인다.</li>
+ *   <li><b>강제 겹침 1회</b> — A 지정 스레드는 두 번째 누적에서 {@code activeAccumulatorsA}를 올린
+ *       직후 멈춰 서고, B 지정 스레드는 첫 누적 직후 "지울 값이 생겼다"를 알린다. 리셋 스레드는 그
+ *       두 사건을 기다린 뒤 <b>첫 리셋 1회</b>를 기존 계측 코드 그대로 수행하고 A를 놓아준다. 래치
+ *       셋에는 각각 대기 상한이 있어, 초과가 무한 대기가 아니라 실패로 드러난다.</li>
+ *   <li><b>나머지는 자연 경합</b> — 그 뒤의 리셋 루프와 나머지 누적 스레드는 바뀌지 않았다. 자연
+ *       겹침 횟수는 관측값으로만 출력하고 <b>단언하지 않는다</b>(확률적 값).</li>
+ * </ul>
+ *
+ * <p>단언 순서는 ⓪ → ① → ② → ③ 이다.
+ *
+ * <ul>
+ *   <li><b>⓪ 작업 실패 표시 없음</b> — 래치 상한 초과와 작업 스레드 예외를 {@code AtomicReference}에
+ *       담아 맨 먼저 단언한다. {@code Future}를 회수하지 않으므로, 이 표시를 보지 않으면 "아무 일도
+ *       일어나지 않았는데 통과"를 구별할 수 없다.</li>
+ *   <li><b>① 정확성</b> — A의 합계와 {@code modelName}. 격리가 성립하면 스케줄링과 무관하게
+ *       결정론적이므로 정확히 단언한다 — 그것이 이 테스트가 잡으려는 대상이다.</li>
+ *   <li><b>② 경로 증거</b> — {@code resetsDuringAccumulation}(A 누적 진행 중에 실행된 리셋 횟수) ·
+ *       {@code maxInFlightSeenAtReset}(리셋 시점에 관측된 A 동시 누적 스레드 최대) ·
+ *       {@code resetsThatActuallyCleared}(리셋 직전 B의 누적치가 {@code > 0}이었던 횟수)가 모두
+ *       {@code > 0}. 단언과 메시지를 그대로 두었고, 강제 1회가 있으므로 이제 매 실행 성립한다.</li>
+ *   <li><b>③ 강제 지점</b> — 강제 리셋 그 시점의 {@code inFlight}가 1 이상이고 {@code bHadTokens}가
+ *       참. ②의 {@code > 0}이 강제 1회에서 나왔다는 것을 못 박는다.</li>
  * </ul>
  *
  * <p><b>B의 최종값은 단언하지 않는다</b> — 누적과 리셋이 경쟁하므로 스케줄링에 따라 달라지는
  * 확률적 값이다. 확률적 값을 단언하면 CI가 불안정해진다는 기존 교훈(`AnalysisStatisticsConcurrencyTest`)에
- * 따라 <b>관측값만 출력</b>한다. 반대로 A의 합계는 격리가 성립하면 스케줄링과 무관하게 결정론적이므로
- * 정확히 단언한다 — 그것이 이 테스트가 잡으려는 대상이다.
+ * 따라 <b>관측값만 출력</b>한다.
+ *
+ * <p><b>원 설계와의 관계</b>: 이 파일을 만든 {@code 2026-09-cost-stats-bugfix} 사이클(커밋
+ * {@code 4ffbebf})이 단언 대상으로 삼은 것은 "A가 누적하는 <b>도중에</b> 교차 리셋이 끼어들어도 A의
+ * 합계가 정확하다"였고, 그 겹침이 자연 스케줄링에서 나왔다는 사실은 관측값이지 단언 대상이 아니었다.
+ * 강제 겹침은 그 "도중에"를 운에서 보장으로 바꾼 것이므로, 재는 대상은 그대로다.
  *
  * <p><b>스레드 16의 근거</b>: 운영 기본값 {@code app.analysis.thread-pool-size=16}
  * ({@code AnalysisStatisticsConcurrencyTest}·하네스가 쓴 선례와 동일).
@@ -169,6 +195,8 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
     int accumulatorThreadsB = 4;
     int callsPerThread = 300;
     long perCall = 100L;
+    // 래치 대기 상한 — 기다리는 사건은 지정 스레드의 첫 1~2회 호출뿐이라 이 정도면 넉넉하다.
+    int latchTimeoutSeconds = 30;
 
     // "경로를 실제로 탔는가"를 재는 계측기 — GREEN만으로는 순차 교차와 구별되지 않는다.
     AtomicInteger activeAccumulatorsA = new AtomicInteger(0);
@@ -178,24 +206,45 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
     AtomicInteger maxInFlightSeenAtReset = new AtomicInteger(0);
     AtomicBoolean accumulationFinished = new AtomicBoolean(false);
 
+    // 강제 겹침 1회를 만드는 래치 셋 — A가 누적 구간에 들어감 / B에 지울 값이 생김 /
+    // 리셋 스레드가 그 겹침 지점에서 첫 리셋을 끝냄.
+    CountDownLatch aAccumulating = new CountDownLatch(1);
+    CountDownLatch bHasTokens = new CountDownLatch(1);
+    CountDownLatch forcedResetDone = new CountDownLatch(1);
+    // 강제 리셋 그 시점의 계측값만 따로 보관한다 — 뒤이은 자연 경합 리셋에 섞이지 않게.
+    AtomicInteger forcedResetInFlight = new AtomicInteger(-1);
+    AtomicBoolean forcedResetBHadTokens = new AtomicBoolean(false);
+    // 상한 초과·예외를 담는다. Future를 회수하지 않으므로 이 표시가 ⓪ 단언의 유일한 통로다.
+    AtomicReference<String> workerFailure = new AtomicReference<>(null);
+
     ExecutorService pool = Executors.newFixedThreadPool(accumulatorThreadsA + accumulatorThreadsB + 1);
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch accumulatorsDone = new CountDownLatch(accumulatorThreadsA + accumulatorThreadsB);
     CountDownLatch resetterDone = new CountDownLatch(1);
     try {
       for (int t = 0; t < accumulatorThreadsA; t++) {
+        boolean designatedA = (t == 0);
         pool.submit(() -> {
           try {
             start.await();
             for (int c = 0; c < callsPerThread; c++) {
               activeAccumulatorsA.incrementAndGet();
               try {
+                // 지정 스레드만 두 번째 반복에서 멈춰 서서 리셋 스레드에 겹침 지점을 넘긴다.
+                if (designatedA && c == 1) {
+                  aAccumulating.countDown();
+                  if (!forcedResetDone.await(latchTimeoutSeconds, TimeUnit.SECONDS)) {
+                    workerFailure.compareAndSet(null, "세션A 지정 스레드가 강제 리셋 완료를 "
+                        + latchTimeoutSeconds + "초 안에 받지 못했다");
+                  }
+                }
                 accumulate(service, perCall, 0L, 0L, 0L, modelA, sessionA);
               } finally {
                 activeAccumulatorsA.decrementAndGet();
               }
             }
           } catch (Exception e) {
+            workerFailure.compareAndSet(null, "세션A 누적 스레드 예외: " + e);
             throw new IllegalStateException(e);
           } finally {
             accumulatorsDone.countDown();
@@ -203,13 +252,19 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
         });
       }
       for (int t = 0; t < accumulatorThreadsB; t++) {
+        boolean designatedB = (t == 0);
         pool.submit(() -> {
           try {
             start.await();
             for (int c = 0; c < callsPerThread; c++) {
               accumulate(service, perCall, 0L, 0L, 0L, modelB, sessionB);
+              // 기다리지 않는다 — 리셋 스레드에 "지울 값이 생겼다"만 알린다.
+              if (designatedB && c == 0) {
+                bHasTokens.countDown();
+              }
             }
           } catch (Exception e) {
+            workerFailure.compareAndSet(null, "세션B 누적 스레드 예외: " + e);
             throw new IllegalStateException(e);
           } finally {
             accumulatorsDone.countDown();
@@ -220,8 +275,18 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
       pool.submit(() -> {
         try {
           start.await();
+          boolean forcedDone = false;
           int safetyCap = 5_000_000;
           while (!accumulationFinished.get() && safetyCap-- > 0) {
+            if (!forcedDone) {
+              // 첫 바퀴만 겹침 지점을 기다린다. 두 사건은 이미 일어난 것들이라 순환이 없다.
+              boolean aReady = aAccumulating.await(latchTimeoutSeconds, TimeUnit.SECONDS);
+              boolean bReady = bHasTokens.await(latchTimeoutSeconds, TimeUnit.SECONDS);
+              if (!aReady || !bReady) {
+                workerFailure.compareAndSet(null, "리셋 스레드의 겹침 대기가 " + latchTimeoutSeconds
+                    + "초 상한을 넘었다 — aAccumulating=" + aReady + ", bHasTokens=" + bReady);
+              }
+            }
             int inFlight = activeAccumulatorsA.get();
             boolean bHadTokens = service.getTotalTokenUsage(sessionB).getInputTokens() > 0;
             service.resetTokenUsage(sessionB);
@@ -233,9 +298,17 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
             if (bHadTokens) {
               resetsThatActuallyCleared.incrementAndGet();
             }
+            if (!forcedDone) {
+              // 그 첫 리셋이 강제 겹침 1회다. 값을 따로 보관하고 A를 놓아준다.
+              forcedResetInFlight.set(inFlight);
+              forcedResetBHadTokens.set(bHadTokens);
+              forcedResetDone.countDown();
+              forcedDone = true;
+            }
             Thread.yield();
           }
         } catch (Exception e) {
+          workerFailure.compareAndSet(null, "리셋 스레드 예외: " + e);
           throw new IllegalStateException(e);
         } finally {
           resetterDone.countDown();
@@ -269,6 +342,16 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
         "[TASK-004 누적 중 교차 리셋 / 참고(단언 안 함)] 세션B 최종 input 실측 %d "
             + "(누적과 리셋이 경쟁하므로 확률적 값이다 / 단언하면 flaky해진다)%n",
         observedB.getInputTokens());
+    System.out.printf(
+        "[TASK-004 누적 중 교차 리셋 / 겹침 출처(단언 안 함)] 강제 1회 / 자연 겹침 %d회"
+            + "(= 누적 중 리셋 %d회 - 강제 1회) / 강제 지점 inFlight %d · bHadTokens %s%n",
+        resetsDuringAccumulation.get() - 1, resetsDuringAccumulation.get(),
+        forcedResetInFlight.get(), forcedResetBHadTokens.get());
+
+    // ⓪ 작업 실패 표시 단언: Future를 회수하지 않으므로 상한 초과·예외는 이 표시로만 드러난다.
+    //    맨 먼저 본다 — 아래 단언들은 이 표시가 없을 때만 의미가 있다.
+    assertNull(workerFailure.get(),
+        "작업 스레드가 래치 상한 초과나 예외를 보고했다 — 강제 겹침이 성립하지 않았다");
 
     // ① 격리 단언: A의 합계는 남의 리셋과 무관하게 정확해야 한다(결정론적).
     assertEquals(expectedA, observedA.getInputTokens(),
@@ -285,5 +368,12 @@ class ClaudeServiceTokenCounterMultiSessionConcurrencyTest {
         "리셋 시점에 세션A 누적 스레드가 동시에 진행 중이었음이 관측돼야 한다");
     assertTrue(resetsThatActuallyCleared.get() > 0,
         "리셋이 빈 카운터만 반복해 지운 것이 아니라 실제로 세션B의 누적값을 지운 적이 있어야 한다");
+
+    // ③ 강제 지점 단언: 위 ②의 "> 0"이 운이 아니라 강제 겹침 1회에서 나왔음을 못 박는다.
+    assertTrue(forcedResetInFlight.get() >= 1,
+        "강제 리셋 시점에 세션A 누적 스레드가 진행 중(inFlight ≥ 1)이어야 한다 — 관측 "
+            + forcedResetInFlight.get());
+    assertTrue(forcedResetBHadTokens.get(),
+        "강제 리셋 시점에 세션B에 지울 누적값이 있어야 한다(bHadTokens = true)");
   }
 }

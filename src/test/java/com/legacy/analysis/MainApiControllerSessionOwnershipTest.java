@@ -12,6 +12,11 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.mockito.stubbing.Answer;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -59,6 +64,61 @@ class MainApiControllerSessionOwnershipTest {
     user.setSeq(99L);
     user.setRoles(Set.of(new Role("ADMIN", "관리자")));
     return new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
+  }
+
+  /**
+   * 재개 스레드의 <b>첫 {@code getSession} 호출</b>을 붙잡아, 테스트 단언과 재개 스레드의 세션 쓰기가
+   * 겹치지 않게 만드는 도우미.
+   *
+   * <p>호출한 스레드가 테스트 스레드면 세션을 그대로 돌려준다(기존 {@code thenReturn}과 같다).
+   * 그 밖의 스레드(= 재개 스레드)면 도착을 알리고 놓아줄 때까지 기다린 뒤 {@code null}을 돌려준다.
+   * 재개 로직은 첫 문장이 {@code getSession}이고 세션에 쓰는 지점은 모두 그 반환 뒤에 있으므로,
+   * {@code null}을 받은 재개 스레드는 세션에 아무것도 쓰지 않고 끝난다.
+   *
+   * <p>대기 상한은 셋 다 10초다. 정상 경로에서 기다리는 사건은 스레드 시작 한 번뿐이라, 상한은
+   * 무한 대기를 막는 용도이며 초과는 실패로 드러난다.
+   */
+  private static final class ResumeThreadGate {
+    private static final long TIMEOUT_SECONDS = 10L;
+
+    private final Thread testThread = Thread.currentThread();
+    private final CountDownLatch arrived = new CountDownLatch(1);
+    private final CountDownLatch released = new CountDownLatch(1);
+    private final AtomicInteger resumeThreadCalls = new AtomicInteger();
+    private volatile Thread resumeThread;
+
+    private Answer<SessionState> answer(SessionState session) {
+      return invocation -> {
+        if (Thread.currentThread() == testThread) {
+          return session;
+        }
+        resumeThread = Thread.currentThread();
+        resumeThreadCalls.incrementAndGet();
+        arrived.countDown();
+        if (!released.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+          throw new IllegalStateException("재개 스레드 놓아줌 대기 " + TIMEOUT_SECONDS + "초 초과");
+        }
+        return null;
+      };
+    }
+
+    private boolean awaitArrival() throws InterruptedException {
+      return arrived.await(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private boolean releaseAndJoin() throws InterruptedException {
+      released.countDown();
+      Thread t = resumeThread;
+      if (t == null) {
+        return false;
+      }
+      t.join(TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
+      return !t.isAlive();
+    }
+
+    private int resumeThreadCalls() {
+      return resumeThreadCalls.get();
+    }
   }
 
   // ===================================================================
@@ -123,17 +183,20 @@ class MainApiControllerSessionOwnershipTest {
     session.setUsername("owner");
     session.setPendingFilePaths(
         java.util.List.of(Files.createFile(pendingSourceDir.resolve("A.java")).toString()));
-    when(sessionManager.getSession("sid")).thenReturn(session);
+    // 재개 스레드의 첫 getSession을 붙잡아 둔다 — 아래 상태 단언이 재개 스레드의 세션 쓰기와
+    // 겹치지 않는 것은 이 붙잡기 때문이다(대기 상한 10초).
+    ResumeThreadGate gate = new ResumeThreadGate();
+    when(sessionManager.getSession("sid")).thenAnswer(gate.answer(session));
     MainApiController controller = newController(sessionManager, mock(AnalysisHistoryRepository.class));
 
     Map<String, Object> response = controller.resumeSession(Map.of("sessionId", "sid"), authAs("owner"));
 
     assertEquals(true, response.get("success"));
-    assertEquals("ANALYZING", session.getCurrentPhase());
-    // resumePendingFilesInThread가 기동한 백그라운드 스레드가 세션 상태를 추가로 건드리기 전에
-    // 어서션이 끝나도록 잠깐 대기(실제 파일 1개로 재개되며, 백그라운드 스레드는 이 테스트가
-    // null로 넘긴 협력자에서 예외로 끝나므로 위 단언에 영향이 없다).
-    Thread.sleep(100);
+    assertTrue(gate.awaitArrival(), "재개 스레드가 기동해 getSession에 도착하지 않았다(대기 상한 초과)");
+    assertEquals("ANALYZING", session.getCurrentPhase(), "재개 스레드 기동 직전 ANALYZING으로 전이해야 함");
+    assertTrue(gate.releaseAndJoin(), "놓아준 재개 스레드가 종료하지 않았다(대기 상한 초과 또는 생존)");
+    assertEquals("ANALYZING", session.getCurrentPhase(), "재개 스레드가 끝난 뒤에도 세션에 아무것도 쓰지 않았어야 함");
+    assertEquals(1, gate.resumeThreadCalls(), "재개 스레드가 첫 getSession에서 끝나지 않았다");
   }
 
   @Test

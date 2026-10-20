@@ -29,8 +29,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  *   <li><b>ⓐ 메서드 본문</b> — 화이트리스트 5파일 중 "0행"으로 지정된 메서드 33개. 같은 파일 안에서
  *       허용된 편집(재기준 호출·이력 4줄·안내 1줄 등)과 구분하려면 보호 단위가 파일이 아니라
  *       메서드 본문이어야 한다.</li>
- *   <li><b>ⓑ 파일 전체</b> — 아예 손대지 않는 13파일(범위 밖 프로덕션·프런트·설정 + known-flaky
- *       K1·K2·K3 테스트 파일).</li>
+ *   <li><b>ⓑ 파일 전체</b> — 바이트 단위로 고정해 두는 13파일(범위 밖 프로덕션·프런트·설정 +
+ *       K1·K2·K3 테스트 파일. K1·K2·K3은 2026-10-test-gaps-k1-k3에서 흔들림을 없애려고 의도적으로
+ *       고쳤고 그때 기대값을 갱신했다 — 아래 주석).</li>
  * </ul>
  *
  * <p><b>검사기의 탐지력은 같은 테스트 안의 양성 대조군으로 증명한다</b>(G-04) — 고정본 본문에 1글자,
@@ -121,14 +122,15 @@ class CounterIntegrityUnchangedMethodsGuardTest {
         "ad80e7c45290034333efc878bfb3818300520d3f");
     FILE_TARGETS.put("src/main/resources/application.properties",
         "ec2466d843c966d6852f91ee390ee461a57e148d");
-    // known-flaky K1·K2·K3 — 이 사이클의 어느 TASK도 고치지 않는다(G-16 (a)).
+    // 2026-10-test-gaps-k1-k3 TASK-002·TASK-003에서 의도적으로 바꾼 K1·K2·K3 테스트 파일이라 기대값을 갱신했다. 출처:
+    // git hash-object src/test/java/com/legacy/analysis/<각 K 파일> (인덱스·작업 트리 모두 LF이라 LF 사본 없이 계산)
     FILE_TARGETS.put("src/test/java/com/legacy/analysis/MainApiControllerFailoverConfirmTest.java",
-        "6ce719008a3d560aaef56fe433b874a479720194");
+        "405b66f49b3c5c7a1a3790b44f6cf6548edc767c");
     FILE_TARGETS.put("src/test/java/com/legacy/analysis/MainApiControllerSessionOwnershipTest.java",
-        "a630200648a9e84aeb9ac87d17504525a7236c19");
+        "93a04f3530b36a253f5b94cb8a179c33e8d57349");
     FILE_TARGETS.put(
         "src/test/java/com/legacy/analysis/ClaudeServiceTokenCounterMultiSessionConcurrencyTest.java",
-        "d487d8ce58adf9db2b7c6fd158a13a4bd178615a");
+        "34efc1cbce8bc62c3ac0a42abb947eee53314a3b");
   }
 
   // ===================================================================
