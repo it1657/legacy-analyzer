@@ -76,6 +76,12 @@ public class MainApiController {
   // rag.content.enabled/인프라 유무를 스스로 판단해 no-op하므로(REQ-5), ProjectStructureRagService와
   // 달리 ObjectProvider 없이 일반 생성자 주입으로 받는다.
   private final com.legacy.rag.CodeContentRagService codeContentRagService;
+  // (REQ-002 / O40) '이어서 분석' 입구 점유표 — resumeSession()과 confirmFailover()가 같은 표 하나를
+  // 쓴다. 세션 ID를 점유한 요청만 재개 흐름에 들어가고, 이미 점유 중이면 기다리지 않고 바로 거절한다.
+  // 세션 객체가 아니라 세션 ID로 점유하는 이유: getSession()은 메모리에 없는 세션을 DB에서 읽어 넣는데
+  // 그 과정이 한 번에 묶여 있지 않아, 동시에 들어온 두 요청이 서로 다른 세션 객체를 받을 수 있다.
+  // 점유를 getSession()보다 먼저 하면 그 경우까지 막힌다.
+  private final Set<String> resumeEntryHolders = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
   @Value("${app.analysis.max-file-size-bytes:524288}")
   private long maxFileSizeBytes;
@@ -373,6 +379,16 @@ public class MainApiController {
     }
 
     String clientSessionId = request.getOrDefault("sessionId", "");
+
+    // 같은 세션 ID로 두 번 시작하는 것 차단(REQ-004 / O45, 2026-10): 클라이언트가 보낸 세션 ID를
+    // 읽은 직후에 검사한다. 아래 claudeService.setModel(...)은 부작용이 있는 호출이므로 그보다
+    // 앞에서 막아야 거절된 요청이 다른 세션의 모델 설정을 건드리지 않는다.
+    String reuseError = startEntryReuseError(clientSessionId);
+    if (reuseError != null) {
+      result.put("error", reuseError);
+      return result;
+    }
+
     String selectedModel = request.getOrDefault("model", "").trim();
     String requirements = request.getOrDefault("requirements", "").trim();
     boolean forceActive = "true".equalsIgnoreCase(request.getOrDefault("forceActive", "false"));
@@ -442,6 +458,30 @@ public class MainApiController {
     result.put("message", "분석을 시작했습니다.");
     log.info("[분석 시작] sessionId={}, user={}, source={}", sessionId, userLoginId, finalSourcePath);
     return result;
+  }
+
+  /**
+   * 시작 입구 2곳(경로 지정 분석 · 업로드 분석)에서 "이미 쓰인 세션 ID"인지 판정한다
+   * (REQ-004 / O45, 2026-10). 거절해야 하면 응답에 넣을 문구를, 통과면 {@code null}을 돌려준다.
+   *
+   * <p>클라이언트가 세션 ID를 <b>보냈을 때만</b> 검사한다 — 빈 값이면 서버가 UUID를 새로 만들어
+   * 쓰므로 겹칠 수 없다.
+   *
+   * <p>확인은 서버 세션 기록({@code sessionManager.getSession})만 쓴다. 이력 저장소 조회를 넣지
+   * 않는 이유: 시작 입구를 직접 호출하는 기존 시험들이 이 컨트롤러를 이력 저장소 {@code null}로
+   * 만들기 때문에, 이력 조회를 넣으면 그 시험들이 NPE로 깨진다.
+   *
+   * <p>거의 동시에 같은 ID로 들어온 두 요청은 막지 않는다. 막으려면 시작 입구에도 점유표를 두고
+   * 업로드 저장 구간 전체를 감싸야 해 수정 범위가 커진다. 화면은 시작할 때마다 새 ID를 만든다.
+   */
+  private String startEntryReuseError(String clientSessionId) {
+    if (clientSessionId == null || clientSessionId.isBlank()) {
+      return null;
+    }
+    if (sessionManager.getSession(clientSessionId) == null) {
+      return null;
+    }
+    return "이미 사용된 세션 ID입니다. 화면을 새로 고친 뒤 다시 시작해 주세요.";
   }
 
   // ===================================================================
@@ -562,6 +602,15 @@ public class MainApiController {
 
     final String sessionId = (clientSessionId == null || clientSessionId.isBlank())
         ? UUID.randomUUID().toString() : clientSessionId;
+
+    // 같은 세션 ID로 두 번 시작하는 것 차단(REQ-004 / O45, 2026-10): 세션 ID 확정 직후,
+    // 업로드 파일을 저장하기 전에 검사한다. 이 경로는 파일 저장이 세션 생성보다 먼저 일어나므로
+    // 뒤에서 막으면 기존 세션의 업로드 폴더에 새 파일이 섞여 들어간다.
+    String reuseError = startEntryReuseError(clientSessionId);
+    if (reuseError != null) {
+      result.put("error", reuseError);
+      return result;
+    }
 
     // 업로드된 폴더의 실제 이름(예: legacy-analyzer)을 그대로 저장 디렉터리명으로 사용한다.
     // README/PPT/이력 목록 등 여러 화면이 sourcePath의 마지막 경로 조각을 "프로젝트명"으로 뽑아쓰기 때문에,
@@ -1309,15 +1358,29 @@ public class MainApiController {
     if (sessionId == null || sessionId.isEmpty()) {
       response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
     }
-    // DB에서도 로드 시도 (서버 재시작 후 세션이 메모리에 없는 경우 포함)
-    SessionState session = sessionManager.getSession(sessionId);
-    if (session == null) {
-      response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    // (REQ-002) 점유는 getSession()보다 먼저 한다(이유는 resumeEntryHolders 주석). 점유 실패는
+    // 기다리지 않고 바로 거절한다 — 기다렸다 들어가도 앞 요청이 이미 상태를 전환했으므로 어차피
+    // 거절된다.
+    if (!resumeEntryHolders.add(sessionId)) {
+      return resumeEntryRejection(null);
     }
-    if (!isSessionOwnerOrAdmin(session, authentication)) {
-      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+    try {
+      // DB에서도 로드 시도 (서버 재시작 후 세션이 메모리에 없는 경우 포함)
+      SessionState session = sessionManager.getSession(sessionId);
+      if (session == null) {
+        response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+      }
+      if (!isSessionOwnerOrAdmin(session, authentication)) {
+        response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+      }
+      Map<String, Object> rejection = resumeEntryRejection(session);
+      if (rejection != null) {
+        return rejection;
+      }
+      return resumePendingFilesInThread(session, sessionId);
+    } finally {
+      resumeEntryHolders.remove(sessionId);
     }
-    return resumePendingFilesInThread(session, sessionId);
   }
 
   /**
@@ -1335,68 +1398,114 @@ public class MainApiController {
     if (sessionId == null || sessionId.isEmpty()) {
       response.put("success", false); response.put("message", "세션 ID가 필요합니다."); return response;
     }
-    SessionState session = sessionManager.getSession(sessionId);
-    if (session == null) {
-      response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+    // (REQ-002) resumeSession()과 같은 점유표를 쓴다 — 두 입구를 섞어 눌러도 한 번만 통과한다.
+    if (!resumeEntryHolders.add(sessionId)) {
+      return resumeEntryRejection(null);
     }
-    if (!isSessionOwnerOrAdmin(session, authentication)) {
-      response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
-    }
-    if (!SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(session.getCurrentPhase())) {
-      response.put("success", false);
-      response.put("message", "크레딧 소진 컨펌 대기 상태가 아닙니다.");
-      return response;
-    }
-    String failoverModelKey = session.getFailoverModelKey();
-    if (failoverModelKey == null || failoverModelKey.isBlank()) {
-      response.put("success", false);
-      response.put("message", "failover 대상 모델이 지정되어 있지 않습니다.");
-      return response;
-    }
+    try {
+      SessionState session = sessionManager.getSession(sessionId);
+      if (session == null) {
+        response.put("success", false); response.put("message", "세션을 찾을 수 없습니다."); return response;
+      }
+      if (!isSessionOwnerOrAdmin(session, authentication)) {
+        response.put("success", false); response.put("message", "본인 세션만 제어할 수 있습니다."); return response;
+      }
+      if (!SessionState.STATUS_AWAITING_FAILOVER_CONFIRM.equals(session.getCurrentPhase())) {
+        response.put("success", false);
+        response.put("message", "크레딧 소진 컨펌 대기 상태가 아닙니다.");
+        return response;
+      }
+      // (REQ-002) 거절 규칙은 바로 위 컨펌 대기 검사 '다음'에 둔다 — 순서를 바꾸면 "컨펌 대기
+      // 상태가 아닙니다" 안내가 거절 문구로 바뀌어 기존 계약이 깨진다. 모델 전환보다는 앞이라
+      // 거절된 컨펌은 세션에 아무 부작용도 남기지 않는다.
+      Map<String, Object> rejection = resumeEntryRejection(session);
+      if (rejection != null) {
+        return rejection;
+      }
+      String failoverModelKey = session.getFailoverModelKey();
+      if (failoverModelKey == null || failoverModelKey.isBlank()) {
+        response.put("success", false);
+        response.put("message", "failover 대상 모델이 지정되어 있지 않습니다.");
+        return response;
+      }
 
-    // resumePendingFilesInThread()에서도 동일한 검사를 하지만, 재개할 파일이 아예 없는 비정상
-    // 상태에서는 모델 전환(claudeService.setModel) 같은 부작용을 남기지 않고 그대로 거부하기 위해
-    // 여기서 먼저 확인한다.
-    if (session.getPendingFilePaths().isEmpty()) {
-      response.put("success", false);
-      response.put("message", "재개할 파일이 없습니다. 처음부터 새로 분석해 주세요.");
-      return response;
-    }
+      // resumePendingFilesInThread()에서도 동일한 검사를 하지만, 재개할 파일이 아예 없는 비정상
+      // 상태에서는 모델 전환(claudeService.setModel) 같은 부작용을 남기지 않고 그대로 거부하기 위해
+      // 여기서 먼저 확인한다.
+      if (session.getPendingFilePaths().isEmpty()) {
+        response.put("success", false);
+        response.put("message", "재개할 파일이 없습니다. 처음부터 새로 분석해 주세요.");
+        return response;
+      }
 
-    // (REQ-004) 모델 전환·컨펌 시각 기록 같은 부작용을 남기기 전에 원본 존재를 확인한다.
-    // 판정은 resumePendingFilesInThread()에서도 다시 일어나지만, 파일 상태는 그사이에도 바뀔 수
-    // 있으므로 두 지점에서 각각 보는 것이 맞다(저장된 판정을 재사용하지 않는다 — 게이트1 D2).
-    SessionSourceAvailability.Result confirmAvailability =
-        SessionSourceAvailability.check(session.getPendingFilePaths());
-    if (confirmAvailability.status() == SessionSourceAvailability.Status.MISSING) {
-      log.warn("[failover 컨펌 거부] 원본 소실 — sessionId={}, 대기={}개, 소실={}개",
-          sessionId, confirmAvailability.pendingCount(), confirmAvailability.missingCount());
-      response.put("success", false);
-      response.put("reason", "SOURCE_MISSING");
-      response.put("pendingCount", confirmAvailability.pendingCount());
-      response.put("missingCount", confirmAvailability.missingCount());
-      response.put("message", String.format(
-          "원본 소실 — 재개 불가: 분석 대상 원본 파일 %d개가 서버에 남아 있지 않습니다."
-              + " 이 분석 기록은 삭제되지 않고 그대로 남습니다. 처음부터 새로 분석해 주세요.",
-          confirmAvailability.missingCount()));
-      return response;
-    }
+      // (REQ-004) 모델 전환·컨펌 시각 기록 같은 부작용을 남기기 전에 원본 존재를 확인한다.
+      // 판정은 resumePendingFilesInThread()에서도 다시 일어나지만, 파일 상태는 그사이에도 바뀔 수
+      // 있으므로 두 지점에서 각각 보는 것이 맞다(저장된 판정을 재사용하지 않는다 — 게이트1 D2).
+      SessionSourceAvailability.Result confirmAvailability =
+          SessionSourceAvailability.check(session.getPendingFilePaths());
+      if (confirmAvailability.status() == SessionSourceAvailability.Status.MISSING) {
+        log.warn("[failover 컨펌 거부] 원본 소실 — sessionId={}, 대기={}개, 소실={}개",
+            sessionId, confirmAvailability.pendingCount(), confirmAvailability.missingCount());
+        response.put("success", false);
+        response.put("reason", "SOURCE_MISSING");
+        response.put("pendingCount", confirmAvailability.pendingCount());
+        response.put("missingCount", confirmAvailability.missingCount());
+        response.put("message", String.format(
+            "원본 소실 — 재개 불가: 분석 대상 원본 파일 %d개가 서버에 남아 있지 않습니다."
+                + " 이 분석 기록은 삭제되지 않고 그대로 남습니다. 처음부터 새로 분석해 주세요.",
+            confirmAvailability.missingCount()));
+        return response;
+      }
 
-    // setModel()은 sourceFolderPath(세션의 소스 경로)를 키로 세션별 모델 오버라이드를 저장한다
-    // (2026-08-20 setModel 레이스컨디션 핫픽스 이후의 세션 격리 컨벤션) — runAnalysis()가
-    // claudeService.setModel(Path.of(sourcePath).toString(), ...)로 호출하는 것과 동일한 정규화.
-    claudeService.setModel(Path.of(session.getSourcePath()).toString(), failoverModelKey);
-    session.setFailoverConfirmedAt(LocalDateTime.now());
-    log.info("[failover 컨펌] sessionId={}, model={}", sessionId, failoverModelKey);
+      // setModel()은 sourceFolderPath(세션의 소스 경로)를 키로 세션별 모델 오버라이드를 저장한다
+      // (2026-08-20 setModel 레이스컨디션 핫픽스 이후의 세션 격리 컨벤션) — runAnalysis()가
+      // claudeService.setModel(Path.of(sourcePath).toString(), ...)로 호출하는 것과 동일한 정규화.
+      claudeService.setModel(Path.of(session.getSourcePath()).toString(), failoverModelKey);
+      session.setFailoverConfirmedAt(LocalDateTime.now());
+      log.info("[failover 컨펌] sessionId={}, model={}", sessionId, failoverModelKey);
 
-    Map<String, Object> resumeResponse = resumePendingFilesInThread(session, sessionId);
-    if (Boolean.TRUE.equals(resumeResponse.get("success"))) {
-      resumeResponse.put("message", String.format(
-          "자체 LLM(%s)으로 이어서 분석합니다. (남은 파일: %s개)",
-          failoverModelKey, resumeResponse.get("pendingCount")));
-      resumeResponse.put("failoverModelKey", failoverModelKey);
+      Map<String, Object> resumeResponse = resumePendingFilesInThread(session, sessionId);
+      if (Boolean.TRUE.equals(resumeResponse.get("success"))) {
+        resumeResponse.put("message", String.format(
+            "자체 LLM(%s)으로 이어서 분석합니다. (남은 파일: %s개)",
+            failoverModelKey, resumeResponse.get("pendingCount")));
+        resumeResponse.put("failoverModelKey", failoverModelKey);
+      }
+      return resumeResponse;
+    } finally {
+      resumeEntryHolders.remove(sessionId);
     }
-    return resumeResponse;
+  }
+
+  /**
+   * (REQ-002 / O40·O41) '이어서 분석' 두 입구가 함께 쓰는 거절 규칙 — ① 취소된 분석 ② 이미 진행 중.
+   * 거절할 이유가 없으면 {@code null}을 돌려주고, 어느 경우에도 세션에는 1비트도 쓰지 않는다.
+   *
+   * <p>"진행 중"은 {@code currentPhase}(메모리 전용 신호)로만 판정한다. {@code status}의
+   * {@code IN_PROGRESS}로 판정하면 생성 직후 세션과, 상태를 고치기 전 옛 코드가 DB에 남긴
+   * 재개 대상 기록까지 재개할 수 없게 된다.
+   *
+   * @param session 점유에 성공한 요청이 받은 세션. {@code null}이면 점유 실패(= 같은 세션 ID에 다른
+   *     재개 요청이 이미 들어와 있다)를 뜻하고, 그 경우는 ② 이미 진행 중으로 거절한다.
+   */
+  private Map<String, Object> resumeEntryRejection(SessionState session) {
+    boolean cancelled = session != null
+        && (session.isCancelled()
+            || "CANCELLED".equals(session.getStatus())
+            || "CANCELLED".equals(session.getCurrentPhase()));
+    String phase = session == null ? null : session.getCurrentPhase();
+    boolean inProgress = session == null
+        || "ANALYZING".equals(phase) || "COPYING".equals(phase) || "FINALIZING".equals(phase);
+    if (!cancelled && !inProgress) {
+      return null;
+    }
+    Map<String, Object> rejection = new HashMap<>();
+    rejection.put("success", false);
+    rejection.put("reason", cancelled ? "SESSION_CANCELLED" : "RESUME_IN_PROGRESS");
+    rejection.put("message", cancelled
+        ? "취소된 분석은 이어서 분석할 수 없습니다. 처음부터 새로 분석해 주세요."
+        : "이미 이어서 분석이 진행 중입니다. 잠시 후 진행 상황을 확인해 주세요.");
+    return rejection;
   }
 
   /**

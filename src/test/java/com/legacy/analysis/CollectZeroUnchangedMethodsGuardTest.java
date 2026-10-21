@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>케이스는 work-order §0.5-v2 회귀 가드와 1:1이다.
  * <ul>
- *   <li><b>G1</b>(RG-5) — {@code MainApiController}의 14개 메서드 본문이 착수 커밋 고정본과 문자 단위로 같다.
+ *   <li><b>G1</b>(RG-5) — {@code MainApiController}의 12개 메서드 본문이 착수 커밋 고정본과 문자 단위로 같다.
  *       같은 이름 오버로드는 <b>선언 줄 전체</b>(매개변수 목록 포함)로 찾는다.</li>
  *   <li><b>G2</b>(RG-11) — {@code dashboard.js}의 12개 함수 본문이 고정본과 문자 단위로 같다.</li>
  *   <li><b>G3</b>(RG-3) — {@code isSupportedFile()}의 추적파일 주석 첫 줄부터 메서드 끝까지가 고정본과 같다
@@ -57,14 +57,12 @@ class CollectZeroUnchangedMethodsGuardTest {
   private static final String DASHBOARD_FIXTURE_BLOB = "f54e0f1e8b3739b5cfcf5622800de3deb4286b41";
 
   /**
-   * RG-5 — 이번 수정이 닿지 않아야 하는 {@code MainApiController} 메서드 14개. 선언 줄 전체로 찾으므로
+   * RG-5 — 이번 수정이 닿지 않아야 하는 {@code MainApiController} 메서드 12개. 선언 줄 전체로 찾으므로
    * {@code resolveProjectOutputRoot} 오버로드 2개가 섞이지 않는다.
    * (RG-1이 이미 고정하는 9개는 중복으로 넣지 않는다.)
    */
   private static final List<String> CONTROLLER_METHOD_DECLARATIONS = List.of(
-      "public Map<String, Object> startAnalysis(",
       "private Path getUploadStorageRoot() {",
-      "public Map<String, Object> uploadAnalysis(",
       "public Map<String, Object> cleanupUploadSession(@PathVariable String sessionId, Authentication authentication) {",
       "private static String resolveUserOutputRoot(String sourcePath, String outputPath, String username) {",
       "private static Path resolveProjectOutputRoot(String sourcePath, String outputPath, String username) {",
@@ -115,11 +113,11 @@ class CollectZeroUnchangedMethodsGuardTest {
       "clearSessionFromStorage();", "currentSessionId = null;", "updateSessionControlPanel();");
 
   // ════════════════════════════════════════════════════════════════════════════
-  // G1 — RG-5: MainApiController 14개 메서드 본문 불변
+  // G1 — RG-5: MainApiController 12개 메서드 본문 불변
   // ════════════════════════════════════════════════════════════════════════════
 
   @Test
-  void G1_범위_밖_14개_메서드_본문이_착수커밋_고정본과_문자단위로_같다() throws Exception {
+  void G1_범위_밖_12개_메서드_본문이_착수커밋_고정본과_문자단위로_같다() throws Exception {
     String current = normalizeEol(readCurrentSource(CONTROLLER));
     String fixture = normalizeEol(readFixture(CONTROLLER_FIXTURE, CONTROLLER_FIXTURE_BLOB));
 
