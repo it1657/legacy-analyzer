@@ -97,11 +97,11 @@ class RetryClassificationUnchangedGuardTest {
   private static final Map<String, String> FILE_TARGETS = new LinkedHashMap<>();
 
   static {
-    // 기대값 출처 — 2026-10-resume-entry-guard TASK-004: 재개·시작 입구 거절(O40·O41·O45)로
-    // MainApiController.java가 바뀌었으므로 커밋 59dacb1a 기준으로 갱신했다.
-    // 계산법은 종전과 같다(LF 정규화 사본의 git blob SHA-1). 명령 원문은 05-dev-progress.md 004-S2.
+    // 기대값 출처 — 2026-10-history-total-and-mfc TASK-004: 완료 이력 총계 한 줄 수정(TASK-003)으로
+    // MainApiController.java가 바뀌어 커밋 7faa07b 기준으로 갱신했다. 계산법은 종전과 같다
+    // (작업 트리 사본을 LF 정규화한 뒤 git hash-object). 명령 원문은 05-dev-progress.md 1016행.
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/MainApiController.java",
-        "79b3914a289ec0a9323aa1cb2fa69b09f1bf6237");
+        "1f0eeedad0af42d3393aa6898c30a300b43aa15d");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/SessionState.java",
         "d73eaeca4b1b951c5aa4931dafa95b46293ddc6e");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/AnalysisException.java",

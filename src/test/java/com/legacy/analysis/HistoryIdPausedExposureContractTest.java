@@ -36,9 +36,13 @@ class HistoryIdPausedExposureContractTest {
   /** `git rev-parse 7cad9d1:src/main/java/com/legacy/analysis/MainApiController.java` */
   private static final String FIXTURE_BLOB_SHA1 = "18a0b953e8842fac593a8ff0f34beaab032b9c4a";
 
-  /** 착수 커밋의 {@code finalizeAnalysis} 본문 sha256 — RG-2(정상 완료 경로 불변). */
+  /**
+   * 기준 커밋 {@code 7faa07b}의 {@code finalizeAnalysis} 본문 sha256 — RG-2(정상 완료 경로 불변).
+   * 계산법: 작업 트리 원문을 정규화 없이 읽어 {@code methodBodyRaw} 범위를 UTF-8 sha256으로 잰다
+   * (2026-10-history-total-and-mfc TASK-004 · 명령 원문 05-dev-progress.md 1016행).
+   */
   private static final String FINALIZE_ANALYSIS_BODY_SHA256 =
-      "a39a2c7e9c65535d6bbc34d9cc624e02d733d4d2ab30231c395fcad83bbeb5bc";
+      "2eb96dd1e9ba4b9257b95060a491dae0bc473c790745e617f897db9d6008a5d7";
 
   private static final String HISTORY_ID_ASSIGN = "dto.setHistoryId(Long.parseLong(historyIdStr))";
   private static final String COMPLETED_ONLY_BLOCK = "if (\"COMPLETED\".equals(phase)) {";

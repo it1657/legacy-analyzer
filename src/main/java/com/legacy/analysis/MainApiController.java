@@ -2578,7 +2578,9 @@ public class MainApiController {
       // AnalysisHistory 업데이트
       if (history != null) {
         int curFailCount = session.getStatistics().getFailureCount();
-        history.setTotalFiles(successCount + alreadyProcessedCount + skipCount + curFailCount);
+        // 완료 이력의 총 파일 수는 세션이 처음 잡은 전체 파일 수를 쓴다 — 두 루프가 건너뛴
+        // 파일은 어느 칸에도 세어지지 않아 합계식 총계가 실제보다 적게 나왔다(다른 7곳과 같은 식).
+        history.setTotalFiles(session.getTotalFiles());
         history.setSuccessCount(successCount);
         history.setSkipCount(alreadyProcessedCount);
         history.setFailureCount(curFailCount);

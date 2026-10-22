@@ -595,4 +595,107 @@ class MainApiControllerResumeEntryGuardTest {
     assertSessionNotFound(firstConfirm, "C9 컨펌 첫");
     assertSessionNotFound(secondConfirm, "C9 컨펌 둘째");
   }
+
+  // ===================================================================
+  // C10 — 점유 해제(성공 경로로 입구를 떠난 뒤에도 점유표가 비어 있다)
+  // ===================================================================
+
+  /**
+   * C10 전용 — 4·6단계 실패 메시지에 붙이는 판정.
+   *
+   * <p>가림의 세 원천(① 1단계 뒤 {@code currentPhase}가 {@code ANALYZING}이라 "진행 중" 규칙이
+   * 먼저 거절함 ② 1단계가 대기 목록을 비움 ③ 컨펌은 컨펌 대기 상태여야 함)을 2·3·5단계에서 모두
+   * 막았다. 그래서 이 자리의 {@code RESUME_IN_PROGRESS}는 점유 누수 말고는 원인이 없다.
+   */
+  private static final String C10_LEAK_VERDICT =
+      "바로 앞 전제 단언이 GREEN이므로 이 상태에서 RESUME_IN_PROGRESS는 점유 누수뿐이다";
+
+  /**
+   * C10 전용 — 루프의 일시정지 분기가 했을 일(대기 목록 다시 쓰기 · 일시정지 확정 표시)을 시험이
+   * 대신 한다. 재개 스레드는 mock이 {@code null}을 줘서 아무 일도 안 하고 끝나기 때문이다.
+   */
+  private void c10SettlePause(SessionState session, List<String> pending) {
+    session.setPendingFilePaths(pending);
+    session.setPauseSettled(Boolean.TRUE);
+  }
+
+  /** C10 전용 — 5·6단계의 컨펌 대기 상태(모델 키·대기 목록 포함)로 맞춘다. */
+  private void c10ArmFailoverConfirm(SessionState session, List<String> pending) {
+    session.setCurrentPhase(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+    session.setStatus(SessionState.STATUS_AWAITING_FAILOVER_CONFIRM);
+    session.setFailoverModelKey(FAILOVER_MODEL);
+    session.setPendingFilePaths(pending);
+  }
+
+  /**
+   * C10 전용 — 가림 방지 전제 단언. 거절 규칙(취소 · 이미 진행 중)과 "재개할 파일이 없습니다"가
+   * 걸릴 수 없는 상태인지를 판정 단언보다 <b>먼저</b> 확인한다. 점유표 필드는 들여다보지 않고
+   * 입구의 응답으로만 판정한다(C9와 같은 행동 관찰 방식).
+   */
+  private void c10AssertNotMasked(SessionState session, String expectedPhase, String label) {
+    assertEquals(expectedPhase, session.getCurrentPhase(),
+        label + " 전제: currentPhase. 스냅샷=" + snapshot(session));
+    assertFalse(session.isCancelled(),
+        label + " 전제: 취소 표시가 켜져 있다. 스냅샷=" + snapshot(session));
+    assertFalse("CANCELLED".equals(session.getStatus()),
+        label + " 전제: status가 CANCELLED다. 스냅샷=" + snapshot(session));
+    List<String> pending = session.getPendingFilePaths();
+    assertFalse(pending.isEmpty(),
+        label + " 전제: 대기 목록이 비어 있다. 스냅샷=" + snapshot(session));
+    for (String path : pending) {
+      assertTrue(Files.exists(Path.of(path)), label + " 전제: 대기 파일이 서버에 없다: " + path);
+    }
+  }
+
+  @Test
+  void C10_성공한_이어서와_컨펌이_입구를_떠난_뒤에도_점유가_풀려_같은_세션에_다시_성공한다() throws Exception {
+    SessionState session = plainSession("PAUSED", "C10.java");
+    List<String> c10Pending = List.copyOf(session.getPendingFilePaths());
+    stubGetSession(session);
+
+    // 1단계 — 일시정지 세션에 이어서 분석. 성공 경로로 입구를 떠난다.
+    Map<String, Object> firstResume = resume();
+    System.out.println("[C10 1단계 이어서 응답] " + firstResume);
+    assertEquals(true, firstResume.get("success"), "C10 1단계 이어서가 성공해야 한다: " + firstResume);
+    awaitResumeThreadsFor(1);
+
+    // 2단계 — 실제 일시정지 입구를 부르고, 루프가 했을 대기 목록 확정을 시험이 대신 한다.
+    Map<String, Object> pause =
+        controller.pauseSession(Map.of("sessionId", "sid"), authAs("owner"));
+    System.out.println("[C10 2단계 일시정지 응답] " + pause);
+    assertEquals(true, pause.get("success"), "C10 2단계 일시정지가 성공해야 한다: " + pause);
+    c10SettlePause(session, c10Pending);
+
+    // 3단계 — 가림 방지 전제.
+    c10AssertNotMasked(session, "PAUSED", "C10 3단계");
+    System.out.println("[C10 3단계 전제 스냅샷] " + snapshot(session));
+
+    // 4단계 — 이어서 분석을 다시. 1단계 점유가 남아 있으면 여기서 ② 거절로 바뀐다.
+    Map<String, Object> secondResume = resume();
+    System.out.println("[C10 4단계 이어서 응답] " + secondResume);
+    assertEquals(true, secondResume.get("success"),
+        "C10 4단계 이어서가 성공해야 한다 — " + C10_LEAK_VERDICT + ". 응답=" + secondResume);
+    awaitResumeThreadsFor(1);
+
+    // 5단계 — 컨펌 대기로 맞춘 뒤 컨펌. 성공 경로로 컨펌 입구를 떠난다.
+    c10ArmFailoverConfirm(session, c10Pending);
+    c10AssertNotMasked(session, SessionState.STATUS_AWAITING_FAILOVER_CONFIRM, "C10 5단계");
+    Map<String, Object> firstConfirm = confirm();
+    System.out.println("[C10 5단계 컨펌 응답] " + firstConfirm);
+    assertEquals(true, firstConfirm.get("success"), "C10 5단계 컨펌이 성공해야 한다: " + firstConfirm);
+    awaitResumeThreadsFor(1);
+
+    // 6단계 — 같은 맞춤을 한 번 더. 5단계 점유가 남아 있으면 여기서 ② 거절로 바뀐다.
+    c10ArmFailoverConfirm(session, c10Pending);
+    c10AssertNotMasked(session, SessionState.STATUS_AWAITING_FAILOVER_CONFIRM, "C10 6단계");
+    Map<String, Object> secondConfirm = confirm();
+    System.out.println("[C10 6단계 컨펌 응답] " + secondConfirm);
+    assertEquals(true, secondConfirm.get("success"),
+        "C10 6단계 컨펌이 성공해야 한다 — " + C10_LEAK_VERDICT + ". 응답=" + secondConfirm);
+    awaitResumeThreadsFor(1);
+
+    System.out.println("[C10 기동된 재개 스레드] " + resumeThreads.size() + "개 " + resumeThreads);
+    assertEquals(4, resumeThreads.size(),
+        "성공 4건(1·4·5·6단계)에 대응하는 재개 스레드 수가 4가 아니다: " + resumeThreads);
+  }
 }

@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>두 종류를 본다.
  * <ul>
- *   <li><b>ⓐ 메서드 본문</b> — 화이트리스트 5파일 중 "0행"으로 지정된 메서드 31개. 같은 파일 안에서
+ *   <li><b>ⓐ 메서드 본문</b> — 화이트리스트 5파일 중 "0행"으로 지정된 메서드 30개. 같은 파일 안에서
  *       허용된 편집(재기준 호출·이력 4줄·안내 1줄 등)과 구분하려면 보호 단위가 파일이 아니라
  *       메서드 본문이어야 한다.</li>
  *   <li><b>ⓑ 파일 전체</b> — 바이트 단위로 고정해 두는 13파일(범위 밖 프로덕션·프런트·설정 +
@@ -64,7 +64,7 @@ class CounterIntegrityUnchangedMethodsGuardTest {
           "src/main/java/com/legacy/analysis/MainApiController.java",
           "/counterintegrity/MainApiController.java.before-9b5906b.txt",
           "4b6133bb81223980cd66df3f0a7173ab9c77b9ba",
-          List.of("finalizeAnalysis", "settlePauseAtTerminal", "handleCreditExhaustedPause",
+          List.of("settlePauseAtTerminal", "handleCreditExhaustedPause",
               "pauseSession", "cancelSession",
               "analyzeFile", "getAnalysisStatus")),
       new BodyTarget("SessionState",
@@ -88,8 +88,8 @@ class CounterIntegrityUnchangedMethodsGuardTest {
           List.of("isRetryable", "calculateRetryDelay",
               "getUserFriendlyMessage", "getDetailedErrorLog", "logError")));
 
-  /** 지정된 0행 메서드 수(7 + 10 + 9 + 5). 목록이 조용히 줄어드는 것을 막는다. */
-  private static final int EXPECTED_METHOD_COUNT = 31;
+  /** 지정된 0행 메서드 수(6 + 10 + 9 + 5). 목록이 조용히 줄어드는 것을 막는다. */
+  private static final int EXPECTED_METHOD_COUNT = 30;
 
   // ===================================================================
   // ⓑ 파일 무변경 대상 — 기대값은 LF 정규화 후 git blob SHA-1
