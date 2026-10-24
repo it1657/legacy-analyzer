@@ -1932,6 +1932,12 @@ public class MainApiController {
 
             FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
                 sourceRootPath, isForceActive, finalOutPath);
+            // (O15) analyzeFile 입구에서 정지 신호를 보고 처리하지 않은 파일은 루프 맨 앞에서 멈춘
+            // 파일과 똑같이 다룬다 — 완료 목록에 넣지 않아 대기에 남기고, 일시정지면 일시정지로 끝낸다.
+            if ("SKIPPED".equals(fileState.getStatus()) && "CANCELLED".equals(fileState.getErrorType())) {
+              if (!session.isCancelled()) pauseDetected.set(true);
+              return;
+            }
 
             // 카운터 업데이트
             // completedFilePaths는 "더 이상 재처리할 필요가 없는 파일"을 의미하므로
@@ -1991,8 +1997,11 @@ public class MainApiController {
                   relativeSubPath.toString().replace("\\", "/")));
             }
 
-          } catch (Exception e) {
+          } catch (Throwable e) {
             log.error("[파일 분석 중 예외 - #{}]", fileIndex, e);
+            // (O43) analyzeFile 밖에서 끝난 파일도 실패로 센다 — 완료 목록에는 넣지 않으므로 대기에 남는다.
+            session.addFailedFilePath(fileList.get(fileIndex).toString());
+            session.getStatistics().incrementFailureCount();
             processedTotal.incrementAndGet();
           } finally {
             latch.countDown();
@@ -2265,6 +2274,12 @@ public class MainApiController {
 
             FileAnalysisState fileState = analyzeFile(sessionId, filePath, targetPath,
                 sourceRootPath, isForceActive, finalOutPath);
+            // (O15) analyzeFile 입구에서 정지 신호를 보고 처리하지 않은 파일은 루프 맨 앞에서 멈춘
+            // 파일과 똑같이 다룬다 — 완료 목록에 넣지 않아 대기에 남기고, 일시정지면 일시정지로 끝낸다.
+            if ("SKIPPED".equals(fileState.getStatus()) && "CANCELLED".equals(fileState.getErrorType())) {
+              if (!session.isCancelled()) pauseDetected.set(true);
+              return;
+            }
 
             // 재개 시도 결과가 이번에 새로 나왔으므로, 이전 시도(들)의 실패 기록을 먼저 걷어낸다.
             // FAILED로 다시 끝나면 바로 아래 FAILED 분기가 즉시 재등록한다 — "failedFilePaths = 가장
@@ -2314,8 +2329,11 @@ public class MainApiController {
               session.addRecentLog(String.format("[재개 진행] %s %d/%d (%d%%) - %s",
                   icon, processed, totalFiles, pct, relPath.toString().replace("\\", "/")));
             }
-          } catch (Exception e) {
+          } catch (Throwable e) {
             log.error("[재개 파일 분석 예외 - #{}]", idx, e);
+            // (O43) analyzeFile 밖에서 끝난 파일도 실패로 센다 — 완료 목록에는 넣지 않으므로 대기에 남는다.
+            session.addFailedFilePath(fileList.get(idx).toString());
+            session.getStatistics().incrementFailureCount();
             processedTotal.incrementAndGet();
           } finally {
             latch.countDown();

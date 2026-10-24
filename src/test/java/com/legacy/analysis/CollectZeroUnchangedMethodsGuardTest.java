@@ -42,6 +42,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * 실제로 잡는다"는 것을 같은 테스트 안에서 보인다. 변이는 메모리 문자열에만 하고 파일은 건드리지 않는다.
  *
  * <p>행번호는 적지 않는다(G-08) — 찾는 기준은 선언 줄·함수 이름·주석 첫 줄 문자열이다.
+ *
+ * <p><b>TASK-005(2026-10-interrupted-file-reanalysis)</b> — O15·O43 수정이 {@code executor.submit} 람다 안에만
+ * 들어가므로 G1·G5는 <b>그 람다 블록만</b> 자리표시로 가린 뒤 비교한다(가린 안쪽은 그 사이클 시험 몫).
  */
 class CollectZeroUnchangedMethodsGuardTest {
 
@@ -124,8 +127,10 @@ class CollectZeroUnchangedMethodsGuardTest {
     List<String> violations = new ArrayList<>();
     int compared = 0;
     for (String declaration : CONTROLLER_METHOD_DECLARATIONS) {
-      String currentBody = javaMethodBody(current, "MainApiController(현재)", declaration);
-      String fixtureBody = javaMethodBody(fixture, "MainApiController(고정본)", declaration);
+      String currentBody = withSubmitLambdaMasked(
+          javaMethodBody(current, "MainApiController(현재)", declaration), shortName(declaration) + "(현재)");
+      String fixtureBody = withSubmitLambdaMasked(
+          javaMethodBody(fixture, "MainApiController(고정본)", declaration), shortName(declaration) + "(고정본)");
       compared++;
 
       System.out.println("[G1] " + shortName(declaration)
@@ -151,6 +156,21 @@ class CollectZeroUnchangedMethodsGuardTest {
     assertTrue(sample.equals(sample), "같은 문자열을 다르다고 판정했다(비교기가 '항상 불일치'가 아님)");
     System.out.println("[G1 양성 대조군] " + shortName(CONTROLLER_METHOD_DECLARATIONS.get(0))
         + " 1글자 변이 → 불일치 검출");
+
+    // 양성 대조군(가림) — 제출 람다는 runAnalysisResume에서만 정확히 1번 가려지고, 람다 뒤 기준점 두 개는
+    // 가린 본문에 그대로 남는다. 가림이 람다 뒤를 더 먹으면 여기서 걸린다.
+    String resumeCurrent = withSubmitLambdaMasked(javaMethodBody(current, "MainApiController(현재)",
+        "private void runAnalysisResume(String sessionId, List<Path> fileList) {"), "runAnalysisResume(현재) 대조");
+    String resumeFixture = withSubmitLambdaMasked(javaMethodBody(fixture, "MainApiController(고정본)",
+        "private void runAnalysisResume(String sessionId, List<Path> fileList) {"), "runAnalysisResume(고정본) 대조");
+    assertEquals(1, countOccurrences(resumeCurrent, "[제출 람다 — 2026-10 틈·예외 수정 칸]"),
+        "현재 runAnalysisResume에서 제출 람다가 정확히 1번 가려지지 않았다");
+    assertEquals(1, countOccurrences(resumeFixture, "[제출 람다 — 2026-10 틈·예외 수정 칸]"),
+        "고정본 runAnalysisResume에서 제출 람다가 정확히 1번 가려지지 않았다");
+    assertTrue(resumeCurrent.contains("latch.await();") && resumeCurrent.contains("finalizeAnalysis("),
+        "가림이 람다 뒤까지 먹었다 — 현재 runAnalysisResume 가린 본문에 기준점 2개가 남지 않았다");
+    assertTrue(resumeFixture.contains("latch.await();") && resumeFixture.contains("finalizeAnalysis("),
+        "가림이 람다 뒤까지 먹었다 — 고정본 runAnalysisResume 가린 본문에 기준점 2개가 남지 않았다");
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -292,8 +312,10 @@ class CollectZeroUnchangedMethodsGuardTest {
     String current = normalizeEol(readCurrentSource(CONTROLLER));
     String fixture = normalizeEol(readFixture(CONTROLLER_FIXTURE, CONTROLLER_FIXTURE_BLOB));
 
-    String currentMasked = runAnalysisWithZeroBranchMasked(current, "MainApiController(현재)");
-    String fixtureMasked = runAnalysisWithZeroBranchMasked(fixture, "MainApiController(고정본)");
+    String currentMasked = withSubmitLambdaMasked(
+        runAnalysisWithZeroBranchMasked(current, "MainApiController(현재)"), "runAnalysis(현재)");
+    String fixtureMasked = withSubmitLambdaMasked(
+        runAnalysisWithZeroBranchMasked(fixture, "MainApiController(고정본)"), "runAnalysis(고정본)");
 
     System.out.println("[G5] 현재 첫줄=" + firstLine(currentMasked) + " | 현재 끝줄=" + lastLine(currentMasked));
     System.out.println("[G5] 길이 현재/고정본=" + currentMasked.length() + "/" + fixtureMasked.length()
@@ -309,6 +331,16 @@ class CollectZeroUnchangedMethodsGuardTest {
     String mutated = mutateOneChar(fixtureMasked);
     assertFalse(fixtureMasked.equals(mutated), "1글자 변이를 같다고 판정했다 — 비교기가 결함을 못 잡는다");
     System.out.println("[G5 양성 대조군] 가린 본문 1글자 변이 → 불일치 검출");
+
+    // 양성 대조군(가림) — 제출 람다가 정확히 1번 가려지고, 람다 뒤 기준점 두 개는 가린 본문에 남는다.
+    assertEquals(1, countOccurrences(currentMasked, "[제출 람다 — 2026-10 틈·예외 수정 칸]"),
+        "현재 runAnalysis에서 제출 람다가 정확히 1번 가려지지 않았다");
+    assertEquals(1, countOccurrences(fixtureMasked, "[제출 람다 — 2026-10 틈·예외 수정 칸]"),
+        "고정본 runAnalysis에서 제출 람다가 정확히 1번 가려지지 않았다");
+    assertTrue(currentMasked.contains("latch.await();") && currentMasked.contains("finalizeAnalysis("),
+        "가림이 람다 뒤까지 먹었다 — 현재 runAnalysis 가린 본문에 기준점 2개가 남지 않았다");
+    assertTrue(fixtureMasked.contains("latch.await();") && fixtureMasked.contains("finalizeAnalysis("),
+        "가림이 람다 뒤까지 먹었다 — 고정본 runAnalysis 가린 본문에 기준점 2개가 남지 않았다");
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -440,6 +472,35 @@ class CollectZeroUnchangedMethodsGuardTest {
       return fail(where + ": 0건 분기의 닫는 중괄호를 찾지 못했다");
     }
     return body.substring(0, at) + ZERO_BRANCH_PLACEHOLDER + body.substring(close + 1);
+  }
+
+  /**
+   * 메서드 본문에서 {@code executor.submit} 람다 블록만 자리표시로 가린 문자열(TASK-005 — O15·O43 수정이
+   * 전부 이 람다 안이라 가림 뒤 나머지를 고정본과 비교한다). 블록이 <b>정확히 1개</b>면 그 여는 중괄호부터
+   * 짝 맞는 닫는 중괄호까지를 바꾸고, <b>0개</b>면 본문을 그대로 돌려준다(람다가 없는 메서드). <b>2개
+   * 이상</b>이면 가릴 범위가 모호하니 G-02대로 멈춘다. 가린 구간의 첫 줄·끝 줄·길이를 함께 출력해
+   * 가림 범위를 눈으로 확인할 수 있게 한다.
+   */
+  private static String withSubmitLambdaMasked(String body, String where) {
+    String head = "executor.submit(() -> {";
+    String placeholder = "[제출 람다 — 2026-10 틈·예외 수정 칸]";
+    int occurrences = countOccurrences(body, head);
+    if (occurrences == 0) {
+      return body;
+    }
+    if (occurrences != 1) {
+      return fail(where + ": " + head + "가 " + occurrences
+          + "개다(기대 0개 또는 1개) — 가릴 범위가 모호하니 G-02대로 멈춘다");
+    }
+    int open = body.indexOf('{', body.indexOf(head));
+    int close = matchingBrace(body, open);
+    if (close < 0) {
+      return fail(where + ": 제출 람다의 닫는 중괄호를 찾지 못했다");
+    }
+    String hidden = body.substring(open, close + 1);
+    System.out.println("[람다 가림] " + where + " | 가린 구간 첫 줄=" + firstLine(hidden)
+        + " | 가린 구간 끝 줄=" + lastLine(hidden) + " | 가린 길이=" + hidden.length());
+    return body.substring(0, open) + placeholder + body.substring(close + 1);
   }
 
   private static int matchingBrace(String source, int open) {

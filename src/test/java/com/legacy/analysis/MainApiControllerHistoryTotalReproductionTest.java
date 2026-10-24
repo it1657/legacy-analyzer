@@ -60,10 +60,11 @@ import static org.mockito.Mockito.when;
  * 표지 문구의 {@code RuntimeException}을 던진다. 지정은 <b>그 자리 안 순번</b>으로만 센다
  * (스레드 풀 크기가 1이라 파일 처리 순서가 정해진다).
  *
- * <p><b>단언을 거는 곳</b>: 총계 단언은 <b>고친 뒤 기대값(세션 총계 6)</b>에 건다 — 고치기 전에는
- * 이 한 줄에서만 RED여야 하고, 성공·건너뜀·실패 3칸과 하네스 유효성 단언은 고치기 전·후 모두
- * GREEN이어야 한다("그 열은 안 바뀐다"의 증거). 틈에 걸린 파일이 다시 분석되지 않는다는 모습(O15)은
- * {@code System.out} 출력으로만 남기고 단언하지 않는다(게이트1 ⑤).
+ * <p><b>단언을 거는 곳</b>: 총계 단언은 <b>고친 뒤 기대값(세션 총계 6)</b>에 건다. "성공·건너뜀·실패
+ * 3칸은 고치기 전·후 불변"은 이번 사이클(2026-10-interrupted-file-reanalysis TASK-002·003)이 세 길의
+ * 뒤처리를 고치면서 깨졌다 — 틈에 걸린 파일은 대기로 돌아가 재개에서 분석되고(HT1·HT2는 재개 단계를
+ * 더해 6/6/0/0), {@code analyzeFile} 밖 예외는 실패로 세어진다(HT3·HT4 실패 칸 0 → 1). 틈·예외에
+ * 걸린 파일의 모습(O15)은 여전히 {@code System.out} 출력으로만 남기고 단언하지 않는다(게이트1 ⑤).
  *
  * <p><b>하네스 충실도</b>: 선례 {@code ResumeHistoryCounterSyncTest}의 교정 3건을 승계한다 —
  * ① {@code initializeFileList} 목이 실제 구현처럼 세션 총계를 채운다 ② 이력 카운터는 nullable
@@ -248,11 +249,17 @@ class MainApiControllerHistoryTotalReproductionTest {
     beginPhase("최초 실행", fileNames(1, FILE_COUNT));
     pauseAtLoopHead.set(FILE_COUNT);        // 6번째(마지막) 파일의 루프 맨 앞 — 그 자리 안 순번
     invokeRunAnalysis();
-
-    printObservation("HT1 ㉠ 최초 실행");
+    assertEquals("PAUSED", session.getCurrentPhase(),
+        "HT1 1단계: 최초 실행이 틈에 걸린 파일 때문에 일시정지로 끝나지 않았다. 순서 기록=" + callOrder);
+    // 틈 순서 단언은 재개 전에 — 재개 단계에서 F6이 루프 맨 앞을 다시 지나면 "=false" 기록이 더 생긴다.
     assertGapOrder("HT1", "F6.java");
-    assertHarnessValid("HT1", 1, 0, List.of("F1.java", "F2.java", "F3.java", "F4.java", "F5.java"));
-    assertHistoryTotals("HT1", FILE_COUNT, 5, 0, 0);
+
+    beginPhase("재개", fileNames(6, FILE_COUNT));
+    joinResume("재개");
+
+    printObservation("HT1 ㉠ 최초 실행 + 재개");
+    assertHarnessValid("HT1", 1, 0, fileNames(1, FILE_COUNT));
+    assertHistoryTotals("HT1", FILE_COUNT, FILE_COUNT, 0, 0);
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -270,16 +277,16 @@ class MainApiControllerHistoryTotalReproductionTest {
     beginPhase("재개 1", fileNames(3, FILE_COUNT));
     pauseAtLoopHead.set(1);                 // 첫 재개 파일(F3)의 루프 맨 앞
     joinResume("재개 1");
+    // 틈 순서 단언은 재개 1 직후에 — 재개 2에서 F3이 루프 맨 앞을 다시 지나면 기록이 하나 더 생긴다.
+    assertGapOrder("HT2", "F3.java");
     System.out.println("[HT2 재개 1 종료 뒤 대기 목록] " + session.getPendingFilePaths());
 
-    beginPhase("재개 2", fileNames(4, FILE_COUNT));
+    beginPhase("재개 2", fileNames(3, FILE_COUNT));
     joinResume("재개 2");
 
     printObservation("HT2 ㉡ 재개의 틈");
-    assertGapOrder("HT2", "F3.java");
-    assertHarnessValid("HT2", 1, 1,
-        List.of("F1.java", "F2.java", "F4.java", "F5.java", "F6.java"));
-    assertHistoryTotals("HT2", FILE_COUNT, 5, 0, 0);
+    assertHarnessValid("HT2", 1, 1, fileNames(1, FILE_COUNT));
+    assertHistoryTotals("HT2", FILE_COUNT, FILE_COUNT, 0, 0);
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -296,7 +303,7 @@ class MainApiControllerHistoryTotalReproductionTest {
     assertThrowOrder("HT3", "F3.java");
     assertHarnessValid("HT3", 1, 0,
         List.of("F1.java", "F2.java", "F4.java", "F5.java", "F6.java"));
-    assertHistoryTotals("HT3", FILE_COUNT, 5, 0, 0);
+    assertHistoryTotals("HT3", FILE_COUNT, 5, 0, 1);
   }
 
   @Test
@@ -315,7 +322,7 @@ class MainApiControllerHistoryTotalReproductionTest {
     assertThrowOrder("HT4", "F4.java");
     assertHarnessValid("HT4", 1, 1,
         List.of("F1.java", "F2.java", "F3.java", "F5.java", "F6.java"));
-    assertHistoryTotals("HT4", FILE_COUNT, 5, 0, 0);
+    assertHistoryTotals("HT4", FILE_COUNT, 5, 0, 1);
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -560,9 +567,9 @@ class MainApiControllerHistoryTotalReproductionTest {
   }
 
   /**
-   * 판정 — 성공·건너뜀·실패 3칸은 <b>현재 값</b>(고치기 전·후 불변)이고, 총계는
-   * <b>고친 뒤 기대값</b>(세션 전체 파일 수)이다. 3칸을 먼저 봐서 고치기 전 RED가 총계 한 줄에서만
-   * 나는지 알 수 있게 한다.
+   * 판정 — 3칸을 먼저 보고 총계를 뒤에 본다. 3칸은 <b>지금 동작의 값</b>이고(이번 사이클
+   * 2026-10-interrupted-file-reanalysis TASK-002·003이 틈·예외 뒤처리를 고치면서 HT1·HT2는 성공 6,
+   * HT3·HT4는 실패 1로 바뀌었다), 총계는 지난 사이클이 고친 뒤 기대값(세션 전체 파일 수)이다.
    */
   private void assertHistoryTotals(String label, int expectedTotal, int expectedSuccess,
       int expectedSkip, int expectedFailure) {
@@ -589,8 +596,9 @@ class MainApiControllerHistoryTotalReproductionTest {
         + " 처리=" + session.getProcessedFiles() + " phase=" + session.getCurrentPhase());
     System.out.println("[" + label + " 세션 대기 목록] " + session.getPendingFilePaths());
     System.out.println("[" + label + " 세션 실패 목록] " + session.getFailedFilePaths());
-    System.out.println("[" + label + " O15 관찰(단언 없음)] 틈·예외에 걸린 파일은 LLM에 가지 않았고"
-        + " 대기 목록에도 남지 않는다 — 다시 분석되지 않는다는 뜻이다. LLM에 간 파일 수="
+    System.out.println("[" + label + " O15 관찰(단언 없음)] 틈에 걸린 파일은 대기 목록에 남아 재개에서"
+        + " 다시 분석되고, analyzeFile 밖 예외로 끝난 파일은 실패로 세어진다 — 이번 사이클"
+        + "(2026-10-interrupted-file-reanalysis TASK-002·003)이 고친 결과다. LLM에 간 파일 수="
         + llmCalledFiles.size() + ", 세션 총계=" + session.getTotalFiles());
   }
 
