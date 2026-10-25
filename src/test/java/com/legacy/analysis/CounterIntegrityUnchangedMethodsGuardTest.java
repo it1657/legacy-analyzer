@@ -110,10 +110,12 @@ class CounterIntegrityUnchangedMethodsGuardTest {
         "7dd42286dd903e81fbefb4e559c8f52c6d73748b");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/UserActivityController.java",
         "98a227dd41acd58d63c11e15ce930863fd6ad05c");
-    // 2026-10 TASK-006(β-화면)에서 의도적으로 바꾼 파일이라 기대값을 갱신했다. 출처:
-    // git hash-object src/main/resources/static/js/dashboard.js
+    // 기대값 출처 — 2026-10-resume-tail-fixes TASK-005: 같은 화면에서 이어서 한 업로드 분석이 결과를
+    // 폴더에 돌려쓰도록 되살리는 두 줄(TASK-004)로 dashboard.js가 바뀌어 TASK-004 커밋 b990768
+    // 기준으로 갱신했다. 계산법은 종전과 같다(작업 트리 사본을 LF 정규화한 뒤 git hash-object).
+    // 명령 원문은 05-dev-progress.md 3938행.
     FILE_TARGETS.put("src/main/resources/static/js/dashboard.js",
-        "f9c0a7e9f1b578d130d0e198a57516e1ba955d7b");
+        "05c035f60c7d4525d6acf03df1f4f1db3e26b820");
     FILE_TARGETS.put("src/main/resources/templates/my-activity.html",
         "6d9f956224203de3c175e60f4e0fe52cf65896d7");
     FILE_TARGETS.put("src/main/resources/templates/admin/dashboard.html",

@@ -2002,7 +2002,7 @@ public class MainApiController {
             // (O43) analyzeFile 밖에서 끝난 파일도 실패로 센다 — 완료 목록에는 넣지 않으므로 대기에 남는다.
             session.addFailedFilePath(fileList.get(fileIndex).toString());
             session.getStatistics().incrementFailureCount();
-            processedTotal.incrementAndGet();
+            session.setProcessedFiles(processedTotal.incrementAndGet());
           } finally {
             latch.countDown();
           }
@@ -2334,7 +2334,7 @@ public class MainApiController {
             // (O43) analyzeFile 밖에서 끝난 파일도 실패로 센다 — 완료 목록에는 넣지 않으므로 대기에 남는다.
             session.addFailedFilePath(fileList.get(idx).toString());
             session.getStatistics().incrementFailureCount();
-            processedTotal.incrementAndGet();
+            session.setProcessedFiles(processedTotal.incrementAndGet());
           } finally {
             latch.countDown();
           }

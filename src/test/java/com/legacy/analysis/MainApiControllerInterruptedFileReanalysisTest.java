@@ -94,6 +94,14 @@ class MainApiControllerInterruptedFileReanalysisTest {
   private static final String ORDER_SUFFIX_THROW = "→ 표지 예외";
   private static final String ORDER_SUFFIX_ERROR = "→ 표지 Error";
 
+  /**
+   * (2026-10-resume-tail-fixes TASK-001) 하네스 추가 1종 — "LLM 지정 호출 1회 실패". 지정한 순번의
+   * LLM 호출에서만 이 표지 예외를 던진다. {@code maxRetries=0}이라 재시도 없이 그 파일만
+   * {@code FAILED}로 끝난다 — TF1이 "재개 틈에 걸린 파일의 이전 실패 기록이 남는가"를 보기 위해
+   * 최초 실행에서 실패 파일 1개를 만드는 데 쓴다.
+   */
+  private static final String LLM_FAILURE_MARKER = "테스트 대역 표지: LLM 지정 호출 1회 실패";
+
   /** 시험 전용 {@code Error} 하위 클래스 — {@code catch (Exception)}을 지나친다(O56). */
   static class HarnessInjectedError extends Error {
     HarnessInjectedError(String message) {
@@ -152,6 +160,11 @@ class MainApiControllerInterruptedFileReanalysisTest {
   private final AtomicInteger pauseOnCall = new AtomicInteger(0);
   private final AtomicInteger llmPauseRequests = new AtomicInteger(0);
   private final List<String> llmCalledFiles = new CopyOnWriteArrayList<>();
+  /** (TASK-001) 지정: 이 단계의 LLM 호출 몇 번째에서 표지 예외를 던질지(0 = 개입 없음). */
+  private final AtomicInteger failAtLlmCall = new AtomicInteger(0);
+  /** (TASK-001) 실제로 던진 LLM 실패 개입 수와 그 파일 — 하네스 유효성 단언의 입력. */
+  private final AtomicInteger llmInjectedFailures = new AtomicInteger(0);
+  private final List<String> llmFailedFiles = new CopyOnWriteArrayList<>();
 
   /** 기동된 재개 스레드 — 도착 순서대로 쌓고, 그 스레드를 join해서 종료를 기다린다. */
   private final List<Thread> resumeThreads = new CopyOnWriteArrayList<>();
@@ -250,6 +263,13 @@ class MainApiControllerInterruptedFileReanalysisTest {
             } else {
               harnessProblems.add("LLM 호출 " + n + "회차의 일시정지 요청 실패: " + pauseResponse);
             }
+          }
+          // (TASK-001) 지정한 LLM 호출 1회만 실패시킨다 — 그 파일은 FAILED로 끝나 실패 목록에 남는다.
+          if (n == failAtLlmCall.get()) {
+            llmInjectedFailures.incrementAndGet();
+            llmFailedFiles.add(fileName);
+            callOrder.add("LLM 호출 " + n + "회차(" + fileName + ") " + LLM_FAILURE_MARKER);
+            throw new RuntimeException(LLM_FAILURE_MARKER + " — 파일=" + fileName);
           }
           return STUB_COMMENT_PREFIX + "\n" + invocation.getArgument(0);
         });
@@ -642,6 +662,118 @@ class MainApiControllerInterruptedFileReanalysisTest {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
+  // TP — 예외로 끝난 파일의 세션 처리 수(O60). 고치기 전 RED
+  //
+  // (v2 §V2-1) TP1·TP2는 세션 처리 수 · 종료 phase · 마지막 이력 행 · 칸 합만 단언하고
+  // 실패 목록은 단언하지 않는다 — 실패 목록 줄은 IX1·IX2·IX3·IX5와 TF2가 지킨다. 그래서
+  // RV-2(최초 루프 catch의 실패 목록 줄 삭제)의 기대 집합에 TP가 끼지 않는다.
+  // 처리 수 단언을 맨 마지막에 둔다 — 고치기 전 RED 자리가 그 한 줄이 되게 하려는 것이다(RS-2).
+  // ────────────────────────────────────────────────────────────────────────────
+
+  @Test
+  void TP1_최초실행_루프본문_예외로_끝난_파일도_세션_처리수에_세어진다() throws Exception {
+    beginPhase("최초 실행", fileNames(1, FILE_COUNT));
+    throwAtLoopHead.set(FILE_COUNT);        // 6번째(마지막) 파일의 루프 맨 앞에서 표지 예외
+    invokeRunAnalysis();
+
+    printObservation("TP1 최초 실행");
+    assertThrowOrder("TP1", "F6.java", ORDER_SUFFIX_THROW);
+    assertHarnessValid("TP1", 1, 0, fileNames(1, 5));
+    assertPhase("TP1", "COMPLETED");
+    assertHistoryRow("TP1", "COMPLETED", FILE_COUNT, 5, 0, 1);
+    assertColumnSum("TP1");
+    assertSessionProcessedFiles("TP1", FILE_COUNT);
+  }
+
+  @Test
+  void TP2_재개_루프본문_예외로_끝난_파일도_세션_처리수에_세어진다() throws Exception {
+    beginPhase("최초 실행", fileNames(1, FILE_COUNT));
+    pauseOnCall.set(2);                     // F1·F2 성공 후 사용자 일시정지 → 대기 F3~F6
+    invokeRunAnalysis();
+
+    printObservation("TP2 1단계(최초 실행)");
+    assertHarnessValid("TP2 1단계", 0, 1, fileNames(1, 2));
+    assertPhase("TP2 1단계", "PAUSED");
+    assertPendingFileNames("TP2 1단계", fileNames(3, FILE_COUNT));
+    assertHistoryRow("TP2 1단계", "PAUSED", FILE_COUNT, 2, 0, 0);
+
+    beginPhase("재개", fileNames(3, FILE_COUNT));
+    throwAtLoopHead.set(4);                 // 이 재개 단계의 마지막 파일(F6)의 루프 맨 앞
+    joinResume("재개");
+
+    printObservation("TP2 2단계(재개)");
+    assertThrowOrder("TP2 2단계", "F6.java", ORDER_SUFFIX_THROW);
+    assertHarnessValid("TP2 2단계", 1, 1, fileNames(1, 5));
+    assertPhase("TP2 2단계", "COMPLETED");
+    assertHistoryRow("TP2 2단계", "COMPLETED", FILE_COUNT, 5, 0, 1);
+    assertColumnSum("TP2 2단계");
+    assertSessionProcessedFiles("TP2 2단계", FILE_COUNT);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TF — 시험 공백 메우기(R2·IX4). 고치기 전·후 모두 GREEN, 변이에서 RED
+  // ────────────────────────────────────────────────────────────────────────────
+
+  @Test
+  void TF1_재개_틈에_걸린_파일은_이전_실패_기록이_걷어내지지_않고_남는다() throws Exception {
+    beginPhase("최초 실행", fileNames(1, FILE_COUNT));
+    failAtLlmCall.set(2);                   // F2의 LLM 호출 1회 실패 → F2는 FAILED
+    pauseOnCall.set(3);                     // F3의 LLM 호출 중 사용자 일시정지
+    invokeRunAnalysis();
+
+    printObservation("TF1 1단계(최초 실행)");
+    assertHarnessValid("TF1 1단계", 0, 1, fileNames(1, 3));
+    assertLlmFailureInjected("TF1 1단계", 1, List.of("F2.java"));
+    assertPhase("TF1 1단계", "PAUSED");
+    assertPendingFileNames("TF1 1단계", List.of("F2.java", "F4.java", "F5.java", "F6.java"));
+    assertFailedFileNames("TF1 1단계", List.of("F2.java"));
+    assertHistoryRow("TF1 1단계", "PAUSED", FILE_COUNT, 2, 0, 1);
+
+    beginPhase("재개 1", List.of("F2.java", "F4.java", "F5.java", "F6.java"));
+    pauseAtLoopHead.set(1);                 // 첫 재개 파일(F2)의 루프 맨 앞 → 틈
+    joinResume("재개 1");
+
+    printObservation("TF1 2단계(재개 1)");
+    assertGapOrderInPhase("TF1 2단계", "재개 1", "F2.java");
+    assertHarnessValid("TF1 2단계", 1, 1, fileNames(1, 3));
+    assertLlmFailureInjected("TF1 2단계", 1, List.of("F2.java"));
+    assertPhase("TF1 2단계", "PAUSED");
+    assertPendingFileNames("TF1 2단계", List.of("F2.java", "F4.java", "F5.java", "F6.java"));
+    // 핵심 — 틈 블록이 "이전 실패 기록 걷어내기"보다 앞이라 F2의 실패 기록이 그대로 남는다(R2).
+    assertFailedFileNames("TF1 2단계", List.of("F2.java"));
+
+    beginPhase("재개 2", List.of("F2.java", "F4.java", "F5.java", "F6.java"));
+    joinResume("재개 2");
+
+    printObservation("TF1 3단계(재개 2)");
+    assertHarnessValid("TF1 3단계", 1, 1,
+        List.of("F1.java", "F2.java", "F3.java", "F2.java", "F4.java", "F5.java", "F6.java"));
+    assertPhase("TF1 3단계", "COMPLETED");
+    assertFailedFileNames("TF1 3단계", List.of());
+    assertHistoryRow("TF1 3단계", "COMPLETED", FILE_COUNT, FILE_COUNT, 0, 0);
+    assertColumnSum("TF1 3단계");
+  }
+
+  @Test
+  void TF2_최초실행_전량실패_일시정지는_실패목록에_여섯개가_전부_남는다() throws Exception {
+    beginPhase("최초 실행", fileNames(1, FILE_COUNT));
+    throwAtEveryLoopHead.set(true);         // 6개 전부 루프 맨 앞에서 표지 예외
+    invokeRunAnalysis();
+
+    printObservation("TF2 최초 실행");
+    assertThrowOrderAll("TF2", fileNames(1, FILE_COUNT), ORDER_SUFFIX_THROW);
+    assertHarnessValid("TF2", FILE_COUNT, 0, List.of());
+    assertPhase("TF2", "PAUSED");
+    assertPendingFileNames("TF2", fileNames(1, FILE_COUNT));
+    // 핵심 — 전량실패로 끝나는 경로에서도 실패 목록이 6개 전부다(IX4가 비우는 칸).
+    assertFailedFileNames("TF2", fileNames(1, FILE_COUNT));
+    assertHistoryRow("TF2", "PAUSED", FILE_COUNT, 0, 0, FILE_COUNT);
+    assertColumnSum("TF2");
+    // (O60) 전량 예외로 끝나도 세션 처리 수는 여섯 — 되돌림(0)·올리기 전 값 쓰기(5)와 갈린다.
+    assertSessionProcessedFiles("TF2", FILE_COUNT);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
   // 시험 전용 세션 — 부른 자리를 스택으로 가리고 지정한 자리에서만 개입한다
   // ────────────────────────────────────────────────────────────────────────────
 
@@ -780,6 +912,7 @@ class MainApiControllerInterruptedFileReanalysisTest {
     currentLoopFile.remove();
     llmCalls.set(0);
     pauseOnCall.set(0);
+    failAtLlmCall.set(0);
     pauseAtLoopHead.set(0);
     throwAtLoopHead.set(0);
     errorAtLoopHead.set(0);
@@ -957,6 +1090,56 @@ class MainApiControllerInterruptedFileReanalysisTest {
             + " LLM에 보낸 파일=" + llmCalledFiles + " | 순서 기록=" + callOrder);
   }
 
+  /**
+   * (TASK-001) 하네스 유효성 ① 의 <b>단계 한정판</b> — {@link #assertGapOrder}와 같은 세 기록을
+   * 보지만, 그 단계의 "단계 시작" 기록 이후만 본다. 새 도우미다(기존 도우미 본문은 건드리지 않는다).
+   *
+   * <p>왜 필요한가: {@link #assertGapOrder}는 "루프 맨 앞(Fk)=false"가 순서 기록 <b>전체</b>에서
+   * 정확히 1번일 것을 요구한다. TF1은 최초 실행에서 F2를 한 번 처리해 실패시키고(그때 F2의 루프 맨
+   * 앞이 =false) 재개 1에서 같은 F2를 틈에 걸리게 하므로(또 =false) 전체로 세면 2번이 된다 —
+   * 실측으로 확인했다. 단계 한정으로 보면 그 단계 안에서는 정확히 1번이다.
+   *
+   * <p>단계 구간은 {@code subList} 같은 잘라내기 없이 시작 자리부터 새 목록에 담아 만든다.
+   * 구간 시작 마커도 세 기록과 같이 {@code indexOfOnly}로 <b>정확히 1번</b>을 요구한다 — 같은
+   * 단계 이름이 두 번 나오면 의도와 다른 구간을 잡게 되므로, 구간 시작만 개수를 안 보는 것은
+   * 세 기록에 "1번"을 요구하는 것과 일관되지 않는다.
+   */
+  private void assertGapOrderInPhase(String label, String phaseLabel, String fileLabel) {
+    List<String> order = List.copyOf(callOrder);
+    String marker = "── 단계 시작: " + phaseLabel + " (";
+    int start = indexOfOnly(order, line -> line.startsWith(marker),
+        label + " (하네스 ①): \"" + phaseLabel + "\" 단계 시작 기록");
+    List<String> phaseOrder = new ArrayList<>();
+    for (int i = start; i < order.size(); i++) {
+      phaseOrder.add(order.get(i));
+    }
+    int head = indexOfOnly(phaseOrder,
+        line -> line.startsWith(SITE_LOOP_HEAD + "(" + fileLabel + ")") && line.endsWith("=false"),
+        label + " (하네스 ①, " + phaseLabel + " 단계): 루프 맨 앞(" + fileLabel + ")=false 기록");
+    int pause = indexOfOnly(phaseOrder,
+        line -> line.startsWith("일시정지 요청 성공(" + fileLabel + ")"),
+        label + " (하네스 ①, " + phaseLabel + " 단계): 일시정지 요청 성공(" + fileLabel + ") 기록");
+    int entry = indexOfOnly(phaseOrder,
+        line -> line.startsWith(SITE_ANALYZE_FILE_ENTRY + "(" + fileLabel + ")")
+            && line.endsWith("=true"),
+        label + " (하네스 ①, " + phaseLabel + " 단계): analyzeFile 입구(" + fileLabel + ")=true 기록");
+    assertTrue(head < pause && pause < entry, label + " (하네스 ①, " + phaseLabel + " 단계): 세 기록이 "
+        + "루프 맨 앞=false → 일시정지 요청 성공 → analyzeFile 입구=true 순서가 아니다"
+        + " (자리 " + head + "·" + pause + "·" + entry + "). 단계 구간 기록=" + phaseOrder);
+  }
+
+  /**
+   * (TASK-001) 하네스 유효성 ⑤ — 지정한 "LLM 호출 1회 실패"가 실제로 그 파일에서만 일어났다.
+   * 새 도우미다(기존 도우미 본문은 건드리지 않는다).
+   */
+  private void assertLlmFailureInjected(String label, int expectedCount,
+      List<String> expectedFiles) {
+    assertEquals(expectedCount, llmInjectedFailures.get(),
+        label + " (하네스 ⑤): 지정한 LLM 실패 개입 수(누적). 순서 기록=" + callOrder);
+    assertEquals(expectedFiles, List.copyOf(llmFailedFiles),
+        label + " (하네스 ⑤): LLM 실패를 준 파일과 그 순서(누적). 순서 기록=" + callOrder);
+  }
+
   // ────────────────────────────────────────────────────────────────────────────
   // 결과 단언 — 종료 phase · 대기 목록 · 이력 행(+ 칸 합)
   // ────────────────────────────────────────────────────────────────────────────
@@ -986,6 +1169,20 @@ class MainApiControllerInterruptedFileReanalysisTest {
     assertEquals(expectedFailure, last.failure(), label + " (결과): 이력 실패 수. 이력=" + last);
     assertEquals(expectedTotal, last.total(), label + " (결과): 이력 총계. 기대 " + expectedTotal
         + " / 실제 " + last.total() + " (세션 총계=" + session.getTotalFiles() + ", 이력=" + last + ")");
+  }
+
+  /**
+   * (TASK-001, O60) 세션 처리 수 — 진행 화면의 "처리 n/N"과 재개 시작값, README 구조 요약이
+   * 함께 읽는 값이다. 예외로 끝난 파일을 두 {@code catch}가 세션에 기록하지 않으면 여기서 RED다.
+   * 새 도우미다(기존 도우미 본문은 건드리지 않는다).
+   */
+  private void assertSessionProcessedFiles(String label, int expected) {
+    assertEquals(expected, session.getProcessedFiles(),
+        label + " (결과): 세션 처리 수. 기대 " + expected + " / 실제 " + session.getProcessedFiles()
+            + " (세션 총계=" + session.getTotalFiles()
+            + ", 성공=" + session.getStatistics().getSuccessCount()
+            + ", 건너뜀=" + session.getStatistics().getSkipCount()
+            + ", 실패=" + session.getStatistics().getFailureCount() + ")");
   }
 
   /** 마지막 행의 칸 합(O59) — 총계 == 성공 + 건너뜀 + 실패. */

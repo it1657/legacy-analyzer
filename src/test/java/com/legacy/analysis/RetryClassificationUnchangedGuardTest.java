@@ -97,11 +97,11 @@ class RetryClassificationUnchangedGuardTest {
   private static final Map<String, String> FILE_TARGETS = new LinkedHashMap<>();
 
   static {
-    // 기대값 출처 — 2026-10-interrupted-file-reanalysis TASK-005: 틈에 걸린 파일(TASK-002)과 예외로
-    // 끝난 파일의 실패 집계(TASK-003)로 MainApiController.java가 바뀌어 TASK-003 커밋 63e4103 기준으로
-    // 갱신했다. 계산법은 종전과 같다(작업 트리 사본을 LF 정규화한 뒤 git hash-object). 명령 원문은 05-dev-progress.md 3281~3282행.
+    // 기대값 출처 — 2026-10-resume-tail-fixes TASK-005: 두 루프에서 예외로 끝난 파일의 처리 수 한 줄을
+    // 교체한 TASK-003으로 MainApiController.java가 바뀌어 TASK-003 커밋 69d7af5 기준으로 갱신했다.
+    // 계산법은 종전과 같다(작업 트리 사본을 LF 정규화한 뒤 git hash-object). 명령 원문은 05-dev-progress.md 3937행.
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/MainApiController.java",
-        "39c6c28921637fd5bb1dccf6befb5a2a2c52ff75");
+        "d5b726a06d8eca001ee509638878977b1cd3d3c6");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/SessionState.java",
         "d73eaeca4b1b951c5aa4931dafa95b46293ddc6e");
     FILE_TARGETS.put("src/main/java/com/legacy/analysis/AnalysisException.java",

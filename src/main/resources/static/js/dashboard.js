@@ -2403,6 +2403,8 @@ function resumeAnalysis() {
   .then(r => r.json())
   .then(data => {
     if (data.success) {
+      // (O62) 같은 화면에서 일시정지한 업로드 분석을 이어서 끝내면 결과를 폴더에 돌려쓰도록 업로드 표시를 되살린다.
+      if (uploadSessionIdForWriteback && uploadSessionIdForWriteback === currentSessionId) isUploadModeSession = true;
       isPausedLocally = false;
       const logConsole = document.getElementById('terminalLog');
       const div = document.createElement('div');
